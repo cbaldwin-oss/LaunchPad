@@ -1,0 +1,1821 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=1300">
+    <title>Asset Tamper Seal Log</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='48' fill='%23d32f2f'/%3E%3Crect x='20' y='40' width='60' height='20' rx='10' fill='white' transform='rotate(-45 50 50)'/%3E%3Ccircle cx='35' cy='50' r='2' fill='%23d32f2f' transform='rotate(-45 50 50)'/%3E%3Ccircle cx='45' cy='50' r='2' fill='%23d32f2f' transform='rotate(-45 50 50)'/%3E%3Ccircle cx='55' cy='50' r='2' fill='%23d32f2f' transform='rotate(-45 50 50)'/%3E%3Ccircle cx='65' cy='50' r='2' fill='%23d32f2f' transform='rotate(-45 50 50)'/%3E%3C/svg%3E">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js"></script>
+    <style>
+        /* MATCHING LAUNCHPAD STYLING */
+        body { 
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    min-width: 1300px; 
+    margin: 0;
+    padding: 0;
+    background-color: #f8f9fa; /* Restores a light background color */
+}
+        /* Styling for all cells except the Status column */
+.cell-row textarea {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; /* You can change the typeface here */
+    font-size: 14px;      /* Adjust the size as needed */
+    font-weight: 500;      /* Options: 400 (Normal), 600 (Semi-bold), 700 (Bold) */
+    color: #333333;       /* Standard text color */
+}
+
+/* Ensure centering is preserved while changing fonts */
+.cell-row textarea {
+    text-align: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1.5;     /* Helps keep text vertically balanced */
+}
+
+        .header {
+            height: 48px; background-color: #ffffff; border-bottom: 1px solid #dcdcdc;
+            display: flex; align-items: center; padding: 0 30px; box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+        }
+        .header-center { flex: 1; text-align: center; }
+        .header-center span { color: #d32f2f; font-weight: 800; font-size: 30px; letter-spacing: -1px; }
+
+       .subheader {
+    position: sticky; 
+    top: 0; 
+    z-index: 1000; 
+    background-color: #f1f3f4; /* Standard Grey */
+    height: 50px; 
+    display: flex; 
+    align-items: center; 
+    padding: 0 30px;
+    border-bottom: 1px solid #dcdcdc; 
+    justify-content: space-between;
+    width: 100%; /* Changed from 1300px to 100% */
+    min-width: 1300px; /* Ensures buttons don't move closer on iPad */
+    box-sizing: border-box;
+}
+
+        .tool-btn {
+            padding: 6px 12px; font-size: 13px; border: 1px solid #d32f2f;
+            background: white; color: #d32f2f; cursor: pointer; border-radius: 4px; font-weight: bold;
+        }
+
+.frozen-bar {
+    position: sticky; 
+    top: 50px; 
+    z-index: 999;
+    background-color: #de4343; /* Bright Red */
+    color: white;
+}
+
+        .frozen-grid { display: flex; width: 100%; align-items: center; gap: 5px; }
+        .header-cell { flex: 1; text-align: center; font-size: 11px; font-weight: bold; text-transform: uppercase; }
+
+        /* ASSET ACCORDION STYLES */
+        .asset-container { margin: 20px auto; width: 95%; border: 2px solid #d6445a; border-radius: 8px; background: #ffffff; overflow: hidden; }
+        .asset-header { 
+            background-color: #dee6de; color: rgb(0, 0, 0); padding: 15px 25px; 
+            cursor: pointer; display: flex; justify-content: space-between; font-weight: bold; font-size: 22px; 
+        }
+        
+        .rows-container { padding: 10px 20px; display: block; }
+        .rows-container.hidden { display: none; }
+
+        /* Consolidated Cell Input Styles */
+.cell-row select, 
+.cell-row textarea, 
+.status-cell {
+    flex: 1; 
+    border: none !important; 
+    border-right: 1px solid #ccc !important;
+    background-color: #f9f9f9; 
+    padding: 12px 8px;    /* Increased vertical padding to assist vertical centering */
+    font-size: 13px; 
+    min-height: 40px; 
+    resize: none;
+    text-align: center;   /* Horizontally centers text */
+    display: flex;        /* Enables flex centering for select and status-cell */
+    align-items: center;  /* Vertically centers text in select/status-cell */
+    justify-content: center; 
+    line-height: 1.4;     /* Centers text line in textareas */
+}
+
+/* Ensure the delete button stays aligned */
+.delete-btn {
+    flex: 0 0 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Fix for standard select centering */
+.cell-row select {
+    text-align-last: center; 
+    appearance: none; /* Removes default arrows for a cleaner centered look */
+}
+
+        /* GRID ROW STYLES */
+        /* Updated Row Styles */
+.cell-row {
+    display: flex; 
+    align-items: center; /* Centers elements vertically relative to each other in the row */
+    border-bottom: 2px solid #b0bec5; 
+    gap: 4px; 
+    background-color: #fff;
+    min-height: 50px;    /* Ensuring a comfortable row height */
+}
+
+        /* COLOR LOGIC */
+        .bg-green { background-color: #c8e6c9 !important; color: #1b5e20 !important; }
+        .bg-red { background-color: #ffcdd2 !important; color: #b71c1c !important; }
+        .bg-yellow { background-color: #fff9c4 !important; color: #f57f17 !important; }
+
+        #saveIndicator { font-size: 13px; font-weight: bold; color: #1b5e20; margin-right: 15px; }
+
+        /* Updated Header Layout */
+.header-left {
+    flex: 1; /* Takes up available space on the left */
+    display: flex;
+    align-items: center;
+}
+
+/* Red Rectangle Title Style */
+.seal-log-header {
+    border: 3px solid #d32f2f; /* Red rectangle */
+    background-color: #d6445a;     /* Light red fill color */
+    border-radius: 10px;        /* Smooth/rounded edges */
+    padding: 5px 20px;
+    color: #000000;             /* Black letters */
+    font-weight: 800;
+    font-size: 34px;
+    letter-spacing: -1px;
+    display: inline-block;
+    text-transform: uppercase;
+}
+
+/* Remove or hide header-center as it's no longer used */
+.header-center {
+    display: none;
+}
+/* Styling for the Asset | Location text in the green bar */
+.asset-header span:first-child {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-right: 15px;
+    flex: 1;
+}
+/* Row Color Logic */
+.row-intact {
+    background-color: #c8e6c9 !important; /* Green */
+}
+.row-intact textarea, .row-intact select {
+    background-color: #c8e6c9 !important;
+    color: #000000 !important;
+}
+
+.row-broken {
+    background-color: #ffcdd2 !important; /* Red */
+}
+.row-broken textarea, .row-broken select {
+    background-color: #ffcdd2 !important;
+    color: #000000 !important;
+}
+
+.row-removed {
+    background-color: #f5f5f5 !important; /* Grey */
+    text-decoration: line-through;
+    color: #757575 !important;
+}
+.row-removed textarea, .row-removed select {
+    background-color: #f5f5f5 !important;
+    color: #000000 !important;
+    text-decoration: line-through;
+}
+.status-dropdown {
+    font-size: 13px !important;    /* Increase font size */
+    font-weight:  bold !important;   /* Make the text extra bold */
+    text-align: center;
+    text-align-last: center; /* Required for centering text in select boxes */
+    padding: 10px 0;         /* Adjust padding to help with vertical balance */
+    height: 100%;            /* Ensure it fills the centered row */
+}
+
+/* Update main containers from 95% to a fixed 1240px (centered) */
+.frozen-bar, 
+.area-container, 
+.asset-container {
+    width: 95% !important; /* Restores the full-screen desktop look */
+    min-width: 1240px !important; /* Prevents squishing on iPad */
+    margin: 20px auto; 
+    box-sizing: border-box;
+}
+
+/* AREA ACCORDION STYLES */
+.area-container { 
+    margin: 20px auto; 
+    width: 95%; 
+    border: 2px solid #333; 
+    border-radius: 8px; 
+    background: #f1f3f4; 
+    overflow: hidden; 
+}
+
+.area-header { 
+    background-color: #333; 
+    color: white; 
+    padding: 15px 25px; 
+    cursor: pointer; 
+    display: flex; 
+    justify-content: space-between; 
+    font-weight: bold; 
+    font-size: 24px; 
+}
+
+.area-content { 
+    padding: 10px; 
+}
+
+.area-content.hidden { 
+    display: none; 
+}
+
+/* Ensure Asset headers look like sub-items */
+.asset-container { 
+    margin: 10px auto; 
+    width: 98%; 
+    border: 1px solid #d6445a; 
+}
+
+.asset-header { 
+    font-size: 18px; 
+    padding: 10px 20px; 
+}
+
+/* The two filter groups (Locations, Statuses) now fill the header
+   horizontally instead of stacking on the right — there's no logo/title
+   competing for space anymore, so the header can be much shorter. */
+.header-right {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;        /* wrap onto a second line on narrow screens instead of overflowing */
+    gap: 24px;               /* breathing room between the Locations and Statuses groups */
+    align-items: center;
+    justify-content: flex-start;
+    height: 100%;
+    width: 100%;             /* fill the header's full width now that the logo/title are gone */
+}
+
+.filter-group {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.filter-label {
+    font-size: 10px;
+    font-weight: bold;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+/* Compact pill buttons — sized to sit comfortably in the shorter, single-row header */
+.filter-btn {
+    padding: 3px 10px;
+    font-size: 11px;
+    border: 1px solid #ccc;
+    background: white;
+    border-radius: 12px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+}
+
+.filter-btn:hover {
+    background: #f5f5f5;
+}
+
+.filter-btn.active {
+    background: #d32f2f;
+    color: white;
+    border-color: #d32f2f;
+    font-weight: bold;
+}
+
+/* Location-specific active color */
+.filter-btn.active.loc-filter {
+    background: #333;
+    border-color: #333;
+}
+
+/* Export Modal Styles */
+.modal-overlay {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.5); display: none; align-items: center; justify-content: center;
+    z-index: 2000;
+}
+.modal-content {
+    background: white; padding: 25px; border-radius: 8px; text-align: center;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.2); width: 320px;
+}
+.modal-content h3 { margin-top: 0; color: #333; font-size: 20px; }
+.modal-btns { display: flex; gap: 10px; justify-content: center; margin-top: 20px; }
+
+/* Search Bar Styling */
+.search-container {
+    flex-shrink: 0;
+    width: 320px !important;
+    background: white;
+}
+
+.search-container input {
+    border: none;
+    outline: none;
+    padding: 6px;
+    font-size: 13px;
+    width: 100%;
+}
+
+.search-container i {
+    color: #888;
+    font-size: 14px;
+}
+/* Search Bar & Navigation Layout */
+.subheader div:first-child {
+    display: flex;
+    align-items: center;
+    gap: 10px; /* Space between buttons and search bar */
+}
+
+.search-container {
+    display: flex;
+    align-items: center;
+    background: white;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    padding: 0 8px;
+    width: 320px; /* Increased for buttons */
+}
+
+.search-nav-btns {
+    display: flex;
+    gap: 2px;
+    border-left: 1px solid #eee;
+    padding-left: 5px;
+    margin-left: 5px;
+}
+
+.search-nav-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 14px;
+    color: #d32f2f;
+    padding: 4px;
+    display: flex;
+    align-items: center;
+}
+
+.search-nav-btn:disabled {
+    color: #ccc;
+}
+
+.match-counter {
+    font-size: 11px;
+    color: #666;
+    margin-right: 5px;
+    white-space: nowrap;
+}
+
+/* Instance Highlighting */
+.highlight-match {
+    outline: 3px solid #ffeb3b !important;
+    background-color: #fffde7 !important;
+    scroll-margin-top: 150px; /* Ensures row isn't hidden under header when scrolling */
+}
+
+/* --- CONSOLIDATED EDIT MODE SELECTORS --- */
+
+/* 1. Force Checkboxes and Header Spacers to show (40px wide) */
+.edit-checkbox-cell, 
+.edit-header-cell { 
+    flex: 0 0 40px !important; 
+    display: none !important; /* Hidden by default */
+    justify-content: center; 
+    align-items: center; 
+    border-right: 1px solid #ccc;
+    box-sizing: border-box;
+}
+
+/* When the body has the 'is-editing' class, show these elements */
+body.is-editing .edit-checkbox-cell { 
+    display: flex !important; 
+}
+
+body.is-editing .edit-header-cell { 
+    display: block !important; 
+}
+
+/* 2. Asset & Location Columns (Show only during Edit or Preview) */
+.edit-only-cell,
+.edit-only-header { 
+    display: none !important; 
+}
+
+body.is-editing .edit-only-cell,
+body.is-editing .edit-only-header { 
+    display: flex !important; 
+    flex: 1;
+}
+
+/* 3. Visual feedback for fields you are currently editing */
+body.is-editing .cell-row textarea, 
+body.is-editing .cell-row select {
+    background-color: #ffffff !important;
+    border: 1px solid #d32f2f !important;
+    cursor: text;
+}
+
+/* Cleaned & Consolidated Bulk Add Styling */
+#addModal .modal-content {
+    width: 1000px !important; 
+    margin: auto; /* Centers in the fixed viewport */
+    background-color: white; 
+    border: 3px solid #d32f2f;
+    border-radius: 12px;
+}
+
+/* Only apply 'appearance: none' to text inputs and selects, NOT checkboxes */
+input:not([type="checkbox"]), textarea, select {
+    -webkit-appearance: none;
+    border-radius: 4px;
+    font-size: 14px;
+}
+
+/* Ensure the checkbox itself is sized correctly */
+.row-selector {
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+    -webkit-appearance: checkbox !important; /* Forces checkbox style back */
+}
+
+#addModal h3 {
+    margin: 0;
+    padding: 25px 50px; 
+    border-bottom: 1px solid #dcdcdc;
+    font-size: 24px;
+    color: #d32f2f;
+    text-align: left;
+}
+
+.bulk-add-grid {
+    display: grid;
+    grid-template-columns: 1fr 1.5fr; 
+    gap: 25px;
+    padding: 30px 50px; 
+}
+
+.bulk-add-grid div {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start; /* Standardizes left alignment for all labels/inputs */
+    width: 100%;
+}
+
+.bulk-add-grid label {
+    font-size: 12px;
+    font-weight: bold;
+    color: #dc1313;
+    display: block;
+    margin-bottom: 8px; /* Consistent gap for EVERY entry */
+    text-transform: uppercase;
+    text-align: left; /* Explicitly prevents centering */
+}
+
+.bulk-add-grid input {
+    width: 100%;
+    height: 55px; 
+    padding: 15px;
+    font-size: 15px;
+    border: 2px solid #ccc;
+    border-radius: 6px;
+    box-sizing: border-box;
+}
+
+#addModal .modal-btns {
+    padding: 20px 50px;
+    border-top: 1px solid #dcdcdc;
+    display: flex;
+    flex-direction: row;
+    gap: 10px;
+    align-items: flex-end;
+}
+
+#addModal .modal-btns .tool-btn {
+    width: 200px;
+    text-align: center;
+}
+/* Update your existing .bulk-add-grid input selector or add this */
+.bulk-add-grid input[type="file"] {
+    height: auto;
+    border: 2px dashed #ccc; /* Visual cue for upload area */
+    background: #fafafa;
+    cursor: pointer;
+}
+/* Updated Header Left to include a gap between the image and the title */
+.header-left {
+    flex: 1; 
+    display: flex;
+    align-items: center;
+    gap: 20px; /* Adds space between the logo and the red title box */
+}
+
+/* New style to ensure the logo fits nicely inside the header */
+.header-logo {
+    max-height: 80px; /* Keeps the image from stretching the 80px header */
+    width: auto;      /* Maintains the image's aspect ratio */
+    object-fit: contain;
+}
+    </style>
+</head>
+<body>
+    <datalist id="asset-list"></datalist>
+<datalist id="location-list"></datalist>
+
+<div class="subheader">
+    <div style="display: flex; align-items: center;">
+        <button class="tool-btn" onclick="expandAllZones()">Expand All Zones</button>
+        <button class="tool-btn" onclick="expandAll()">Expand All Assets</button>
+        <button class="tool-btn" style="border-color:#1b5e20; color:#1b5e20;" onclick="collapseAll()">Collapse All</button>
+
+        <div class="search-container">
+            <input type="text" id="searchInput" placeholder="Search entries..." oninput="handleSearch(this.value)">
+            <span id="matchCounter" class="match-counter">0/0</span>
+            <div class="search-nav-btns">
+                <button class="search-nav-btn" onclick="prevMatch()" title="Previous Instance">▲</button>
+                <button class="search-nav-btn" onclick="nextMatch()" title="Next Instance">▼</button>
+            </div>
+        </div>
+    </div>
+
+    <div>
+    <button class="tool-btn" style="background-color: #ffffff; color: rgb(0, 0, 0); border-color: #1b5e20; margin-right: 10px;" onclick="fetchHierarchyData(true)">Refresh</button>
+    <button id="duplicateBtn" class="tool-btn" style="background-color: #ffffff; color: #d32f2f; border-color: #d32f2f; margin-right: 10px;" onclick="findDuplicates()">Find Duplicates</button>
+    <button id="addBtn" class="tool-btn" style="background-color: #1b5e20; color: white; border-color: #1b5e20; margin-right: 10px;" onclick="showAddModal()">+ Add Seals</button>
+    <button id="editBtn" class="tool-btn" onclick="toggleEditMode()" style="margin-right: 10px;">Edit</button>
+    
+    <button id="cancelBtn" class="tool-btn" style="display:none; border-color:#757575; color:#757575; margin-right: 10px;" onclick="cancelEditMode()">Cancel Changes</button>
+    
+    <button id="deleteBtn" class="tool-btn" style="display:none; border-color:#d32f2f; color:#d32f2f; margin-right:10px;" onclick="deleteSelected()">Delete Selected</button>
+    <button id="exportBtn" class="tool-btn" onclick="showExportOptions()">Export</button>
+    <span id="saveIndicator">Synced</span>
+</div>
+</div>
+
+<div class="header">
+    <div class="header-right" id="filter-container"></div>
+</div>
+
+<div id="addModal" class="modal-overlay">
+    <div class="modal-content" style="max-width: 800px;">
+        <h3 id="modalTitle">Add Tamper Seals</h3>
+        
+        <div id="step-choice" style="padding: 40px; text-align: center;">
+            <p style="font-size: 18px; margin-bottom: 30px;">Is this a Reinspection of broken seals?</p>
+            <div style="display: flex; gap: 20px; justify-content: center;">
+                <button class="tool-btn" style="padding: 15px 40px; font-size: 16px; background: #d24d4d; color: white;" onclick="goToStep('reinspection')">Yes (Reinspection)</button>
+                <button class="tool-btn" style="padding: 15px 40px; font-size: 16px; background: #56cb35; color: white;" onclick="goToStep('standard')">No (New Batch)</button>
+                <button class="tool-btn" style="padding: 15px 40px; font-size: 16px; border-color:#757575; color:#757575;" onclick="closeAddModal()">Cancel</button>
+            </div>
+        </div>
+
+        <div id="step-standard" style="display: none;">
+            <div class="bulk-add-grid">
+                <div><label>First Seal #</label><input type="number" id="startSeal" placeholder="e.g. 1001"></div>
+                <div><label>Last Seal #</label><input type="number" id="endSeal" placeholder="e.g. 1010"></div>
+                <div><label>Omitted Numbers</label><input type="text" id="omittedSeals" placeholder="e.g. 1003, 1007"></div>
+                <div><label>Location / Area</label><input type="text" id="newLocation" list="location-list"></div>
+                <div><label>Asset Name</label><input type="text" id="newAsset" list="asset-list"></div>
+                <div><label>Sub Area</label><input type="text" id="newSubArea"></div>
+                <div><label>Inspection Date</label><input type="date" id="newDate"></div>
+                <div><label>Signoff (Email)</label><input type="text" id="newSignoff"></div>
+                <div style="grid-column: span 2;"><label>Inspection Notes</label><input type="text" id="newNotes"></div>
+            </div>
+            <div class="modal-btns">
+                <button class="tool-btn" style="background: #1b5e20; color: white;" onclick="generatePreview()">Generate Preview</button>
+                <button class="tool-btn" onclick="showAddModal()">Back</button>
+            </div>
+        </div>
+
+        <div id="step-reinspection" style="display: none; padding: 20px 50px;">
+    <div style="margin-bottom: 20px;">
+        <label style="color:#d32f2f; font-weight:bold; font-size:12px; text-transform:uppercase;">Select Asset with Broken Seals</label>
+        <select id="brokenAssetSelect" style="width:100%; height:45px; margin-top:5px;" onchange="loadBrokenSealsForAsset(this.value)">
+            <option value="">Loading assets...</option>
+        </select>
+    </div>
+    <div id="brokenSealsContainer" style="margin-bottom: 20px; max-height: 200px; overflow-y: auto; border: 1px solid #ccc; padding: 10px; display:none;">
+        <label style="font-weight:bold; margin-bottom:10px; display:block;">Select Seals to Replace:</label>
+        <div id="sealCheckboxList"></div>
+    </div>
+    
+    <div class="modal-btns" style="padding: 20px 0;">
+        <button id="reinspectNextBtn" class="tool-btn" style="background: #1b5e20; color: white; display:none;" onclick="proceedToStandardForm()">Next</button>
+        <button class="tool-btn" onclick="showAddModal()">Back</button>
+    </div>
+</div>
+    </div>
+</div>
+
+<div id="exportModal" class="modal-overlay">
+    <div class="modal-content">
+        <h3>Export Log</h3>
+        <p>Select your preferred format:</p>
+        <div class="modal-btns">
+            <button class="tool-btn" onclick="runExport('csv')">CSV (Excel)</button>
+            <button class="tool-btn" style="border-color:#1976d2; color:#1976d2;" onclick="runExport('pdf')">PDF Report</button>
+            <button class="tool-btn" style="border-color:#757575; color:#757575;" onclick="closeExportModal()">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<div class="frozen-bar">
+    <div class="frozen-grid">
+        <div class="edit-header-cell"></div>
+        <div class="edit-only-header">Asset Name</div>
+        <span class="sep edit-only-cell">|</span>
+        <div class="edit-only-header">Location</div>
+        <span class="sep edit-only-cell">|</span>
+        <div class="header-cell">Sub Area</div>
+        <span class="sep">|</span>
+        <div class="header-cell">Seal #</div>
+        <span class="sep">|</span>
+        <div class="header-cell">Inspection Date</div>
+        <span class="sep">|</span>
+        <div class="header-cell">Signoff</div>
+        <span class="sep">|</span>
+        <div class="header-cell">Inspection Notes</div>
+        <span class="sep">|</span>
+        <div class="header-cell">Status</div>
+        <span class="sep">|</span>
+        <div class="header-cell">Break Date</div>
+        <span class="sep">|</span>
+        <div class="header-cell">Responsible Party</div>
+        <span class="sep">|</span>
+        <div class="header-cell">Break Reason</div>
+        <div class="spacer"></div>
+    </div>
+</div>
+
+<div id="main-content-area">
+    </div>
+
+<script>
+// 1. Corrected URL (removed /rest/v1/)
+const SUPABASE_URL = 'https://jrhrmntpfxoarulcnbqz.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpyaHJtbnRwZnhvYXJ1bGNuYnF6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg1OTAyNDUsImV4cCI6MjA5NDE2NjI0NX0.Gbru98OZX5n3gfiRHyQFl-UzzC2SJ9Gi0gjb_HD__SE';
+
+const { createClient } = supabase;
+const _supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+let allHierarchyRecords = [];
+let localEdits = {}; // NEW: Stores unsaved changes by ID
+let lookupData = { assets: [], locations: [] };
+// Change to Sets to track multiple active values
+let activeFilters = { 
+    locations: new Set(['All']), 
+    statuses: new Set(['All']),
+    search: '' 
+};
+
+let tokenClient;
+let gapiInited = false;
+let gisInited = false;
+let accessToken = null;
+
+let isPreviewMode = false; 
+
+// Update initApp (around line 420)
+async function initApp() {
+    await fetchLookupData();
+    
+    // Check if there is a saved preview to restore
+    const savedPreview = localStorage.getItem('pendingPreview');
+    if (savedPreview) {
+        isPreviewMode = true;
+        const entries = JSON.parse(savedPreview);
+        renderPreviewGrid(entries);
+    } else {
+        await fetchHierarchyData();
+    }
+
+    // Update the Realtime listener (around line 433)
+    _supabase
+    .channel('schema-db-changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'STY4Assets' }, (payload) => {
+        if (isEditMode || isPreviewMode) return;
+
+        if (payload.eventType === 'INSERT') {
+            allHierarchyRecords.push(payload.new);
+        } else if (payload.eventType === 'UPDATE') {
+            allHierarchyRecords = allHierarchyRecords.map(r => r.id === payload.new.id ? payload.new : r);
+        } else if (payload.eventType === 'DELETE') {
+            allHierarchyRecords = allHierarchyRecords.filter(r => r.id !== payload.old.id);
+        }
+        
+        // Re-render the visual layout locally WITHOUT calling the database again
+        renderFilteredLog();
+    })
+    .subscribe();
+}
+
+async function goToStep(step) {
+    document.getElementById('step-choice').style.display = 'none';
+    if (step === 'standard') {
+        document.getElementById('step-standard').style.display = 'block';
+    } else {
+        document.getElementById('step-reinspection').style.display = 'block';
+        document.getElementById('modalTitle').innerText = "Reinspection: Replace Broken Seals";
+        await loadBrokenAssets();
+    }
+}
+
+// Add this near your other global variables
+let duplicateSealList = null;
+
+/**
+ * Identifies seal numbers appearing in more than one record,
+ * then filters and expands the UI to show only those duplicates.
+ */
+async function findDuplicates() {
+    const btn = document.getElementById('duplicateBtn');
+    const indicator = document.getElementById('saveIndicator');
+
+    // Toggle off if already active
+    if (duplicateSealList) {
+        duplicateSealList = null;
+        btn.innerText = "Find Duplicates";
+        btn.style.backgroundColor = "white";
+        btn.style.color = "#d32f2f";
+        await fetchHierarchyData(true);
+        return;
+    }
+
+    indicator.innerText = "Scanning for duplicates...";
+
+    // 1. Group records by seal number
+    const counts = {};
+    allHierarchyRecords.forEach(r => {
+        const num = (r.seal_number || "").toString().trim();
+        if (num) {
+            counts[num] = (counts[num] || 0) + 1;
+        }
+    });
+
+    // 2. Identify numbers with more than 1 instance
+    duplicateSealList = Object.keys(counts).filter(num => counts[num] > 1);
+
+    if (duplicateSealList.length === 0) {
+        alert("No duplicate seal numbers found.");
+        duplicateSealList = null;
+        indicator.innerText = "Synced";
+        return;
+    }
+
+    // 3. Update UI state
+    btn.innerText = "Clear Duplicate View";
+    btn.style.backgroundColor = "#d32f2f";
+    btn.style.color = "white";
+
+    // 4. Re-render the log and auto-expand everything found
+    await renderFilteredLog();
+    await expandAll();
+    
+    indicator.innerText = `Found ${duplicateSealList.length} duplicates`;
+}
+
+/**
+ * Part 2 (Step A): Pull assets that currently have broken seals
+ */
+async function loadBrokenAssets() {
+    const select = document.getElementById('brokenAssetSelect');
+    const { data, error } = await _supabase
+        .from('STY4Assets')
+        .select('asset_name')
+        .ilike('status', '%broken%'); // Matches 'Broken' case-insensitive
+
+    if (error) return;
+
+    const uniqueAssets = [...new Set(data.map(d => d.asset_name))].sort();
+    select.innerHTML = '<option value="">-- Select Asset --</option>' + 
+        uniqueAssets.map(a => `<option value="${a}">${a}</option>`).join('');
+}
+
+/**
+ * Part 2 (Step B): Show seals that are broken for the chosen asset
+ */
+async function loadBrokenSealsForAsset(assetName) {
+    if (!assetName) return;
+    const container = document.getElementById('brokenSealsContainer');
+    const list = document.getElementById('sealCheckboxList');
+    
+    const { data, error } = await _supabase
+        .from('STY4Assets')
+        .select('id, seal_number, location, sub_area')
+        .eq('asset_name', assetName)
+        .ilike('status', '%broken%');
+
+    if (error || data.length === 0) {
+        container.style.display = 'none';
+        return;
+    }
+
+    container.style.display = 'block';
+    document.getElementById('newSealInputs').style.display = 'block';
+    document.getElementById('reinspectPreviewBtn').style.display = 'inline-block';
+    
+    // Store metadata on the select to use later
+    document.getElementById('brokenAssetSelect').dataset.location = data[0].location || '';
+    document.getElementById('brokenAssetSelect').dataset.subarea = data[0].sub_area || '';
+
+    list.innerHTML = data.map(s => `
+        <div style="margin-bottom:5px;">
+            <input type="checkbox" class="reinspect-seal-check" value="${s.id}" data-old-seal="${s.seal_number}">
+            <label>Seal #${s.seal_number}</label>
+        </div>
+    `).join('');
+}
+
+/**
+ * Part 2 (Step C): Generate preview for the replacement seals
+ */
+function generateReinspectionPreview() {
+    const assetName = document.getElementById('brokenAssetSelect').value;
+    const loc = document.getElementById('brokenAssetSelect').dataset.location;
+    const sub = document.getElementById('brokenAssetSelect').dataset.subarea;
+    const checked = document.querySelectorAll('.reinspect-seal-check:checked');
+    const startNum = parseInt(document.getElementById('reinspectStartSeal').value);
+
+    if (checked.length === 0 || isNaN(startNum)) {
+        alert("Select at least one broken seal and enter a starting new seal number.");
+        return;
+    }
+
+    const previewEntries = Array.from(checked).map((cb, index) => ({
+        asset_name: assetName,
+        location: loc,
+        sub_area: sub,
+        seal_number: (startNum + index).toString(),
+        inspection_date: document.getElementById('reinspectDate').value,
+        signoff: document.getElementById('reinspectSignoff').value,
+        status: 'Intact',
+        inspection_notes: `Reinspection replacement for Seal #${cb.dataset.old_seal}`
+    }));
+
+    closeAddModal();
+    renderPreviewGrid(previewEntries);
+}
+
+async function fetchLookupData() {
+    // Replace 'STY4AssetRegistry' with your actual reference table name
+    const { data, error } = await _supabase.from('STY4AssetRegistry').select('asset_name, location');
+    
+    if (error) {
+        console.error("Error fetching lookups:", error);
+        return;
+    }
+
+    // Filter unique values
+    lookupData.assets = [...new Set(data.map(item => item.asset_name))].sort();
+    lookupData.locations = [...new Set(data.map(item => item.location))].sort();
+
+    // Populate HTML Datalists
+    document.getElementById('asset-list').innerHTML = lookupData.assets.map(a => `<option value="${a}">`).join('');
+    document.getElementById('location-list').innerHTML = lookupData.locations.map(l => `<option value="${l}">`).join('');
+}
+
+async function toggleEditMode() {
+    const editBtn = document.getElementById('editBtn');
+    const deleteBtn = document.getElementById('deleteBtn');
+    const addBtn = document.getElementById('addBtn');
+    const exportBtn = document.getElementById('exportBtn');
+    const cancelBtn = document.getElementById('cancelBtn');
+    const indicator = document.getElementById('saveIndicator');
+
+    if (!isEditMode) {
+        // ENTER EDIT MODE
+        isEditMode = true;
+        document.body.classList.add('is-editing');
+        editBtn.innerText = "Save Changes";
+        editBtn.style.backgroundColor = "#d32f2f";
+        editBtn.style.color = "white";
+        
+        // UI Visibility
+        deleteBtn.style.display = "inline-block";
+        cancelBtn.style.display = "inline-block";
+        addBtn.style.display = "none";
+        exportBtn.style.display = "none";
+        
+        indicator.innerText = "Editing...";
+        document.querySelectorAll('.cell-row input').forEach(i => i.readOnly = false);
+        document.querySelectorAll('.cell-row textarea').forEach(t => t.readOnly = false);
+        document.querySelectorAll('.cell-row select').forEach(s => s.disabled = false);
+    } else {
+        // SAVE AND EXIT
+        indicator.innerText = "Saving...";
+        await saveAllChanges();
+        exitEditUI();
+    }
+}
+
+async function cancelEditMode() {
+    if (!confirm("Discard all unsaved changes?")) return;
+    
+    // Set isEditMode to false immediately so the refresh renders in read-only mode
+    isEditMode = false;
+    document.getElementById('saveIndicator').innerText = "Reverting...";
+    
+    // Refresh with the silent flag to keep your current view
+    await fetchHierarchyData(true);
+    
+    exitEditUI();
+}
+
+function exitEditUI() {
+    isEditMode = false;
+    localEdits = {}; // NEW: Clear cache
+    document.body.classList.remove('is-editing');
+    
+    const editBtn = document.getElementById('editBtn');
+    const deleteBtn = document.getElementById('deleteBtn');
+    const addBtn = document.getElementById('addBtn');
+    const exportBtn = document.getElementById('exportBtn');
+    const cancelBtn = document.getElementById('cancelBtn');
+    const indicator = document.getElementById('saveIndicator');
+
+    editBtn.innerText = "Edit";
+    editBtn.style.backgroundColor = "white";
+    editBtn.style.color = "#d32f2f";
+    
+    // Restore standard button visibility
+    deleteBtn.style.display = "none";
+    cancelBtn.style.display = "none";
+    addBtn.style.display = "inline-block";
+    exportBtn.style.display = "inline-block";
+    
+    // Relock inputs and update status
+    document.querySelectorAll('.cell-row input').forEach(i => i.readOnly = true);
+    document.querySelectorAll('.cell-row textarea').forEach(t => t.readOnly = true);
+    document.querySelectorAll('.cell-row select').forEach(s => s.disabled = true);
+    indicator.innerText = "Synced";
+}
+
+async function fetchHierarchyData(isSilent = false) {
+    const container = document.getElementById('main-content-area');
+    
+    // 1. Capture State and Scroll Position to prevent UI jumps
+    const openAreas = new Set();
+    const openAssets = new Set();
+    const scrollPos = window.scrollY; 
+    
+    if (isSilent) {
+        document.querySelectorAll('.area-container').forEach(areaDiv => {
+            const content = areaDiv.querySelector('.area-content');
+            if (content && !content.classList.contains('hidden')) {
+                const name = areaDiv.querySelector('.area-header span').innerText.replace('Area: ', '').trim();
+                openAreas.add(name);
+            }
+        });
+        document.querySelectorAll('.rows-container').forEach(rowsDiv => {
+            if (!rowsDiv.classList.contains('hidden')) {
+                openAssets.add(rowsDiv.getAttribute('data-asset-name'));
+            }
+        });
+    } else {
+        container.innerHTML = '<p style="text-align:center; padding:20px;">Scanning entries for Areas and Assets...</p>';
+    }
+
+    let allRecords = [];
+    let from = 0, to = 999, fetchMore = true;
+
+    // 2. RESTORED SAFE FETCH: Uses select('*') to ensure client-side filters have access to all data
+    while (fetchMore && allRecords.length < 10000) {
+        const { data, error } = await _supabase.from('STY4Assets').select('*').range(from, to);
+        if (error) {
+            container.innerHTML = '<p style="text-align:center; color:red;">Error loading log hierarchy.</p>';
+            return;
+        }
+        allRecords = allRecords.concat(data);
+        if (data.length < 1000) fetchMore = false;
+        else { from += 1000; to += 1000; }
+    }
+
+    allHierarchyRecords = allRecords;
+    createFilterButtons();
+    
+    // Render the visual layout locally using the complete cache
+    await renderFilteredLog(openAreas, openAssets, scrollPos);
+}
+
+function toggleFilter(type, value) {
+    const filterSet = activeFilters[type];
+    
+    if (value === 'All') {
+        filterSet.clear();
+        filterSet.add('All');
+    } else {
+        filterSet.delete('All');
+        if (filterSet.has(value)) {
+            filterSet.delete(value);
+        } else {
+            filterSet.add(value);
+        }
+        // If nothing is selected, default back to All
+        if (filterSet.size === 0) filterSet.add('All');
+    }
+    
+    createFilterButtons();
+    renderFilteredLog();
+}
+
+/**
+ * UI Controls for the Export Prompt
+ */
+function showExportOptions() {
+    document.getElementById('exportModal').style.display = 'flex';
+}
+
+function closeExportModal() {
+    document.getElementById('exportModal').style.display = 'none';
+}
+
+function runExport(type) {
+    closeExportModal();
+    if (type === 'csv') exportToCSV();
+    if (type === 'pdf') exportToPDF();
+}
+
+/**
+ * Generates a PDF report using jsPDF and AutoTable
+ */
+function exportToPDF() {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF('l', 'pt', 'a4'); 
+
+    const targetLocs = activeFilters.locations;
+    const targetStats = [...activeFilters.statuses].map(s => s.toLowerCase());
+
+    const filteredData = allHierarchyRecords.filter(r => {
+        const loc = (r.Location || r.location || 'Unassigned').trim();
+        const matchesLoc = targetLocs.has('All') || targetLocs.has(loc);
+        const stat = (r.status || '').toLowerCase();
+        const matchesStat = activeFilters.statuses.has('All') || 
+                            targetStats.some(filter => stat.includes(filter));
+        return matchesLoc && matchesStat;
+    });
+
+    // 1. Updated Table Headers
+    const headers = [[
+        "Area", "Asset", "Sub Area", "Seal #", "Date", "Signoff", 
+        "Notes", "Status", "Break Date", "Responsible Party", "Reason"
+    ]];
+
+    // 2. Updated Table Body
+    const body = filteredData.map(r => [
+        (r.Location || r.location || 'Unassigned').trim(),
+        r.asset_name || '',
+        r.sub_area || '',
+        r.seal_number || '',
+        r.inspection_date || '',
+        r.signoff || '',
+        r.inspection_notes || '',
+        r.status || '',
+        r.break_date || '',
+        r.responsible_party || '', // Added
+        r.break_reason || ''      // Added
+    ]);
+
+    doc.setFontSize(18);
+    doc.text("Tamper Seal Inspection Log", 40, 40);
+    doc.setFontSize(10);
+    doc.text(`Generated on: ${new Date().toLocaleString()}`, 40, 55);
+
+    doc.autoTable({
+        head: headers,
+        body: body,
+        startY: 70,
+        theme: 'striped',
+        headStyles: { fillColor: [211, 47, 47] },
+        styles: { fontSize: 7, cellPadding: 2 }, // Reduced size for 11-column fit
+        columnStyles: {
+            6: { cellWidth: 100 }, // Give 'Notes' more space
+            10: { cellWidth: 100 } // Give 'Reason' more space
+        }
+    });
+
+    doc.save(`Tamper_Seal_Log_${new Date().toISOString().split('T')[0]}.pdf`);
+}
+
+/**
+ * Existing CSV Logic (Ensure this is in your script)
+ */
+function exportToCSV() {
+    const targetLocs = activeFilters.locations;
+    const targetStats = [...activeFilters.statuses].map(s => s.toLowerCase());
+
+    const filteredData = allHierarchyRecords.filter(r => {
+        const loc = (r.Location || r.location || 'Unassigned').trim();
+        const matchesLoc = targetLocs.has('All') || targetLocs.has(loc);
+        const stat = (r.status || '').toLowerCase();
+        const matchesStat = activeFilters.statuses.has('All') || 
+                            targetStats.some(filter => stat.includes(filter));
+        return matchesLoc && matchesStat;
+    });
+
+    // 1. Updated Headers (11 columns)
+    const headers = [
+        "Area", "Asset", "Sub Area", "Seal #", "Inspection Date", 
+        "Signoff", "Inspection Notes", "Status", "Break Date", 
+        "Responsible Party", "Break Reason"
+    ];
+
+    // 2. Updated Data Mapping (including the last two fields)
+    const csvContent = [
+        headers.join(','),
+        ...filteredData.map(r => [
+            `"${(r.Location || r.location || 'Unassigned').trim()}"`,
+            `"${r.asset_name || ''}"`,
+            `"${r.sub_area || ''}"`,
+            `"${r.seal_number || ''}"`,
+            `"${r.inspection_date || ''}"`,
+            `"${r.signoff || ''}"`,
+            `"${r.inspection_notes || ''}"`,
+            `"${r.status || ''}"`,
+            `"${r.break_date || ''}"`,
+            `"${r.responsible_party || ''}"`, // Added
+            `"${r.break_reason || ''}"`       // Added
+        ].join(','))
+    ].join('\n');
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Tamper_Seal_Log_${new Date().toISOString().split('T')[0]}.csv`;
+    a.click();
+}
+
+function toggleArea(header) {
+    const content = header.nextElementSibling;
+    const isHidden = content.classList.toggle('hidden');
+    header.querySelector('.area-arrow').innerText = isHidden ? '▶' : '▼';
+}
+
+function createFilterButtons() {
+    const container = document.getElementById('filter-container');
+    container.innerHTML = '';
+
+    // 1. Location Filters
+    const locations = ['All', ...new Set(allHierarchyRecords.map(r => (r.Location || r.location || 'Unassigned').trim()))].sort();
+    const locGroup = document.createElement('div');
+    locGroup.className = 'filter-group';
+    locGroup.innerHTML = '<span class="filter-label">Locations:</span>';
+    
+    locations.forEach(loc => {
+        const btn = document.createElement('button');
+        btn.className = `filter-btn loc-filter ${activeFilters.locations.has(loc) ? 'active' : ''}`;
+        btn.innerText = loc;
+        btn.onclick = () => toggleFilter('locations', loc);
+        locGroup.appendChild(btn);
+    });
+
+    // 2. Status Filters
+    const statuses = ['All', 'Intact', 'Broken', 'Replaced'];
+    const statGroup = document.createElement('div');
+    statGroup.className = 'filter-group';
+    statGroup.innerHTML = '<span class="filter-label">Statuses:</span>';
+
+    statuses.forEach(stat => {
+        const btn = document.createElement('button');
+        btn.className = `filter-btn ${activeFilters.statuses.has(stat) ? 'active' : ''}`;
+        btn.innerText = stat;
+        btn.onclick = () => toggleFilter('statuses', stat);
+        statGroup.appendChild(btn);
+    });
+
+    container.appendChild(locGroup);
+    container.appendChild(statGroup);
+}
+
+let matchElements = [];
+let currentMatchIndex = -1;
+
+/**
+ * Enhanced Search Handler
+ */
+async function handleSearch(query) {
+    activeFilters.search = query.toLowerCase().trim();
+    
+    // 1. Re-render the UI based on filter
+    await renderFilteredLog();
+    
+    // 2. Identify all visible instances (rows)
+    updateMatchList();
+}
+
+/**
+ * Scans the visible UI for matching rows to populate navigation
+ */
+function updateMatchList() {
+    const query = activeFilters.search;
+    const counter = document.getElementById('matchCounter');
+    
+    if (!query) {
+        matchElements = [];
+        currentMatchIndex = -1;
+        counter.innerText = "0/0";
+        return;
+    }
+
+    // Collect all visible cell-rows as they represent the "instances"
+    matchElements = Array.from(document.querySelectorAll('.cell-row'));
+    currentMatchIndex = matchElements.length > 0 ? 0 : -1;
+    
+    updateMatchUI();
+}
+
+function updateMatchUI() {
+    const counter = document.getElementById('matchCounter');
+    
+    // Remove previous highlights
+    document.querySelectorAll('.highlight-match').forEach(el => el.classList.remove('highlight-match'));
+
+    if (matchElements.length > 0 && currentMatchIndex !== -1) {
+        counter.innerText = `${currentMatchIndex + 1}/${matchElements.length}`;
+        const target = matchElements[currentMatchIndex];
+        target.classList.add('highlight-match');
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } else {
+        counter.innerText = "0/0";
+    }
+}
+
+function nextMatch() {
+    if (matchElements.length === 0) return;
+    currentMatchIndex = (currentMatchIndex + 1) % matchElements.length;
+    updateMatchUI();
+}
+
+function prevMatch() {
+    if (matchElements.length === 0) return;
+    currentMatchIndex = (currentMatchIndex - 1 + matchElements.length) % matchElements.length;
+    updateMatchUI();
+}
+
+/**
+ * Updated renderFilteredLog to be async so we can wait for search-triggered data loads
+ */
+ async function renderFilteredLog(openAreas = new Set(), openAssets = new Set(), scrollPos = 0) {
+    const container = document.getElementById('main-content-area');
+    container.innerHTML = '';
+
+    const targetLocs = activeFilters.locations;
+    const targetStats = [...activeFilters.statuses].map(s => s.toLowerCase());
+    const query = activeFilters.search;
+
+    const uniqueAreas = [...new Set(allHierarchyRecords.map(r => (r.Location || r.location || 'Unassigned').trim()))].sort();
+    const loadPromises = [];
+
+    uniqueAreas.forEach(areaName => {
+        if (!targetLocs.has('All') && !targetLocs.has(areaName)) return;
+
+        const areaRecords = allHierarchyRecords.filter(r => (r.Location || r.location || 'Unassigned').trim() === areaName);
+        const uniqueAssetNames = [...new Set(areaRecords.map(r => r.asset_name))].sort();
+
+        let visibleAssetsInArea = 0;
+        const areaContent = document.createElement('div');
+        
+        // REFRESH LOGIC: Keep area open if it was open before or if searching
+        const isAreaOpen = query !== '' || openAreas.has(areaName);
+        const isAreaHidden = isAreaOpen ? '' : 'hidden';
+        areaContent.className = `area-content ${isAreaHidden}`;
+
+        uniqueAssetNames.forEach(assetName => {
+            let assetRecords = areaRecords.filter(r => r.asset_name === assetName);
+            if (!activeFilters.statuses.has('All')) {
+                assetRecords = assetRecords.filter(r => targetStats.some(f => (r.status || '').toLowerCase().includes(f)));
+            }
+            if (query !== '') {
+                assetRecords = assetRecords.filter(r => {
+                    const searchStr = `${r.asset_name} ${r.Location || r.location} ${r.seal_number} ${r.sub_area} ${r.inspection_notes} ${r.signoff}`.toLowerCase();
+                    return searchStr.includes(query);
+                });
+            }
+            if (duplicateSealList) {
+        assetRecords = assetRecords.filter(r => 
+            duplicateSealList.includes((r.seal_number || "").toString().trim())
+        );
+    }
+            if (assetRecords.length === 0) return;
+
+            visibleAssetsInArea++;
+            const assetDiv = document.createElement('div');
+            assetDiv.className = 'asset-container';
+            
+            // REFRESH LOGIC: Keep asset open if it was open before or if searching
+            const isAssetOpen = query !== '' || openAssets.has(assetName);
+            const isRowsHidden = isAssetOpen ? '' : 'hidden';
+            const arrow = isAssetOpen ? '▼' : '▶';
+
+            assetDiv.innerHTML = `
+                <div class="asset-header" onclick="toggleAsset(this, '${assetName}')">
+                    <span>Asset: ${assetName}</span><span class="arrow">${arrow}</span>
+                </div>
+                <div class="rows-container ${isRowsHidden}" data-loaded="false" data-asset-name="${assetName}"></div>`;
+            
+            areaContent.appendChild(assetDiv);
+
+            // Re-fetch data for assets that are open
+            if (isAssetOpen) {
+                const rowsDiv = assetDiv.querySelector('.rows-container');
+                loadPromises.push(fetchAndRender(rowsDiv, assetName));
+            }
+        });
+
+        if (visibleAssetsInArea > 0) {
+            const areaDiv = document.createElement('div');
+            areaDiv.className = 'area-container';
+            const areaArrow = (query !== '' || openAreas.has(areaName)) ? '▼' : '▶';
+            areaDiv.innerHTML = `<div class="area-header" onclick="toggleArea(this)"><span>Area: ${areaName}</span><span class="area-arrow">${areaArrow}</span></div>`;
+            areaDiv.appendChild(areaContent);
+            container.appendChild(areaDiv);
+        }
+    });
+
+    if (loadPromises.length > 0) await Promise.all(loadPromises);
+    if (scrollPos > 0) {
+        window.scrollTo(0, scrollPos);
+    }
+}
+
+async function toggleAsset(header, assetName) {
+    const rowsDiv = header.nextElementSibling;
+    const isHidden = rowsDiv.classList.toggle('hidden');
+    header.querySelector('.arrow').innerText = isHidden ? '▶' : '▼';
+    if (!isHidden && rowsDiv.getAttribute('data-loaded') === 'false') {
+        await fetchAndRender(rowsDiv, assetName);
+    }
+}
+
+async function fetchAndRender(container, assetName) {
+    // 1. Grab data instantly from the local cache instead of re-downloading it
+    // 2. FILTER by the specific assetName so it only shows the correct seals
+    let entries = allHierarchyRecords.filter(r => r.asset_name === assetName);
+
+    let filteredData = entries;
+
+    // Apply Duplicate Filter
+    if (duplicateSealList) {
+        filteredData = filteredData.filter(r => 
+            duplicateSealList.includes((r.seal_number || "").toString().trim())
+        );
+    }
+
+    // Apply multi-status filtering
+    if (!activeFilters.statuses.has('All')) {
+        const targetStats = [...activeFilters.statuses].map(s => s.toLowerCase());
+        filteredData = filteredData.filter(r => {
+            const s = (r.status || '').toLowerCase();
+            return targetStats.some(filter => s.includes(filter));
+        });
+    }
+
+    // Apply search filtering to individual rows
+    const query = activeFilters.search;
+    if (query !== '') {
+        filteredData = filteredData.filter(r => {
+            const searchStr = `${r.asset_name} ${r.Location || r.location} ${r.seal_number} ${r.sub_area} ${r.inspection_notes} ${r.signoff}`.toLowerCase();
+            return searchStr.includes(query);
+        });
+    }
+
+    // Sort: Broken first
+    filteredData.sort((a, b) => {
+        const getP = (s) => (s||'').toLowerCase().includes('broken') ? 1 : (s||'').toLowerCase().includes('intact') ? 2 : 3;
+        return getP(a.status) - getP(b.status);
+    });
+
+    container.innerHTML = '';
+    renderEntries(container, filteredData);
+    container.setAttribute('data-loaded', 'true');
+}
+
+let isEditMode = false;
+
+async function deleteSelected() {
+    const checkedRows = document.querySelectorAll('.row-selector:checked');
+    if (checkedRows.length === 0) {
+        alert("Please select at least one item to delete.");
+        return;
+    }
+
+    if (!confirm(`Warning: This will permanently delete ${checkedRows.length} records. Continue?`)) return;
+
+    const indicator = document.getElementById('saveIndicator');
+    indicator.innerText = "Deleting...";
+
+    // 1. Gather IDs and convert to Number to match Supabase int8 types
+    const idsToDelete = Array.from(checkedRows).map(cb => {
+        const id = cb.closest('.cell-row').dataset.id;
+        return isNaN(id) ? id : Number(id); 
+    });
+
+    // 2. Perform the deletion in the database
+    const { error } = await _supabase
+        .from('STY4Assets') 
+        .delete()
+        .in('id', idsToDelete); // Ensure your primary key column is lowercase 'id'
+
+    if (error) {
+        console.error("Supabase Delete Error:", error);
+        alert(`Delete failed: ${error.message}. Make sure RLS allows Deletes for your table.`);
+        indicator.innerText = "Error";
+    } else {
+        // 3. Remove from UI immediately
+        checkedRows.forEach(cb => cb.closest('.cell-row').remove());
+        
+        // 4. Update local cache so re-renders don't bring them back
+        allHierarchyRecords = allHierarchyRecords.filter(r => !idsToDelete.includes(Number(r.id)));
+        
+        indicator.innerText = "Deleted Successfully";
+        setTimeout(() => indicator.innerText = "Synced", 2000);
+    }
+}
+
+async function saveAllChanges() {
+    const updatePromises = [];
+    const indicator = document.getElementById('saveIndicator');
+
+    for (const id in localEdits) {
+        const changes = localEdits[id];
+        if (Object.keys(changes).length === 0) continue;
+
+        // We use 'location' (lowercase) to match the keys in syncEdit
+        // and the previous successful payloads.
+        updatePromises.push(
+            _supabase.from('STY4Assets').update(changes).eq('id', Number(id))
+        );
+    }
+
+    if (updatePromises.length === 0) {
+        return; 
+    }
+
+    const results = await Promise.all(updatePromises);
+    const errors = results.filter(r => r.error);
+    
+    if (errors.length > 0) {
+        console.error("Save Errors:", errors);
+        alert("Failed to save some rows. Check console for details.");
+    } else {
+        localEdits = {}; 
+        await fetchLookupData(); 
+        await fetchHierarchyData(true); 
+    }
+}
+
+/**
+ * Captures edits in real-time to prevent data loss during search/navigation
+ */
+function syncEdit(id, field, value) {
+    if (!id || id === "undefined") return; // Skip for preview mode
+    if (!localEdits[id]) localEdits[id] = {};
+    localEdits[id][field] = value;
+}
+
+function renderEntries(container, entries) {
+    if (entries.length === 0) {
+        container.innerHTML = '<p style="padding: 10px;">No matching records found.</p>';
+        return;
+    }
+entries.forEach(entry => {
+    const id = entry.id;
+    const row = document.createElement('div');
+    row.className = 'cell-row';
+    row.dataset.id = id; 
+
+    // Helper to check for existing local edits before using database values
+    const getVal = (field, dbVal) => (localEdits[id] && localEdits[id][field] !== undefined) ? localEdits[id][field] : (dbVal || '');
+
+    row.innerHTML = `
+        <div class="edit-checkbox-cell">
+            <input type="checkbox" class="row-selector">
+        </div>
+        
+        <input class="edit-only-cell" list="asset-list" 
+               oninput="syncEdit('${id}', 'asset_name', this.value)"
+               value="${getVal('asset_name', entry.asset_name)}" ${!isEditMode ? 'readonly' : ''}>
+        
+        <input class="edit-only-cell" list="location-list" 
+               oninput="syncEdit('${id}', 'location', this.value)"
+               value="${getVal('location', entry.Location || entry.location)}" ${!isEditMode ? 'readonly' : ''}>
+        
+        <textarea oninput="syncEdit('${id}', 'sub_area', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('sub_area', entry.sub_area)}</textarea>
+        <textarea oninput="syncEdit('${id}', 'seal_number', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('seal_number', entry.seal_number)}</textarea>
+        <textarea oninput="syncEdit('${id}', 'inspection_date', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('inspection_date', entry.inspection_date)}</textarea>
+        <textarea oninput="syncEdit('${id}', 'signoff', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('signoff', entry.signoff)}</textarea>
+        <textarea oninput="syncEdit('${id}', 'inspection_notes', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('inspection_notes', entry.inspection_notes)}</textarea>
+        
+        <select class="status-dropdown" onchange="syncEdit('${id}', 'status', this.value); applyStatusColor(this)" ${!isEditMode ? 'disabled' : ''}>
+            <option value="${getVal('status', entry.status)}">${getVal('status', entry.status) || 'Select...'}</option>
+            <option value="Intact">Intact</option>
+            <option value="Broken">Broken</option>
+            <option value="Removed">Removed</option>
+        </select>
+        
+        <textarea oninput="syncEdit('${id}', 'break_date', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('break_date', entry.break_date)}</textarea>
+        <textarea oninput="syncEdit('${id}', 'responsible_party', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('responsible_party', entry.responsible_party)}</textarea>
+        <textarea oninput="syncEdit('${id}', 'break_reason', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('break_reason', entry.break_reason)}</textarea>
+    `;
+    applyStatusColor(row.querySelector('.status-dropdown'));
+    container.appendChild(row);
+});
+}
+
+function applyStatusColor(el) {
+    const row = el.closest('.cell-row');
+    if (!row) return;
+    const val = el.value.toLowerCase();
+    row.classList.remove('row-intact', 'row-broken', 'row-removed');
+    if (val.includes("intact") || val.includes("pass")) row.classList.add('row-intact');
+    else if (val.includes("broken") || val.includes("fail")) row.classList.add('row-broken');
+    else if (val.includes("removed") || val.includes("replaced") || val.includes("void")) row.classList.add('row-removed');
+}
+
+/**
+ * Expands only the top-level Area/Zone containers.
+ */
+function expandAllZones() {
+    document.querySelectorAll('.area-content').forEach(c => c.classList.remove('hidden'));
+    document.querySelectorAll('.area-arrow').forEach(a => a.innerText = '▼');
+}
+
+/**
+ * Expands all Areas and Assets, then triggers a data fetch for any
+ * asset that hasn't been loaded yet.
+ */
+async function expandAll() {
+    // 1. Visually expand everything first
+    document.querySelectorAll('.area-content, .rows-container').forEach(c => c.classList.remove('hidden'));
+    document.querySelectorAll('.area-arrow, .arrow').forEach(a => a.innerText = '▼');
+
+    // 2. Identify all asset containers that haven't loaded data
+    const containers = document.querySelectorAll('.rows-container');
+    const loadPromises = [];
+
+    containers.forEach(container => {
+        if (container.getAttribute('data-loaded') === 'false') {
+            const assetName = container.getAttribute('data-asset-name');
+            if (assetName) {
+                // Trigger the fetch and render process
+                loadPromises.push(fetchAndRender(container, assetName));
+            }
+        }
+    });
+
+    // 3. Execute all loads in parallel for efficiency
+    if (loadPromises.length > 0) {
+        await Promise.all(loadPromises);
+    }
+}
+
+/**
+ * Collapses all levels back to the default state.
+ */
+function collapseAll() {
+    document.querySelectorAll('.area-content, .rows-container').forEach(c => c.classList.add('hidden'));
+    document.querySelectorAll('.area-arrow, .arrow').forEach(a => a.innerText = '▶');
+}
+
+// Add a global variable to track if we are in reinspection mode
+let isReinspectionMode = false;
+let selectedBrokenSeals = [];
+let selectedBrokenSealIds = []; // NEW: Stores database IDs
+
+/**
+ * Updated: Reveal the "Next" button instead of the preview button
+ */
+async function loadBrokenSealsForAsset(assetName) {
+    if (!assetName) return;
+    const container = document.getElementById('brokenSealsContainer');
+    const list = document.getElementById('sealCheckboxList');
+    
+    const { data, error } = await _supabase
+        .from('STY4Assets')
+        .select('id, seal_number, location, sub_area')
+        .eq('asset_name', assetName)
+        .ilike('status', '%broken%');
+
+    if (error || data.length === 0) {
+        container.style.display = 'none';
+        return;
+    }
+
+    container.style.display = 'block';
+    // Show the Next button
+    document.getElementById('reinspectNextBtn').style.display = 'inline-block';
+    
+    document.getElementById('brokenAssetSelect').dataset.location = data[0].location || '';
+    document.getElementById('brokenAssetSelect').dataset.subarea = data[0].sub_area || '';
+
+    list.innerHTML = data.map(s => `
+        <div style="margin-bottom:5px;">
+            <input type="checkbox" class="reinspect-seal-check" value="${s.id}" data-old-seal="${s.seal_number}">
+            <label>Seal #${s.seal_number}</label>
+        </div>
+    `).join('');
+}
+
+/**
+ * New Function: Pre-fills the standard form and moves the user there
+ */
+function proceedToStandardForm() {
+    const checked = document.querySelectorAll('.reinspect-seal-check:checked');
+    if (checked.length === 0) {
+        alert("Please select at least one broken seal to replace.");
+        return;
+    }
+
+    isReinspectionMode = true;
+    // Capture Seal Numbers for the note
+    selectedBrokenSeals = Array.from(checked).map(cb => cb.dataset.old_seal);
+    // NEW: Capture Database IDs for the status update
+    selectedBrokenSealIds = Array.from(checked).map(cb => cb.value); 
+
+    // Pre-fill the standard form fields
+    document.getElementById('newAsset').value = document.getElementById('brokenAssetSelect').value;
+    document.getElementById('newLocation').value = document.getElementById('brokenAssetSelect').dataset.location;
+    document.getElementById('newSubArea').value = document.getElementById('brokenAssetSelect').dataset.subarea;
+    
+    // Auto-generate a note about the replacement
+    document.getElementById('newNotes').value = `Reinspection replacement for Seal(s): ${selectedBrokenSeals.join(', ')}`;
+
+    // Transition to Step 2 (Standard Form)
+    document.getElementById('step-reinspection').style.display = 'none';
+    document.getElementById('step-standard').style.display = 'block';
+    document.getElementById('modalTitle').innerText = "Add Replacement Seals";
+}
+
+function showAddModal() {
+    isReinspectionMode = false;
+    selectedBrokenSeals = [];
+    
+    // Open the modal and show Step 1 (The Choice screen)
+    document.getElementById('addModal').style.display = 'flex';
+    document.getElementById('step-choice').style.display = 'block';
+    document.getElementById('step-standard').style.display = 'none';
+    document.getElementById('step-reinspection').style.display = 'none';
+    document.getElementById('modalTitle').innerText = "Add Tamper Seals";
+
+    // 1. SET DATE TO TODAY
+    // This ensures the date is fresh every time the form is opened
+    document.getElementById('newDate').value = new Date().toISOString().split('T')[0];
+
+    // 2. CLEAR OTHER INPUTS (Prevent data from the last session from showing)
+    document.getElementById('newNotes').value = "";
+    document.getElementById('startSeal').value = "";
+    document.getElementById('endSeal').value = "";
+    document.getElementById('omittedSeals').value = "";
+    document.getElementById('newLocation').value = "";
+    document.getElementById('newAsset').value = "";
+    document.getElementById('newSubArea').value = "";
+    document.getElementById('newSignoff').value = "";
+    
+    // Reset the broken asset dropdown if it exists
+    const brokenSelect = document.getElementById('brokenAssetSelect');
+    if (brokenSelect) brokenSelect.selectedIndex = 0;
+}
+
+function closeAddModal() {
+    document.getElementById('addModal').style.display = 'none';
+}
+
+/**
+ * Step 1: Generate the editable preview list
+ */
+function generatePreview() {
+    const start = parseInt(document.getElementById('startSeal').value);
+    const end = parseInt(document.getElementById('endSeal').value);
+    const omittedStr = document.getElementById('omittedSeals').value;
+    const omitted = omittedStr.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+
+    const commonData = {
+        location: document.getElementById('newLocation').value,
+        asset_name: document.getElementById('newAsset').value,
+        sub_area: document.getElementById('newSubArea').value,
+        inspection_date: document.getElementById('newDate').value,
+        inspection_notes: document.getElementById('newNotes').value,
+        signoff: document.getElementById('newSignoff').value,
+        status: 'Intact'
+    };
+
+    if (isNaN(start) || isNaN(end) || start > end) {
+        alert("Please enter a valid seal range.");
+        return;
+    }
+
+    const previewEntries = [];
+    for (let i = start; i <= end; i++) {
+        if (omitted.includes(i)) continue;
+        previewEntries.push({ ...commonData, seal_number: i.toString() });
+    }
+
+    closeAddModal();
+    renderPreviewGrid(previewEntries);
+}
+
+/**
+ * Step 2: Show generated rows in the main area for final editing
+ */
+function renderPreviewGrid(entries) {
+    isPreviewMode = true; // Set flag
+    localStorage.setItem('pendingPreview', JSON.stringify(entries)); // Save for reload
+
+    const container = document.getElementById('main-content-area');
+    container.innerHTML = `
+        <div class="preview-banner">
+            <h2>Review New Entries (${entries.length} rows)</h2>
+            <p>You can edit any cell below before saving. These items have not been added to the database yet.</p>
+            <button class="tool-btn" style="background-color: #1b5e20; color: white; padding: 10px 20px;" onclick="saveNewEntries()">Confirm & Save to Database</button>
+            <button class="tool-btn" style="margin-left:10px;" onclick="discardPreview()">Cancel & Discard</button>
+        </div>
+        <div id="preview-rows-container"></div>
+    `;
+
+    const rowsContainer = document.getElementById('preview-rows-container');
+    const originalMode = isEditMode;
+    isEditMode = true; 
+    renderEntries(rowsContainer, entries);
+    isEditMode = originalMode;
+
+    document.querySelectorAll('#preview-rows-container .edit-checkbox-cell').forEach(el => el.remove());
+    document.querySelectorAll('#preview-rows-container .edit-only-cell').forEach(el => el.style.display = 'flex');
+}
+
+function discardPreview() {
+    if (!confirm("Discard this preview?")) return;
+    localStorage.removeItem('pendingPreview');
+    isPreviewMode = false;
+    fetchHierarchyData();
+}
+
+async function saveNewEntries() {
+    const rows = document.querySelectorAll('#preview-rows-container .cell-row');
+    const indicator = document.getElementById('saveIndicator');
+
+    indicator.innerText = "Saving to Database...";
+
+    try {
+        const newRecords = Array.from(rows).map(row => {
+            // UPDATED SELECTOR: Includes 'input' so Asset and Location are captured
+            const inputs = row.querySelectorAll('input:not([type="checkbox"]), textarea, select');
+            return {
+                asset_name: inputs[0].value,
+                location: inputs[1].value,
+                sub_area: inputs[2].value,
+                seal_number: inputs[3].value,
+                inspection_date: inputs[4].value,
+                signoff: inputs[5].value,
+                inspection_notes: inputs[6].value,
+                status: inputs[7].value,
+                break_date: inputs[8].value,
+                responsible_party: inputs[9].value,
+                break_reason: inputs[10].value
+            };
+        });
+
+        const { error } = await _supabase.from('STY4Assets').insert(newRecords);
+        if (error) throw error;
+
+        // Success Cleanup
+        localStorage.removeItem('pendingPreview');
+        isPreviewMode = false;
+        
+        indicator.innerText = "Created Successfully";
+        await fetchLookupData();
+        await fetchHierarchyData();
+    } catch (err) {
+        console.error(err);
+        alert("Operation failed. Check console for details.");
+        indicator.innerText = "Error";
+    }
+}
+
+window.onload = initApp;
+</script>
+</body>
+</html>

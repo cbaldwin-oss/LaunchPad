@@ -1,0 +1,826 @@
+// dashboard.js
+
+export class CriticalArcDashboard {
+  constructor(containerId) {
+    this.container = document.getElementById(containerId);
+    if (!this.container) throw new Error(`Container #${containerId} not found.`);
+    
+    // Core State 
+    this.STATE = { project: null, data: null, filters: { discipline: [], contractor: [], status: [], phase: [] }, eqPhase: new Map(), openIssues: [] };
+    this.EQ_FILTER = { bldg: 'All', floor: 'All' };
+    this.EQ_SEARCH = { q: '', incompleteOnly: true };
+    this.ISS_THRESH = 30;
+    this.COMPLETE_STATUSES = ['Finished'];
+    this.REFRESH_ENDPOINT = null;
+    
+    // Theme Constants
+    this.FONT = 'Barlow, sans-serif';
+    this.COND = 'Barlow Condensed, sans-serif';
+    this.C = { text:'#F0F0F0', muted:'#8A8F98', border:'#3E4248', panel:'#2D3035', green:'#39B54A', red:'#E04040', yellow:'#F4B942', blue:'#4A90D9' };
+    this.CFG = { displayModeBar: false, responsive: true };
+  }
+
+  async mount() {
+    this.injectCSS();
+    this.injectHTML();
+    this.bindEvents();
+    await this.init();
+  }
+
+  // DOM Query Helper to restrict lookups to this specific dashboard container
+  q(id) { return this.container.querySelector('#' + id); }
+  qa(sel) { return this.container.querySelectorAll(sel); }
+
+  // ─── 1. CORE STRUCTURE & STYLES ─────────────────────────────────────────────
+  
+  injectCSS() {
+    if (document.getElementById('ca-dashboard-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'ca-dashboard-styles';
+    style.innerHTML = `
+      @import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&family=DM+Mono:wght@400;500&display=swap');
+      
+      .ca-wrapper { --bg: #23262B; --panel: #2D3035; --border: #3E4248; --line: #34383E; --text: #F0F0F0; --muted: #8A8F98; --green: #39B54A; --red: #E04040; --yellow: #F4B942; --blue: #4A90D9; }
+      .ca-wrapper { background: var(--bg); color: var(--text); font-family: 'Barlow', sans-serif; box-sizing: border-box; height: 100%; }
+      .ca-wrapper * { box-sizing: border-box; }
+      .ca-wrapper a { color: inherit; }
+
+      .ca-app { display: flex; height: 100%; width: 100%; }
+
+      /* Sidebar */
+      .ca-sidebar { width: clamp(220px, 20vw, 300px); flex: 0 0 clamp(220px, 20vw, 300px); background: var(--panel); border-right: 1px solid var(--border); padding: 20px; overflow-y: auto; height: 100%; }
+      .ca-brand { font-family: 'Barlow Condensed', sans-serif; font-size: 20px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; border-bottom: 2px solid var(--green); padding-bottom: 12px; margin-bottom: 20px; }
+      .ca-brand-sub { font-size: 11px; color: var(--muted); letter-spacing: 1px; margin-top: 2px; }
+      .ca-side-label { font-size: 11px; letter-spacing: 1px; color: var(--muted); text-transform: uppercase; margin: 16px 0 6px; }
+      
+      .ca-wrapper select, .ca-wrapper input[type="text"] { width: 100%; background: #23262B; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-family: 'Barlow', sans-serif; font-size: 13px; }
+      .ca-wrapper select:focus, .ca-wrapper input[type="text"]:focus { outline: none; border-color: var(--muted); }
+      
+      .ca-checkgroup { display: flex; flex-direction: column; gap: 5px; max-height: 190px; overflow-y: auto; background: #23262B; border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+      .ca-checkgroup label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); cursor: pointer; }
+      .ca-checkgroup label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .ca-checkgroup input[type="checkbox"] { accent-color: var(--green); width: 15px; height: 15px; flex: 0 0 auto; cursor: pointer; }
+      .ca-filter-hint { font-size: 11px; color: var(--muted); margin: 2px 0 8px; font-style: italic; }
+      
+      .ca-hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+      .ca-wrapper input[type="range"] { width: 100%; accent-color: var(--green); margin: 8px 0 4px; cursor: pointer; }
+      .ca-slider-wrap { color: var(--muted); font-size: 13px; margin: 4px 0 14px; }
+      .ca-slider-wrap b, .ca-slider-wrap span { color: var(--green); font-weight: 600; }
+      
+      .ca-eq-search-wrap { display: flex; gap: 12px; align-items: center; margin: 4px 0 12px; flex-wrap: wrap; }
+      .ca-eq-search-wrap label { color: var(--muted); font-size: 13px; white-space: nowrap; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+      .ca-eq-search-wrap input[type="checkbox"] { accent-color: var(--green); width: 15px; height: 15px; cursor: pointer; }
+      
+      .ca-refreshed { font-size: 11px; color: var(--muted); margin-top: 4px; }
+      .ca-btn-refresh { margin-top: 12px; width: 100%; font-family: 'Barlow Condensed', sans-serif; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; background: transparent; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 9px; cursor: pointer; transition: background .15s, border-color .15s; }
+      .ca-btn-refresh:hover { background: var(--line); border-color: var(--muted); }
+      .ca-btn-refresh:disabled { opacity: .5; cursor: default; }
+
+      /* Main Content */
+      .ca-main { flex: 1; padding: clamp(16px, 2vw, 28px) clamp(16px, 2.5vw, 36px); min-width: 0; background: var(--bg); overflow-y: auto; height: 100%; }
+      .ca-page-title { font-family: 'Barlow Condensed', sans-serif; font-size: clamp(28px, 4vw, 42px); font-weight: 700; letter-spacing: 1px; text-transform: uppercase; line-height: 1.1; color: var(--text); }
+      .ca-page-sub { font-size: 14px; color: var(--muted); margin-top: 4px; letter-spacing: .5px; }
+      .ca-page-meta { font-size: 12px; color: #5A5F68; margin-top: 6px; letter-spacing: .5px; }
+      .ca-title-hr { border: none; border-top: 1px solid var(--border); margin: 16px 0 8px; }
+
+      /* Tabs (Using Display: Block/None natively now, avoiding Plotly sizing bugs) */
+      .ca-tabs { display: flex; gap: 4px; background: var(--panel); padding: 4px; border-radius: 10px; border: 1px solid var(--border); margin: 16px 0 20px; width: fit-content; }
+      .ca-tab { background: transparent; border: none; border-radius: 6px; color: var(--muted); font-family: 'Barlow Condensed', sans-serif; font-weight: 600; font-size: 13px; letter-spacing: .5px; padding: 8px 16px; cursor: pointer; }
+      .ca-tab.active { background: var(--line); color: var(--green); }
+      .ca-tabpage { display: none; } 
+      .ca-tabpage.active { display: block; }
+
+      .ca-section-header { font-family: 'Barlow Condensed', sans-serif; font-size: 12px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--green); margin: 24px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+
+      /* KPI cards */
+      .ca-kpi-row { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+      .ca-kpi-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 20px 24px; text-align: center; transition: border-color .2s; }
+      .ca-kpi-card:hover { border-color: var(--muted); }
+      .ca-kpi-label { font-family: 'Barlow Condensed', sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+      .ca-kpi-value { font-family: 'DM Mono', monospace; font-size: 32px; font-weight: 500; line-height: 1; margin-bottom: 4px; }
+      .ca-kpi-sub { font-size: 12px; color: var(--muted); }
+      .kpi-red { color: var(--red); } .kpi-yellow { color: var(--yellow); } .kpi-green { color: var(--green); } .kpi-blue { color: var(--blue); } .kpi-white { color: var(--text); }
+
+      .ca-grid2 { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 16px; }
+      @media (max-width: 900px) { .ca-grid2 { grid-template-columns: minmax(0,1fr); } }
+      .ca-kpi-row > *, .ca-grid2 > * { min-width: 0; }
+
+      .ca-chart { width: 100%; min-width: 0; }
+      .ca-eq-filters { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 8px; }
+      .ca-caption { font-size: 12px; color: var(--muted); margin: 4px 0 12px; }
+
+      /* Tables */
+      .ca-wrapper table.dt { width: 100%; border-collapse: collapse; font-size: 12.5px; margin: 6px 0; }
+      .ca-wrapper table.dt th { text-align: left; color: var(--muted); font-family: 'Barlow Condensed', sans-serif; font-weight: 600; letter-spacing: .5px; text-transform: uppercase; font-size: 11px; border-bottom: 1px solid var(--border); padding: 8px 10px; position: sticky; top: 0; background: var(--panel); }
+      .ca-wrapper table.dt td { padding: 7px 10px; border-bottom: 1px solid #2A2D32; color: #D8DCE1; }
+      .ca-wrapper table.dt tr:hover td { background: #282B30; }
+      .ca-table-wrap { max-height: 460px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+      
+      .ca-wrapper details { margin: 12px 0; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+      .ca-wrapper details > summary { cursor: pointer; padding: 12px 16px; font-family: 'Barlow Condensed', sans-serif; font-weight: 600; letter-spacing: .5px; color: var(--muted); }
+      .ca-wrapper details[open] > summary { border-bottom: 1px solid var(--border); color: var(--text); }
+      .ca-wrapper details .ca-table-wrap { border: none; border-radius: 0; }
+      
+      .ca-empty { color: var(--muted); background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin: 10px 0; }
+      .ca-ok { color: var(--green); background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin: 10px 0; }
+      
+      #ca-loading { padding: 40px; color: var(--muted); }
+
+      /* Responsive */
+      @media (max-width: 860px) {
+        .ca-app { flex-direction: column; }
+        .ca-sidebar { width: 100%; flex: 0 0 auto; height: auto; position: static; border-right: none; border-bottom: 1px solid var(--border); }
+        .ca-main { padding: 16px; }
+        .ca-tabs { width: 100%; overflow-x: auto; }
+        .ca-eq-filters { grid-template-columns: 1fr; }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  injectHTML() {
+    this.container.innerHTML = `
+      <div class="ca-wrapper">
+        <div class="ca-app">
+          <aside class="ca-sidebar">
+            <div class="ca-brand">CriticalArc<div class="ca-brand-sub">Project Dashboard Platform</div></div>
+            <div class="ca-side-label">Select Project</div>
+            <select id="ca-projectSelect"></select>
+            <hr class="ca-hr" />
+            <div style="font-weight:600; letter-spacing:.5px;">Filters</div>
+            <div class="ca-filter-hint">Check any to filter — none checked = all.</div>
+            <div class="ca-side-label">Division / Discipline</div>
+            <div class="ca-checkgroup" id="ca-fDiscipline"></div>
+            <div class="ca-side-label">Contractor / Assigned To</div>
+            <div class="ca-checkgroup" id="ca-fContractor"></div>
+            <div class="ca-side-label">Status</div>
+            <div class="ca-checkgroup" id="ca-fStatus"></div>
+            <div class="ca-side-label">Building Phase</div>
+            <div class="ca-checkgroup" id="ca-fPhase"></div>
+            <hr class="ca-hr" />
+            <div class="ca-refreshed" id="ca-refreshed"></div>
+            <button class="ca-btn-refresh" id="ca-refreshBtn">🔄 Refresh Data</button>
+          </aside>
+
+          <main class="ca-main">
+            <div id="ca-loading">Loading data…</div>
+            <div id="ca-dash" style="display: none;">
+              <div class="ca-page-title" id="ca-pageTitle"></div>
+              <div class="ca-page-sub">Commissioning Progress Dashboard</div>
+              <div class="ca-page-meta" id="ca-pageMeta"></div>
+              <hr class="ca-title-hr" />
+
+              <div class="ca-tabs">
+                <button class="ca-tab active" data-tab="issues">📋 Issue Tracking</button>
+                <button class="ca-tab" data-tab="checklists">✅ Checklists</button>
+                <button class="ca-tab" data-tab="tests">🧪 Functional Tests</button>
+                <button class="ca-tab" data-tab="equipment">🔧 Equipment</button>
+              </div>
+
+              <div class="ca-tabpage active" id="ca-tab-issues"></div>
+              <div class="ca-tabpage" id="ca-tab-checklists"></div>
+              <div class="ca-tabpage" id="ca-tab-tests"></div>
+              <div class="ca-tabpage" id="ca-tab-equipment"></div>
+            </div>
+          </main>
+        </div>
+      </div>
+    `;
+  }
+
+  // ─── 2. UTILITY & HELPER METHODS ────────────────────────────────────────────
+
+  uniq(arr) { return [...new Set(arr)]; }
+  
+  isBad(v) { 
+    return v === null || v === undefined || ['', 'nan', 'none', '0'].includes(String(v).trim().toLowerCase()); 
+  }
+  
+  valueCounts(rows, key) {
+    const m = new Map();
+    for (const r of rows) { 
+      const v = r[key]; 
+      if (v === null || v === undefined) continue;
+      m.set(v, (m.get(v) || 0) + 1); 
+    }
+    return m;
+  }
+  
+  groupSize(rows, key) {
+    const m = this.valueCounts(rows, key);
+    return [...m.entries()].map(([k, v]) => ({ key: k, count: v }));
+  }
+  
+  sumBy(rows, key) { 
+    let s = 0; 
+    for (const r of rows) s += (+r[key] || 0); 
+    return s; 
+  }
+
+  section(t) { return `<div class="ca-section-header">${t}</div>`; }
+  
+  kpi(label, value, cls, sub) {
+    return `<div class="ca-kpi-card"><div class="ca-kpi-label">${label}</div>
+      <div class="ca-kpi-value ${cls||'kpi-white'}">${value}</div>
+      ${sub ? `<div class="ca-kpi-sub">${sub}</div>` : ''}</div>`;
+  }
+  
+  chartBox(id, h) { return `<div class="ca-chart" id="${id}" style="height:${h||360}px"></div>`; }
+  
+  table(cols, rows) {
+    const head = cols.map(c => `<th>${c.label}</th>`).join('');
+    const body = rows.map(r => '<tr>' + cols.map(c =>
+      `<td>${r[c.k] === null || r[c.k] === undefined ? '' : r[c.k]}</td>`).join('') + '</tr>').join('');
+    return `<div class="ca-table-wrap"><table class="dt"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+  }
+
+  phaseOf(r) {
+    if (r.building_phase) return r.building_phase;
+    return (this.STATE.eqPhase && this.STATE.eqPhase.get(String(r.asset_key))) || 'Unknown';
+  }
+
+  fmtAssigned(r) {
+    const n = String(r.assigned_name || '').trim(), c = String(r.assigned_company || '').trim();
+    if (n && c && n !== c) return `${n} (${c})`; return c || n;
+  }
+  
+  fmtDate(v) { 
+    if (!v) return ''; const d = new Date(v); return isNaN(d) ? '' :
+    `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')}/${d.getFullYear()}`; 
+  }
+
+  weekKey(dateStr) {
+    const d = new Date(dateStr); if (isNaN(d)) return null;
+    const m = new Date(d); m.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+    return m.toISOString().slice(0, 10);
+  }
+
+  applyFilters(rows) {
+    const f = this.STATE.filters;
+    return rows.filter(r => {
+      if (f.discipline.length && !f.discipline.includes(r.discipline)) return false;
+      if (f.contractor.length && !f.contractor.includes(r.assigned_company)) return false;
+      if (f.status.length && !f.status.includes(r.status)) return false;
+      if (f.phase.length && !f.phase.includes(this.phaseOf(r))) return false;
+      return true;
+    });
+  }
+
+  // ─── 3. PLOTLY CHART CONFIG ─────────────────────────────────────────────────
+
+  baseLayout(extra = {}) {
+    const out = Object.assign({
+      plot_bgcolor: 'rgba(0,0,0,0)', paper_bgcolor: 'rgba(0,0,0,0)',
+      font: { family: this.FONT, size: 11, color: this.C.muted },
+      margin: { t: 30, b: 30, l: 10, r: 10 },
+      legend: { bgcolor: 'rgba(0,0,0,0)', font: { color: this.C.muted, size: 11 } },
+    }, extra);
+    out.xaxis = Object.assign({ gridcolor: this.C.border, tickfont: { color: this.C.muted }, automargin: true }, extra.xaxis || {});
+    out.yaxis = Object.assign({ gridcolor: this.C.border, tickfont: { color: this.C.muted }, automargin: true }, extra.yaxis || {});
+    return out;
+  }
+
+  plot(id, traces, layout) {
+    const el = this.q(id);
+    if(el) Plotly.react(el, traces, this.baseLayout(layout), this.CFG);
+  }
+
+  // ─── 4. EVENTS & DATA LOADING ───────────────────────────────────────────────
+
+  bindEvents() {
+    // Native Tab Switching + Plotly Redraw
+    const tabs = this.qa('.ca-tab');
+    tabs.forEach(btn => {
+      btn.onclick = () => {
+        tabs.forEach(b => b.classList.remove('active'));
+        this.qa('.ca-tabpage').forEach(p => p.classList.remove('active'));
+        
+        btn.classList.add('active');
+        const targetPage = this.q('ca-tab-' + btn.dataset.tab);
+        targetPage.classList.add('active');
+        
+        // Trigger window resize so Plotly natively recalculates SVGs inside the visible container
+        window.dispatchEvent(new Event('resize'));
+      };
+    });
+
+    ['ca-fDiscipline','ca-fContractor','ca-fStatus','ca-fPhase'].forEach(id => {
+      this.q(id).addEventListener('change', () => {
+        this.STATE.filters = {
+          discipline: this.readCheckGroup('ca-fDiscipline'),
+          contractor: this.readCheckGroup('ca-fContractor'),
+          status: this.readCheckGroup('ca-fStatus'),
+          phase: this.readCheckGroup('ca-fPhase'),
+        };
+        this.renderAll();
+      });
+    });
+
+    this.q('ca-refreshBtn').onclick = async () => {
+      const btn = this.q('ca-refreshBtn');
+      btn.disabled = true; btn.textContent = '⏳ Refreshing…';
+      try {
+        if (this.REFRESH_ENDPOINT) { await fetch(this.REFRESH_ENDPOINT, { method: 'POST' }); }
+        await this.loadProject(this.STATE.project);
+      } finally { btn.disabled = false; btn.textContent = '🔄 Refresh Data'; }
+    };
+  }
+
+  buildCheckGroup(id, values) {
+    const esc = (s) => String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+    this.q(id).innerHTML = values.map(v =>
+      `<label><input type="checkbox" value="${esc(v)}" /><span title="${esc(v)}">${esc(v)}</span></label>`
+    ).join('');
+  }
+
+  readCheckGroup(id) {
+    return [...this.container.querySelectorAll(`#${id} input[type="checkbox"]:checked`)].map(i => i.value);
+  }
+
+  rebuildFilterOptions() {
+    const d = this.STATE.data;
+    const disciplines = this.uniq(d.equipment.map(e => e.discipline)).filter(x => !this.isBad(x)).sort();
+    const contractors = this.uniq(d.companies.map(c => c.name)).filter(x => !this.isBad(x)).sort();
+    const phases = [...this.uniq(d.equipment.map(e => e.building_phase)).filter(x => x && x !== 'Unknown').sort(), 'Unknown'];
+    
+    this.buildCheckGroup('ca-fDiscipline', disciplines);
+    this.buildCheckGroup('ca-fContractor', contractors);
+    this.buildCheckGroup('ca-fStatus', ['Open','In Progress','Pending Review','Closed']);
+    this.buildCheckGroup('ca-fPhase', phases);
+  }
+
+  async init() {
+    try {
+      const resp = await fetch('shared-dashboard/html-dashboard/data/projects.json');
+      const projects = await resp.json();
+      const sel = this.q('ca-projectSelect');
+      sel.innerHTML = projects.map(p => `<option value="${p.project_id}">${p.name}</option>`).join('');
+      sel.onchange = () => { this.STATE.project = sel.value; this.loadProject(sel.value); };
+      this.STATE.project = projects[0].project_id;
+      await this.loadProject(this.STATE.project);
+    } catch (e) {
+      this.q('ca-loading').textContent = 'Error: ' + e.message; 
+      console.error(e);
+    }
+  }
+
+  async loadProject(pid) {
+    this.q('ca-loading').style.display = 'block';
+    this.q('ca-dash').style.display = 'none';
+    
+    const resp = await fetch(`shared-dashboard/html-dashboard/data/project_${pid}.json`);
+    this.STATE.data = await resp.json();
+    this.STATE.eqPhase = new Map(this.STATE.data.equipment.map(e => [String(e.equipment_id), e.building_phase]));
+    this.STATE.filters = { discipline: [], contractor: [], status: [], phase: [] };
+    this.EQ_FILTER = { bldg: 'All', floor: 'All' };
+    
+    this.rebuildFilterOptions();
+    this.renderAll();
+    
+    this.q('ca-loading').style.display = 'none';
+    this.q('ca-dash').style.display = 'block';
+    window.dispatchEvent(new Event('resize'));
+  }
+
+  renderAll() {
+    const d = this.STATE.data;
+    const issues = this.applyFilters(d.issues);
+    const checklists = this.applyFilters(d.checklists);
+    const tests = this.applyFilters(d.tests);
+    const equipment = this.applyFilters(d.equipment);
+    
+    this.renderIssues(issues);
+    this.renderChecklists(checklists);
+    this.renderTests(tests, issues);
+    this.renderEquipment(equipment, checklists, tests, issues);
+    
+    this.q('ca-pageTitle').textContent = d.project_name || 'Project Dashboard';
+    const synced = d.data_synced_at ? new Date(d.data_synced_at) : null;
+    const isData = !!(synced && !isNaN(synced));
+    const stamp = isData ? synced : new Date();
+    const prefix = isData ? 'Data as of: ' : 'Loaded: ';
+    
+    this.q('ca-pageMeta').textContent = prefix + stamp.toLocaleString('en-US', { month:'long', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit' });
+    this.q('ca-refreshed').textContent = prefix + stamp.toLocaleString('en-US', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
+  }
+
+  // ─── TAB 1: ISSUES ──────────────────────────────────────────────────────────
+
+  renderIssues(issues) {
+    const root = this.q('ca-tab-issues');
+    if (!issues.length) { root.innerHTML = `<div class="ca-empty">No issue data available.</div>`; return; }
+
+    const open = issues.filter(i => i.status !== 'Closed');
+    this.STATE.openIssues = open;
+    const dopen = (i) => +i.days_open || 0;
+    const esc90 = open.filter(i => dopen(i) > 90);
+    const esc60 = open.filter(i => dopen(i) > 60 && dopen(i) <= 90);
+    const esc30 = open.filter(i => dopen(i) > 30 && dopen(i) <= 60);
+    const highPri = open.filter(i => (i.priority || '').includes('High'));
+
+    let html = this.section('Key Metrics') + '<div class="ca-kpi-row">' +
+      this.kpi('Total Open Issues', open.length, open.length > 10 ? 'kpi-red' : 'kpi-yellow', 'non-closed') +
+      this.kpi('Critical · &gt;90 Days', esc90.length, 'kpi-red', 'escalate now') +
+      this.kpi('Escalate · 60–90 Days', esc60.length, 'kpi-yellow', 'past due') +
+      this.kpi('Watch · 30–60 Days', esc30.length, 'kpi-blue', 'aging') +
+      this.kpi('High Priority', highPri.length, 'kpi-red', 'open &amp; high') + '</div>';
+
+    html += this.section('Issue Burn-Down &amp; Projection') + this.chartBox('ca-iss-burndown', 420) +
+      '<div class="ca-caption" id="ca-iss-burncap"></div>';
+
+    html += this.section('Issue Breakdown') +
+      `<div class="ca-grid2">${this.chartBox('ca-iss-priority', 400)}${this.chartBox('ca-iss-status', 380)}</div>`;
+    html += this.section('Issues by Contractor') + this.chartBox('ca-iss-contractor', 400);
+
+    html += this.section('Escalation by Contractor') +
+      `<div class="ca-slider-wrap">Show open issues aging more than
+         <span id="ca-iss-thval">${this.ISS_THRESH}</span> days
+         <input type="range" id="ca-iss-thresh" min="0" max="180" step="5" value="${this.ISS_THRESH}" /></div>
+       <div id="ca-iss-escalation"></div>`;
+
+    html += this.section('Open Issues Detail');
+    const openDetail = issues.filter(i => i.status !== 'Closed');
+    if (openDetail.length) {
+      const rows = openDetail.map(i => ({
+        'Issue #': i.name,
+        Aging: i.aging_category === '>60 Days' ? '🔴 >60 Days'
+          : i.aging_category === '45-60 Days' ? '🟡 45-60 Days' : '🟢 Under 45 Days',
+        'Days Open': i.days_open, Priority: i.priority, Division: i.discipline,
+        'Assigned To': this.fmtAssigned(i), Status: i.status, Description: i.description,
+      }));
+      html += this.table(['Issue #','Aging','Days Open','Priority','Division','Assigned To','Status','Description'].map(k => ({ k, label: k })), rows);
+    } else { html += `<div class="ca-ok">✅ No open issues with current filters.</div>`; }
+
+    const allRows = issues.map(i => ({
+      'Issue #': i.name, Priority: i.priority, Status: i.status, Division: i.discipline,
+      'Assigned To': this.fmtAssigned(i), 'Date Created': this.fmtDate(i.date_created),
+      'In Progress Date': this.fmtDate(i.in_progress_date), 'Date Closed': this.fmtDate(i.date_closed),
+      'Days Open': i.days_open, Description: i.description,
+    }));
+    html += `<details><summary>📄 View All Issues (${issues.length})</summary>` +
+      this.table(['Issue #','Priority','Status','Division','Assigned To','Date Created',
+        'In Progress Date','Date Closed','Days Open','Description'].map(k => ({ k, label: k })), allRows) +
+      `</details>`;
+    root.innerHTML = html;
+
+    this.renderBurndown(issues);
+    this.renderEscalation();
+    const th = this.q('ca-iss-thresh');
+    if (th) th.addEventListener('input', () => {
+      this.ISS_THRESH = +th.value;
+      this.q('ca-iss-thval').textContent = this.ISS_THRESH;
+      this.renderEscalation();
+    });
+
+    const pri = this.groupSize(issues, 'priority').filter(d => !this.isBad(d.key));
+    const sev = (p) => { p = p.toLowerCase();
+      if (['critical','p0','high'].some(x => p.includes(x))) return 0;
+      if (['moderate','p1','medium'].some(x => p.includes(x))) return 1;
+      if (['low','p2','minor'].some(x => p.includes(x))) return 2; return 3; };
+    pri.sort((a, b) => sev(a.key) - sev(b.key));
+    const priScale = ['#E04040','#F4B942','#39B54A','#4A90D9','#8A8F98'];
+    this.plot('ca-iss-priority', [{
+      type: 'pie', hole: 0.65, labels: pri.map(d => d.key), values: pri.map(d => d.count),
+      marker: { colors: pri.map((_, i) => priScale[i % priScale.length]), line: { color: this.C.panel, width: 2 } },
+      textinfo: 'none', hovertemplate: '<b>%{label}</b><br>%{value} (%{percent})<extra></extra>',
+    }], {
+      title: { text: 'All Issues by Priority', font: { color: this.C.muted, family: this.COND, size: 12 } },
+      showlegend: true,
+      legend: { orientation: 'v', y: -0.1, yanchor: 'top', x: 0, xanchor: 'left' },
+      margin: { t: 40, b: 120, l: 10, r: 10 }
+    });
+
+    const statusColors = { Open:'#E04040','In Progress':'#4A90D9','Pending Review':'#F4B942','Pending Verification':'#F4B942', Closed:'#39B54A', Void:'#8A8F98' };
+    const st = this.groupSize(issues, 'status');
+    this.plot('ca-iss-status', [{ type: 'bar', x: st.map(d => d.key), y: st.map(d => d.count), marker: { color: st.map(d => statusColors[d.key] || this.C.muted) } }],
+      { title: { text: 'All Issues by Status', font: { color: this.C.muted, family: this.COND, size: 12 } }, margin: { t: 40, b: 40, l: 10, r: 10 } });
+
+    const con = this.groupSize(issues, 'assigned_company').sort((a, b) => b.count - a.count).slice(0, 15);
+    this.plot('ca-iss-contractor', [{ type: 'bar', x: con.map(d => d.key), y: con.map(d => d.count), marker: { color: con.map(d => d.count), colorscale: 'Blues' } }],
+      { title: { text: 'All Issues per Contractor', font: { color: this.C.muted, family: this.COND, size: 12 } }, xaxis: { tickangle: -35, tickfont: { color: this.C.muted } }, margin: { t: 40, b: 90, l: 10, r: 10 } });
+  }
+
+  renderBurndown(issues) {
+    const box = this.q('ca-iss-burndown');
+    const cap = this.q('ca-iss-burncap');
+    const cMap = new Map(), xMap = new Map();
+    for (const i of issues) {
+      if (i.date_created) { const w = this.weekKey(i.date_created); if (w) cMap.set(w, (cMap.get(w) || 0) + 1); }
+      if (i.date_closed)  { const w = this.weekKey(i.date_closed);  if (w) xMap.set(w, (xMap.get(w) || 0) + 1); }
+    }
+    if (!cMap.size) { box.innerHTML = '<div class="ca-empty">No dated issues to chart.</div>'; cap.textContent = ''; return; }
+    const first = [...cMap.keys(), ...xMap.keys()].sort()[0];
+    const weeks = [];
+    for (let d = new Date(first); d <= new Date(); d.setDate(d.getDate() + 7)) weeks.push(d.toISOString().slice(0, 10));
+    let cumC = 0, cumX = 0;
+    const openY = [], weeklyClosed = [], weeklyCreated = [];
+    for (const w of weeks) {
+      cumC += cMap.get(w) || 0; cumX += xMap.get(w) || 0;
+      openY.push(cumC - cumX); weeklyClosed.push(xMap.get(w) || 0); weeklyCreated.push(cMap.get(w) || 0);
+    }
+    this.plot('ca-iss-burndown', [
+      { type: 'bar', name: 'Opened', x: weeks, y: weeklyCreated, marker: { color: this.C.border } },
+      { type: 'bar', name: 'Closed', x: weeks, y: weeklyClosed, marker: { color: this.C.green } },
+      { type: 'scatter', mode: 'lines+markers', name: 'Open backlog', x: weeks, y: openY, line: { color: this.C.red, width: 2 }, marker: { size: 5 } },
+    ], {
+      barmode: 'group', legend: { orientation: 'v', y: -0.15, yanchor: 'top', x: 0, xanchor: 'left' },
+      xaxis: { gridcolor: this.C.border, tickfont: { color: this.C.muted } }, yaxis: { title: 'Issues', gridcolor: this.C.border, tickfont: { color: this.C.muted } },
+      margin: { t: 40, b: 100, l: 40, r: 10 }
+    });
+
+    const last3 = weeklyClosed.slice(-3);
+    const avg = last3.length ? last3.reduce((a, b) => a + b, 0) / last3.length : 0;
+    const backlog = openY[openY.length - 1] || 0;
+    if (avg > 0) {
+      const wks = Math.ceil(backlog / avg);
+      const proj = new Date(Date.now() + wks * 7 * 864e5);
+      cap.innerHTML = `Trailing 3-week close rate: <b>${avg.toFixed(1)}</b>/wk · Open backlog: <b>${backlog}</b> · ` +
+        `At this pace, cleared in ~<b>${wks}</b> weeks (${proj.toLocaleDateString('en-US')}). <span style="color:var(--muted)">Indicative — issue closures only.</span>`;
+    } else {
+      cap.innerHTML = `Open backlog: <b>${backlog}</b> · No closures in the last 3 weeks — projection unavailable.`;
+    }
+  }
+
+  renderEscalation() {
+    const root = this.q('ca-iss-escalation');
+    if (!root) return;
+    const open = this.STATE.openIssues || [];
+    const th = this.ISS_THRESH;
+    const aged = open.filter(i => (+i.days_open || 0) > th);
+    if (!aged.length) { root.innerHTML = `<div class="ca-ok">✅ No open issues aging more than ${th} days.</div>`; return; }
+    const cos = this.uniq(aged.map(i => i.assigned_company || 'Unassigned'));
+    const rows = cos.map(co => {
+      const r = aged.filter(i => (i.assigned_company || 'Unassigned') === co);
+      const inBand = (lo, hi) => r.filter(i => { const d = +i.days_open || 0; return d > lo && (hi == null || d <= hi); }).length;
+      return { Contractor: co, 'Aged Issues': r.length, '🔴 &gt;90d': inBand(90, null),
+        '🟡 60–90d': inBand(60, 90), '🔵 30–60d': inBand(30, 60), 'Oldest (days)': Math.max(...r.map(i => +i.days_open || 0)) };
+    }).sort((a, b) => b['Aged Issues'] - a['Aged Issues']);
+    root.innerHTML = `<div class="ca-caption">${aged.length} open issue(s) aging more than ${th} days, across ${cos.length} contractor(s).</div>` +
+      this.table(['Contractor','Aged Issues','🔴 &gt;90d','🟡 60–90d','🔵 30–60d','Oldest (days)'].map(k => ({ k, label: k })), rows);
+  }
+
+  // ─── TAB 2: CHECKLISTS ──────────────────────────────────────────────────────
+
+  renderChecklists(cl) {
+    const root = this.q('ca-tab-checklists');
+    if (!cl.length) { root.innerHTML = `<div class="ca-empty">No checklist data available.</div>`; return; }
+
+    const levelsOrdered = ['L2','L3','L4','FAT'];
+    const levelVals = new Set(cl.map(c => c.level));
+    const active = levelsOrdered.filter(lv => levelVals.has(lv));
+
+    let html = this.section('Checklist Status by Level') +
+      `<div class="ca-kpi-row" style="grid-template-columns:repeat(${active.length},minmax(0,1fr))">` +
+      active.map((lv, i) => this.chartBox(`ca-cl-donut-${i}`, 420)).join('') + '</div>';
+    html += this.section('Completion by Discipline') + this.chartBox('ca-cl-disc', 400);
+    html += this.section('Checklists by Level &amp; Discipline') + this.chartBox('ca-cl-leveldisc', 420);
+    html += this.section('Open Checklists by Company &amp; Level') + this.chartBox('ca-cl-company', 460);
+    html += this.section('Completion by Contractor') + '<div id="ca-cl-contractor-table"></div>';
+    html += '<div id="ca-cl-pending"></div>';
+    root.innerHTML = html;
+
+    const dcStatusColors = { 'Not Started':'#8A8F98','In Progress':'#F5A623','GC to Verify':'#4A90D9','Finished':'#39B54A' };
+    const levelColors = { L2:'#7F77DD', L3:'#1D9E75', L4:'#5DCAA5', FAT:'#85B7EB' };
+
+    active.forEach((lv, i) => {
+      const sub = cl.filter(c => c.level === lv);
+      const sc = this.groupSize(sub, 'status');
+      this.plot(`ca-cl-donut-${i}`, [{
+        type: 'pie', hole: 0.65, labels: sc.map(d => d.key), values: sc.map(d => d.count),
+        marker: { colors: sc.map(d => dcStatusColors[d.key] || this.C.border) },
+        textinfo: 'percent', textfont: { size: 10, color: '#23262B', family: this.FONT }, hovertemplate: '%{label}: %{value}<extra></extra>',
+      }], {
+        title: { text: lv, font: { size: 16, color: levelColors[lv] || this.C.text, family: this.COND }, x: 0.5, xanchor: 'center' },
+        annotations: [{ text: `<b>${sub.length.toLocaleString()}</b>`, x: 0.5, y: 0.5, showarrow: false, font: { size: 20, color: this.C.text, family: this.COND } }],
+        showlegend: true, legend: { orientation: 'v', y: -0.1, yanchor: 'top', x: 0, xanchor: 'left' }, margin: { t: 30, b: 140, l: 5, r: 5 }
+      });
+    });
+
+    const discs = this.uniq(cl.map(c => c.discipline)).filter(d => !this.isBad(d));
+    const dc = discs.map(d => {
+      const rows = cl.filter(c => c.discipline === d);
+      const done = rows.filter(c => this.COMPLETE_STATUSES.includes(c.status)).length;
+      return { discipline: d, total: rows.length, done, remaining: rows.length - done, pct: rows.length ? +(done / rows.length * 100).toFixed(1) : 0 };
+    }).sort((a, b) => a.total - b.total);
+    
+    this.plot('ca-cl-disc', [
+      { type: 'bar', orientation: 'h', y: dc.map(d => d.discipline), x: dc.map(d => d.done), name: 'Completed', marker: { color: this.C.green }, text: dc.map(d => d.done > 0 ? `${d.done} (${d.pct}%)` : ''), textposition: 'inside', textfont: { color: this.C.text, family: this.FONT } },
+      { type: 'bar', orientation: 'h', y: dc.map(d => d.discipline), x: dc.map(d => d.remaining), name: 'Remaining', marker: { color: this.C.border }, text: dc.map(d => String(d.total)), textposition: 'outside', textfont: { color: this.C.muted, family: this.FONT } },
+    ], { barmode: 'stack', legend: { orientation: 'v', y: -0.2, yanchor: 'top', x: 0, xanchor: 'left' }, yaxis: { tickfont: { color: this.C.muted, size: 10 }, automargin: true }, margin: { t: 10, b: 100, l: 10, r: 40 } });
+
+    const discColors = { Mechanical:'#E74C3C', Electrical:'#F5A623', 'Electrical Power Monitoring System':'#4A90D9', 'Fire Protection':'#39B54A' };
+    const discAbbr = { 'Electrical Power Monitoring System':'EPMS' };
+    const ldTraces = discs.map(d => {
+      const perLevel = active.map(lv => cl.filter(c => c.level === lv && c.discipline === d).length);
+      return { type: 'bar', orientation: 'h', name: discAbbr[d] || d, y: active, x: perLevel, marker: { color: discColors[d] || this.C.muted }, text: perLevel.map(v => v || ''), textposition: 'inside', textfont: { color: '#23262B', family: this.FONT }, hovertemplate: `${d}: %{x}<extra></extra>` };
+    });
+    this.plot('ca-cl-leveldisc', ldTraces, { barmode: 'stack', yaxis: { categoryorder: 'array', categoryarray: [...active].reverse(), tickfont: { color: this.C.text, size: 13 }, automargin: true }, legend: { orientation: 'v', y: -0.2, yanchor: 'top', x: 0, xanchor: 'left' }, margin: { t: 40, b: 120, l: 10, r: 20 } });
+
+    const openCl = cl.filter(c => !this.COMPLETE_STATUSES.includes(c.status) && active.includes(c.level));
+    const coTotals = this.groupSize(openCl, 'assigned_company').sort((a, b) => b.count - a.count).slice(0, 10);
+    const topCos = coTotals.map(d => d.key);
+    const coTraces = active.map(lv => ({
+      type: 'bar', name: lv, x: topCos, y: topCos.map(co => openCl.filter(c => c.assigned_company === co && c.level === lv).length), marker: { color: levelColors[lv] || this.C.muted },
+    }));
+    this.plot('ca-cl-company', coTraces, { barmode: 'group', xaxis: { tickangle: -35, tickfont: { color: this.C.muted }, automargin: true }, yaxis: { gridcolor: this.C.border, tickfont: { color: this.C.muted }, automargin: true }, legend: { orientation: 'v', y: -0.3, yanchor: 'top', x: 0, xanchor: 'left' }, margin: { t: 40, b: 160, l: 10, r: 10 } });
+
+    const unassigned = ['not assigned yet','not assigned','','nan','none'];
+    const classify = (c) => {
+      const name = String(c.assigned_company || '').trim().toLowerCase();
+      const atype = String(c.assigned_type || '').trim().toLowerCase();
+      if (unassigned.includes(name)) return 'unassigned';
+      if (atype === 'role') return 'role'; return 'contractor';
+    };
+    const contractorCl = cl.filter(c => classify(c) === 'contractor');
+    const coSummary = this.uniq(contractorCl.map(c => c.assigned_company)).map(co => {
+      const rows = contractorCl.filter(c => c.assigned_company === co);
+      const done = rows.filter(c => this.COMPLETE_STATUSES.includes(c.status)).length;
+      return { Contractor: co, Total: rows.length, Completed: done, 'Completion %': rows.length ? +(done / rows.length * 100).toFixed(1) : 0 };
+    }).sort((a, b) => b.Total - a.Total);
+    this.q('ca-cl-contractor-table').innerHTML = this.table(['Contractor','Total','Completed','Completion %'].map(k => ({ k, label: k })), coSummary);
+
+    const pending = cl.filter(c => ['role','unassigned'].includes(classify(c)));
+    if (pending.length) {
+      const ps = this.groupSize(pending, 'assigned_company').map(d => ({ 'Role / Status': unassigned.includes(String(d.key).trim().toLowerCase()) ? '⚠️ No Contractor Assigned' : d.key, Count: d.count })).sort((a, b) => b.Count - a.Count);
+      this.q('ca-cl-pending').innerHTML = this.section('Pending Assignment') + this.table(['Role / Status','Count'].map(k => ({ k, label: k })), ps);
+    }
+  }
+
+  // ─── TAB 3: TESTS ───────────────────────────────────────────────────────────
+
+  renderTests(tests, issues) {
+    const root = this.q('ca-tab-tests');
+    if (!tests.length) { root.innerHTML = `<div class="ca-empty">No functional test data available.</div>`; return; }
+    issues = issues || [];
+
+    const total = tests.length;
+    const passed = tests.filter(t => t.status === 'Passed').length;
+    const failed = tests.filter(t => t.status === 'Failed').length;
+    const notStarted = tests.filter(t => t.status === 'Not Started').length;
+    const passRate = total ? (passed / total * 100) : 0;
+
+    let html = this.section('Functional Test Summary') + '<div class="ca-kpi-row">' +
+      this.kpi('Total Tests', total, 'kpi-white') + this.kpi('Passed', passed, 'kpi-green') +
+      this.kpi('Failed', failed, 'kpi-red') + this.kpi('Not Started', notStarted, 'kpi-white') + '</div>';
+    html += `<div class="ca-grid2" style="margin-top:16px">
+      <div>${this.section('Tests by Status')}${this.chartBox('ca-ts-status', 400)}</div>
+      <div>${this.section('Pass Rate')}${this.chartBox('ca-ts-gauge', 360)}</div></div>`;
+    html += this.section('Results by Equipment Unit') + this.chartBox('ca-ts-unit', 420);
+    html += this.section('Results by Contractor') + this.chartBox('ca-ts-contractor', 420);
+    html += this.section('Test Attempt Concentration') + `<div class="ca-caption">More attempts = more re-testing effort (and burn). Darker cells are being run repeatedly.</div>` + this.chartBox('ca-ts-heat', 340);
+    html += this.section('Open Issues by Test Attempt Count') + `<div class="ca-caption">How many open issues sit on equipment at each attempt level.</div>` + this.chartBox('ca-ts-issattempt', 280);
+    
+    const allRows = tests.map(t => ({ Name: t.name, Status: t.status, 'Assigned To': t.assigned_name, Discipline: t.discipline, Attempts: t.attempt_count, Asset: t.asset_name }));
+    html += `<details><summary>View All Tests (${tests.length})</summary>` + this.table(['Name','Status','Assigned To','Discipline','Attempts','Asset'].map(k => ({ k, label: k })), allRows) + `</details>`;
+    root.innerHTML = html;
+
+    const tsColors = { Passed:'#39B54A', Failed:'#E04040', 'Not Started':'#3E4248', 'In Progress':'#4A90D9' };
+    const sc = this.groupSize(tests, 'status');
+    this.plot('ca-ts-status', [{ type: 'pie', hole: 0.65, labels: sc.map(d => d.key), values: sc.map(d => d.count), marker: { colors: sc.map(d => tsColors[d.key] || this.C.muted) }, textinfo: 'percent', textfont: { size: 11, color: this.C.text, family: this.FONT }, hovertemplate: '%{label}: %{value}<extra></extra>' }],
+      { annotations: [{ text: `<b>${total}</b>`, x: 0.5, y: 0.5, showarrow: false, font: { size: 22, color: this.C.text, family: this.COND } }], showlegend: true, legend: { orientation: 'v', y: -0.1, yanchor: 'top', x: 0, xanchor: 'left' }, margin: { t: 10, b: 120, l: 10, r: 10 } });
+
+    this.plot('ca-ts-gauge', [{ type: 'indicator', mode: 'gauge+number', value: +passRate.toFixed(1), number: { suffix: '%', font: { size: 36, color: this.C.text, family: this.COND } }, gauge: { axis: { range: [0, 100], tickfont: { color: this.C.muted } }, bar: { color: this.C.green }, bgcolor: this.C.border, borderwidth: 0, threshold: { line: { color: this.C.text, width: 2 }, thickness: 0.75, value: passRate } } }],
+      { margin: { t: 40, b: 10, l: 30, r: 30 } });
+
+    const unitOf = (a) => { const m = String(a || '').match(/^([A-Za-z]+\d+)/); return m ? m[1] : null; };
+    const units = this.uniq(tests.map(t => unitOf(t.asset_name)).filter(Boolean)).sort();
+    const byUnit = (st) => units.map(u => tests.filter(t => unitOf(t.asset_name) === u && t.status === st).length);
+    this.plot('ca-ts-unit', [
+      { type: 'bar', name: 'Passed', x: units, y: byUnit('Passed'), marker: { color: this.C.green } },
+      { type: 'bar', name: 'Failed', x: units, y: byUnit('Failed'), marker: { color: this.C.red } },
+      { type: 'bar', name: 'Not Started', x: units, y: byUnit('Not Started'), marker: { color: this.C.border } },
+    ], { barmode: 'stack', legend: { orientation: 'v', y: -0.2, yanchor: 'top', x: 0, xanchor: 'left' }, margin: { t: 40, b: 120, l: 10, r: 10 } });
+
+    const cos = this.uniq(tests.map(t => t.assigned_company)).map(co => {
+      const rows = tests.filter(t => t.assigned_company === co);
+      const p = rows.filter(t => t.status === 'Passed').length, f = rows.filter(t => t.status === 'Failed').length;
+      return { co, total: rows.length, passed: p, failed: f, other: rows.length - p - f };
+    }).sort((a, b) => a.total - b.total);
+    this.plot('ca-ts-contractor', [
+      { type: 'bar', orientation: 'h', name: 'Passed', y: cos.map(d => d.co), x: cos.map(d => d.passed), marker: { color: this.C.green } },
+      { type: 'bar', orientation: 'h', name: 'Failed', y: cos.map(d => d.co), x: cos.map(d => d.failed), marker: { color: this.C.red } },
+      { type: 'bar', orientation: 'h', name: 'Not Started / In Progress', y: cos.map(d => d.co), x: cos.map(d => d.other), marker: { color: this.C.border } },
+    ], { barmode: 'stack', legend: { orientation: 'v', y: -0.2, yanchor: 'top', x: 0, xanchor: 'left' }, yaxis: { tickfont: { color: this.C.text, size: 11 } }, margin: { t: 40, b: 120, l: 10, r: 40 }, height: Math.max(380, cos.length * 60) });
+
+    const atts = this.uniq(tests.map(t => +t.attempt_count || 0).filter(n => n > 0)).sort((a, b) => a - b);
+    const heatUnits = this.uniq(tests.map(t => unitOf(t.asset_name)).filter(Boolean)).sort();
+    if (atts.length && heatUnits.length) {
+      const z = heatUnits.map(u => atts.map(a => tests.filter(t => unitOf(t.asset_name) === u && (+t.attempt_count || 0) === a).length));
+      this.plot('ca-ts-heat', [{ type: 'heatmap', x: atts.map(a => a + (a === 1 ? ' attempt' : ' attempts')), y: heatUnits, z, colorscale: [[0, this.C.panel], [0.01, '#3E4248'], [0.5, this.C.yellow], [1, this.C.red]], showscale: true, xgap: 2, ygap: 2, hovertemplate: 'Unit %{y} · %{x} · %{z} test(s)<extra></extra>' }],
+        { xaxis: { tickfont: { color: this.C.muted } }, yaxis: { tickfont: { color: this.C.text, size: 10 }, automargin: true }, margin: { t: 10, b: 30, l: 10, r: 10 } });
+    } else { this.q('ca-ts-heat').innerHTML = '<div class="ca-empty">No attempt data to chart.</div>'; }
+
+    const assetAttempt = new Map();
+    for (const t of tests) { const k = String(t.asset_key); const a = +t.attempt_count || 0; assetAttempt.set(k, Math.max(assetAttempt.get(k) || 0, a)); }
+    const issAttempt = atts.map(a => {
+      const assets = new Set([...assetAttempt.entries()].filter(([, v]) => v === a).map(([k]) => k));
+      return { a, n: issues.filter(i => i.status !== 'Closed' && assets.has(String(i.asset_key))).length };
+    });
+    if (issAttempt.some(d => d.n > 0)) {
+      this.plot('ca-ts-issattempt', [{ type: 'bar', x: issAttempt.map(d => '#' + d.a), y: issAttempt.map(d => d.n), marker: { color: this.C.red }, text: issAttempt.map(d => d.n || ''), textposition: 'outside', textfont: { color: this.C.muted, family: this.FONT } }],
+        { xaxis: { title: 'Attempt count', tickfont: { color: this.C.muted } }, yaxis: { title: 'Open issues', gridcolor: this.C.border, tickfont: { color: this.C.muted } }, margin: { t: 10, b: 40, l: 40, r: 10 } });
+    } else { this.q('ca-ts-issattempt').innerHTML = '<div class="ca-empty">No open issues linked to tested equipment.</div>'; }
+  }
+
+  // ─── TAB 4: EQUIPMENT ───────────────────────────────────────────────────────
+
+  renderEquipment(equipment, checklists, tests, issues) {
+    const root = this.q('ca-tab-equipment');
+    if (!equipment.length) { root.innerHTML = `<div class="ca-empty">No equipment data available.</div>`; return; }
+
+    const clAgg = new Map(), tsAgg = new Map(), issAgg = new Map();
+    for (const c of checklists) { const k = String(c.asset_key); const a = clAgg.get(k) || { total: 0, done: 0 }; a.total++; if (this.COMPLETE_STATUSES.concat(['GC to Verify']).includes(c.status)) a.done++; clAgg.set(k, a); }
+    for (const t of tests) { const k = String(t.asset_key); const a = tsAgg.get(k) || { total: 0, passed: 0, failed: 0 }; a.total++; if (t.status === 'Passed') a.passed++; if (t.status === 'Failed') a.failed++; tsAgg.set(k, a); }
+    for (const i of issues) { const k = String(i.asset_key); const a = issAgg.get(k) || { total: 0, open: 0 }; a.total++; if (['Open','In Progress'].includes(i.status)) a.open++; issAgg.set(k, a); }
+
+    const eq = equipment.map(e => {
+      const k = String(e.equipment_id);
+      const cl = clAgg.get(k) || { total: 0, done: 0 };
+      const ts = tsAgg.get(k) || { total: 0, passed: 0, failed: 0 };
+      const is = issAgg.get(k) || { total: 0, open: 0 };
+      return { ...e, cl_total: cl.total, cl_done: cl.done, ts_total: ts.total, ts_passed: ts.passed, ts_failed: ts.failed, iss_total: is.total, iss_open: is.open };
+    });
+
+    const total = eq.length;
+    const delivered = eq.filter(e => e.status === 'Delivered').length;
+    const installing = eq.filter(e => e.status === 'Installation in Progress').length;
+    const released = eq.filter(e => e.status === 'Released').length;
+
+    const bldgs = ['All', ...this.uniq(eq.map(e => e.building_phase)).filter(b => b && b !== 'Unknown').sort()];
+    const floors = ['All', ...this.uniq(eq.map(e => e.floor_parsed)).filter(f => f && f !== 'Unknown').sort()];
+
+    let html = this.section('Equipment Overview') + '<div class="ca-kpi-row">' +
+      this.kpi('Total Equipment', total, 'kpi-white') + this.kpi('Released', released, 'kpi-white') +
+      this.kpi('Delivered', delivered, 'kpi-blue') + this.kpi('Installing', installing, 'kpi-green') + '</div>';
+    html += `<div class="ca-eq-filters" style="margin-top:16px">
+      <div><div class="ca-side-label">Building Phase</div>
+        <select id="ca-eqBldg">${bldgs.map(b => `<option ${b===this.EQ_FILTER.bldg?'selected':''}>${b}</option>`).join('')}</select></div>
+      <div><div class="ca-side-label">Floor</div>
+        <select id="ca-eqFloor">${floors.map(f => `<option ${f===this.EQ_FILTER.floor?'selected':''}>${f}</option>`).join('')}</select></div>
+    </div>`;
+    html += `<div id="ca-eq-body"></div>`;
+    root.innerHTML = html;
+
+    this.q('ca-eqBldg').onchange = (e) => { this.EQ_FILTER.bldg = e.target.value; this.renderEqBody(eq, total); };
+    this.q('ca-eqFloor').onchange = (e) => { this.EQ_FILTER.floor = e.target.value; this.renderEqBody(eq, total); };
+    this.renderEqBody(eq, total);
+  }
+
+  renderEqBody(eq, total) {
+    let f = eq;
+    if (this.EQ_FILTER.bldg !== 'All') f = f.filter(e => e.building_phase === this.EQ_FILTER.bldg);
+    if (this.EQ_FILTER.floor !== 'All') f = f.filter(e => e.floor_parsed === this.EQ_FILTER.floor);
+    const body = this.q('ca-eq-body');
+    if (!f.length) { body.innerHTML = `<div class="ca-empty">No equipment matches these filters.</div>`; return; }
+
+    let html = `<div class="ca-caption">Showing ${f.length} of ${total} equipment</div>`;
+    html += this.section('Equipment by Type') + this.chartBox('ca-eq-type', 360);
+    html += this.section('Checklist Completion by Equipment') +
+      `<div class="ca-caption">Sorted by lowest completion — the holdbacks rise to the top.</div>
+       <div class="ca-eq-search-wrap">
+         <input type="text" id="ca-eqSearch" placeholder="Search equipment name or type…" value="${this.EQ_SEARCH.q}" />
+         <label><input type="checkbox" id="ca-eqIncomplete" ${this.EQ_SEARCH.incompleteOnly ? 'checked' : ''}/> Incomplete only</label>
+       </div>
+       <div id="ca-eq-cl-table"></div>`;
+    
+    const rows = f.map(e => ({ Name: e.name, Type: e.type, Discipline: e.discipline, Status: e.status, Space: e.space, Building: e.building_phase, Floor: e.floor_parsed, Checklists: e.cl_total, 'CL Done': e.cl_done, Tests: e.ts_total, 'Tests Passed': e.ts_passed, Issues: e.iss_total, 'Issues Open': e.iss_open }));
+    html += `<details><summary>View All Equipment (${f.length})</summary>` + this.table(['Name','Type','Discipline','Status','Space','Building','Floor','Checklists','CL Done','Tests','Tests Passed','Issues','Issues Open'].map(k => ({ k, label: k })), rows) + `</details>`;
+    body.innerHTML = html;
+
+    const byType = (rows, agg) => {
+      const types = this.uniq(rows.map(e => e.type));
+      return types.map(t => { const r = rows.filter(e => e.type === t); return agg(t, r); });
+    };
+
+    let tsum = byType(f, (t, r) => ({ type: t, count: r.length })).sort((a, b) => a.count - b.count);
+    this.plot('ca-eq-type', [{ type: 'bar', orientation: 'h', y: tsum.map(d => d.type), x: tsum.map(d => d.count), marker: { color: this.C.blue }, text: tsum.map(d => d.count), textposition: 'outside', textfont: { color: this.C.muted, family: this.FONT } }],
+      { yaxis: { tickfont: { color: this.C.text, size: 11 } }, margin: { t: 10, b: 20, l: 10, r: 40 }, height: Math.max(300, tsum.length * 26) });
+
+    this.renderEqTable(f);
+    const sInput = this.q('ca-eqSearch'), sChk = this.q('ca-eqIncomplete');
+    if (sInput) sInput.addEventListener('input', () => {
+      this.EQ_SEARCH.q = sInput.value;
+      // PERF FIX: debounce — without this every keystroke re-renders the table.
+      clearTimeout(this._eqSearchDebounceTimer);
+      this._eqSearchDebounceTimer = setTimeout(() => this.renderEqTable(f), 220);
+    });
+    if (sChk) sChk.addEventListener('change', () => { this.EQ_SEARCH.incompleteOnly = sChk.checked; this.renderEqTable(f); });
+  }
+
+  renderEqTable(eqRows) {
+    const cont = this.q('ca-eq-cl-table');
+    if (!cont) return;
+    let r = eqRows.filter(e => e.cl_total > 0);
+    if (this.EQ_SEARCH.incompleteOnly) r = r.filter(e => e.cl_done < e.cl_total);
+    const q = this.EQ_SEARCH.q.trim().toLowerCase();
+    if (q) r = r.filter(e => String(e.name || '').toLowerCase().includes(q) || String(e.type || '').toLowerCase().includes(q));
+    r = r.map(e => ({ e, pct: Math.round(e.cl_done / e.cl_total * 100) })).sort((a, b) => a.pct - b.pct || (b.e.iss_open || 0) - (a.e.iss_open || 0));
+    
+    const rows = r.map(({ e, pct }) => ({
+      Equipment: e.name, Type: e.type, Phase: e.building_phase, Floor: e.floor_parsed,
+      'CL %': pct + '%', 'CL Done': `${e.cl_done}/${e.cl_total}`, 'Open Issues': e.iss_open || 0, Tests: `${e.ts_passed}/${e.ts_total}`, Status: e.status,
+    }));
+    cont.innerHTML = `<div class="ca-caption">${rows.length} equipment${this.EQ_SEARCH.incompleteOnly ? ' with incomplete checklists' : ''}${q ? ` matching “${q}”` : ''}.</div>` +
+      (rows.length ? this.table(['Equipment','Type','Phase','Floor','CL %','CL Done','Open Issues','Tests','Status'].map(k => ({ k, label: k })), rows) : '<div class="ca-ok">✅ No matching equipment.</div>');
+  }
+}
