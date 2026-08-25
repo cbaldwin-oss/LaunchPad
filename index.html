@@ -1660,22 +1660,13 @@ body.dark-mode .phase-row {
             <h2 style="margin: 0; color: white; font-size: 27px; letter-spacing: -0.3px;">Select a Project</h2>
             <p style="color: rgba(255,255,255,0.85); font-size: 15px; margin: 7px 0 0;">Your account has access to more than one LaunchPad project.</p>
         </div>
-        <span style="position: relative; font-size: 46px; flex-shrink: 0; display: inline-block; animation: rocket-blastoff 1.6s ease-in infinite;" title="Blast off">🚀</span>
+        <span style="position: relative; font-size: 46px; flex-shrink: 0; display: inline-block; transform: rotate(-45deg);" title="LaunchPad">🚀</span>
     </div>
     <div id="project-picker-list" style="padding: 28px 30px 20px; max-height: 65vh; overflow-y: auto; background: linear-gradient(rgba(255,255,255,0.85), rgba(255,255,255,0.85)), url('https://lh3.googleusercontent.com/u/0/d/1Wy_ftXtce-UG5jV-5vwS80lV1yt7QTbG') center/70% no-repeat;"></div>
     <div style="padding: 4px 30px 22px; text-align: center; border-top: 1px solid #eee;">
         <a href="javascript:void(0)" onclick="logout()" style="color: #757575; text-decoration: none; font-size: 13.5px;">Sign out</a>
     </div>
 </div>
-<style>
-@keyframes rocket-blastoff {
-    0%   { transform: translate(0, 0) rotate(-45deg); opacity: 1; }
-    55%  { transform: translate(16px, -22px) rotate(-45deg); opacity: 1; }
-    65%  { transform: translate(22px, -32px) rotate(-45deg); opacity: 0; }
-    66%  { transform: translate(0, 0) rotate(-45deg); opacity: 0; }
-    100% { transform: translate(0, 0) rotate(-45deg); opacity: 1; }
-}
-</style>
 
 <div id="auth-prompt" style="display: none; text-align: center; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); color: #333; max-width: 400px; margin: 0 20px;">
     
@@ -4452,12 +4443,12 @@ function renderProjectPicker(projects) {
     });
 
     const projectButton = (p) => `
-        <button class="tool-btn" style="display:flex; align-items:center; gap:14px; width:100%; margin-bottom:9px; padding:11px 14px; font-size:16px; text-align:left; justify-content:space-between; border:1px solid #dcdcdc; border-radius:10px; background:#fafafa; transition: background 0.15s, border-color 0.15s;"
+        <button class="tool-btn" style="display:flex; align-items:stretch; gap:0; width:100%; margin-bottom:8px; padding:0; font-size:15px; text-align:left; border:1px solid #dcdcdc; border-radius:10px; background:#fafafa; overflow:hidden; transition: background 0.15s, border-color 0.15s;"
             onmouseover="this.style.background='#e8f5e9'; this.style.borderColor='#2e7d32';"
             onmouseout="this.style.background='#fafafa'; this.style.borderColor='#dcdcdc';"
             onclick="chooseProject('${p.project_key}')">
-            <span style="font-weight:600; color:#1b1b1b;">${p.project_name || p.project_key}</span>
-            ${p.logo_url ? `<img src="${p.logo_url}" style="height:72px; width:72px; object-fit:contain; border-radius:6px; flex-shrink:0;">` : '<span style="font-size:26px; flex-shrink:0;">📁</span>'}
+            <span style="font-weight:600; color:#1b1b1b; padding: 10px 14px; display:flex; align-items:center; flex:1; min-width:0;">${p.project_name || p.project_key}</span>
+            ${p.logo_url ? `<img src="${p.logo_url}" style="align-self:stretch; width:110px; object-fit:cover; flex-shrink:0; display:block;">` : '<span style="font-size:22px; flex-shrink:0; display:flex; align-items:center; padding-right:14px;">📁</span>'}
         </button>
     `;
 
