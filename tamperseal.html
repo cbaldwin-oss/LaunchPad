@@ -675,9 +675,18 @@ input:not([type="checkbox"]), textarea, select {
     </div>
 
 <script>
-// 1. Corrected URL (removed /rest/v1/)
-const SUPABASE_URL = 'https://jrhrmntpfxoarulcnbqz.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpyaHJtbnRwZnhvYXJ1bGNuYnF6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg1OTAyNDUsImV4cCI6MjA5NDE2NjI0NX0.Gbru98OZX5n3gfiRHyQFl-UzzC2SJ9Gi0gjb_HD__SE';
+// Now points at the SAME shared Supabase project index.html/bridge.html use
+// (was previously its own separate project — see the multi-project
+// consolidation notes; the STY4Assets/STY4AssetRegistry data itself still
+// needs to be migrated into this project by hand, this only repoints the code).
+const SUPABASE_URL = 'https://rcnxetcomdrlxvlarqoc.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJjbnhldGNvbWRybHh2bGFycW9jIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY0NDIyMjksImV4cCI6MjA5MjAxODIyOX0.gP37sT5OrCOVRZXekMrBZHm5mtfnr6JrC2YGflWsDQU';
+
+// The project prefix, passed in via ?project=XXX by the LaunchPad shell
+// (index.html). Falls back to the prefix this file was originally built
+// for, so it still works if opened directly without a project param.
+const PROJECT_KEY = new URLSearchParams(window.location.search).get('project') || 'STY4';
+function T(tableName) { return `${PROJECT_KEY}${tableName}`; }
 
 const { createClient } = supabase;
 const _supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -716,7 +725,7 @@ async function initApp() {
     // Update the Realtime listener (around line 433)
     _supabase
     .channel('schema-db-changes')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'STY4Assets' }, (payload) => {
+    .on('postgres_changes', { event: '*', schema: 'public', table: T('Assets') }, (payload) => {
         if (isEditMode || isPreviewMode) return;
 
         if (payload.eventType === 'INSERT') {
@@ -804,7 +813,7 @@ async function findDuplicates() {
 async function loadBrokenAssets() {
     const select = document.getElementById('brokenAssetSelect');
     const { data, error } = await _supabase
-        .from('STY4Assets')
+        .from(T('Assets'))
         .select('asset_name')
         .ilike('status', '%broken%'); // Matches 'Broken' case-insensitive
 
@@ -824,7 +833,7 @@ async function loadBrokenSealsForAsset(assetName) {
     const list = document.getElementById('sealCheckboxList');
     
     const { data, error } = await _supabase
-        .from('STY4Assets')
+        .from(T('Assets'))
         .select('id, seal_number, location, sub_area')
         .eq('asset_name', assetName)
         .ilike('status', '%broken%');
@@ -882,7 +891,7 @@ function generateReinspectionPreview() {
 
 async function fetchLookupData() {
     // Replace 'STY4AssetRegistry' with your actual reference table name
-    const { data, error } = await _supabase.from('STY4AssetRegistry').select('asset_name, location');
+    const { data, error } = await _supabase.from(T('AssetRegistry')).select('asset_name, location');
     
     if (error) {
         console.error("Error fetching lookups:", error);
@@ -1004,7 +1013,7 @@ async function fetchHierarchyData(isSilent = false) {
 
     // 2. RESTORED SAFE FETCH: Uses select('*') to ensure client-side filters have access to all data
     while (fetchMore && allRecords.length < 10000) {
-        const { data, error } = await _supabase.from('STY4Assets').select('*').range(from, to);
+        const { data, error } = await _supabase.from(T('Assets')).select('*').range(from, to);
         if (error) {
             container.innerHTML = '<p style="text-align:center; color:red;">Error loading log hierarchy.</p>';
             return;
@@ -1436,7 +1445,7 @@ async function deleteSelected() {
 
     // 2. Perform the deletion in the database
     const { error } = await _supabase
-        .from('STY4Assets') 
+        .from(T('Assets')) 
         .delete()
         .in('id', idsToDelete); // Ensure your primary key column is lowercase 'id'
 
@@ -1467,7 +1476,7 @@ async function saveAllChanges() {
         // We use 'location' (lowercase) to match the keys in syncEdit
         // and the previous successful payloads.
         updatePromises.push(
-            _supabase.from('STY4Assets').update(changes).eq('id', Number(id))
+            _supabase.from(T('Assets')).update(changes).eq('id', Number(id))
         );
     }
 
@@ -1615,7 +1624,7 @@ async function loadBrokenSealsForAsset(assetName) {
     const list = document.getElementById('sealCheckboxList');
     
     const { data, error } = await _supabase
-        .from('STY4Assets')
+        .from(T('Assets'))
         .select('id, seal_number, location, sub_area')
         .eq('asset_name', assetName)
         .ilike('status', '%broken%');
@@ -1798,7 +1807,7 @@ async function saveNewEntries() {
             };
         });
 
-        const { error } = await _supabase.from('STY4Assets').insert(newRecords);
+        const { error } = await _supabase.from(T('Assets')).insert(newRecords);
         if (error) throw error;
 
         // Success Cleanup

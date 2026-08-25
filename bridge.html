@@ -763,15 +763,22 @@ if (SUPABASE_CONFIGURED && window.supabase) {
     supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 }
 
-// Table names. STY4schedule_items is the one table this app writes the actual
-// pull-plan data to. Everything else — the option lists that populate
-// dropdowns/checklists — is read from your existing "STY4dropdownoptions"
-// table, which uses one COLUMN per list instead of one row-category per
-// list: every non-null cell in a given column is one option for that list.
-// See README.md for the full walkthrough and how to adjust this mapping.
+// The project prefix, passed in via ?project=XXX by the LaunchPad shell
+// (index.html) when it points this iframe's src here. Falls back to the
+// prefix this file was originally built for, so it still works if opened
+// directly (e.g. during local development) without a project param.
+const PROJECT_KEY = new URLSearchParams(window.location.search).get('project') || 'STY4';
+
+// Table names. {PROJECT_KEY}schedule_items is the one table this app writes
+// the actual pull-plan data to. Everything else — the option lists that
+// populate dropdowns/checklists — is read from your existing
+// "{PROJECT_KEY}dropdownoptions" table, which uses one COLUMN per list
+// instead of one row-category per list: every non-null cell in a given
+// column is one option for that list. See README.md for the full
+// walkthrough and how to adjust this mapping.
 const TABLES = {
-    items: "STY4schedule_items",
-    dropdowns: "STY4dropdownoptions",
+    items: `${PROJECT_KEY}schedule_items`,
+    dropdowns: `${PROJECT_KEY}dropdownoptions`,
     assets: "assets",
     activities: "activities",
     contractors: "contractors",
@@ -779,11 +786,11 @@ const TABLES = {
     areas: "areas",
     types: "types"
 };
-// Which column in STY4dropdownoptions backs each list. "types" (the
+// Which column in {PROJECT_KEY}dropdownoptions backs each list. "types" (the
 // Mech/Elec/... legend + its colors) has no matching column in that table,
 // so it's kept as a small local list instead (see DB.fetchAll/insert/etc.
 // below) — edit DEFAULT_TYPE_COLORS further down to change the starting
-// set, or add a column to STY4dropdownoptions yourself and map it here.
+// set, or add a column to {PROJECT_KEY}dropdownoptions yourself and map it here.
 const DROPDOWN_COLUMN = {
     assets: "Assets",
     activities: "Activities",
@@ -826,7 +833,7 @@ let googleAccessToken = null;
    otherwise falls back to an in-browser localStorage store so the tool
    is fully usable for evaluation before credentials are wired in.
    "types" and each zone's end date always use localStorage, Supabase or
-   not, since STY4dropdownoptions has no columns for them. */
+   not, since {PROJECT_KEY}dropdownoptions has no columns for them. */
 
 function loadLocalStore() {
     try {
@@ -871,7 +878,7 @@ function uid() {
 
 const DB = {
     // "types" never touches Supabase — there's no column for it in
-    // STY4dropdownoptions, so it's a small locally-persisted list.
+    // {PROJECT_KEY}dropdownoptions, so it's a small locally-persisted list.
     _reportError(action, real, error) {
         console.error(real, error);
         setSaveIndicator('error', action === 'load' ? 'Supabase error' : action === 'delete' ? 'Delete failed' : 'Save failed');
@@ -924,7 +931,7 @@ const DB = {
             return { id: data[0].id, name: data[0][column] };
         }
         if (!column && supabaseClient) {
-            // STY4schedule_items.id is a real Postgres uuid column with its own
+            // {PROJECT_KEY}schedule_items.id is a real Postgres uuid column with its own
             // default (gen_random_uuid()) — never send our own client-side
             // id string here, or Postgres rejects it (error 22P02, invalid
             // uuid syntax). Let the database assign it and use what comes back.
@@ -1154,7 +1161,7 @@ async function initApp() {
 }
 
 // Mirrors LaunchPad's own assetToPlaceMap approach exactly: fetch every
-// row of STY4dropdownoptions and, wherever an Asset and a Zone/Place
+// row of {PROJECT_KEY}dropdownoptions and, wherever an Asset and a Zone/Place
 // appear together on the same row, remember that pairing — so picking an
 // Asset elsewhere in the app can auto-fill its Zone/Area the same way
 // LaunchPad does, instead of asking the user to pick them separately.
@@ -2877,7 +2884,7 @@ function pickCombo(inputId, listId, value) {
 }
 
 // Mirrors LaunchPad's own asset->place linking: if this asset has a known
-// Zone/Area from STY4dropdownoptions, fill those fields in automatically
+// Zone/Area from {PROJECT_KEY}dropdownoptions, fill those fields in automatically
 // instead of making the person look them up and pick manually.
 function applyAssetLookup(assetName, zoneSelectId, areaSelectId) {
     const zone = ASSET_TO_ZONE_MAP[assetName];
@@ -3315,7 +3322,7 @@ async function commitBaselineTokens(kind) {
 
 /* =========================================================================
    10a. LAUNCHPAD SYNC
-   LaunchPad reads its schedule grid from its own "STY4BackEndData" table
+   LaunchPad reads its schedule grid from its own "{PROJECT_KEY}BackEndData" table
    in this same Supabase project — one row per (day, row-slot), keyed by a
    deterministic numeric id: YYYYMMDD * 100 + rowIndex (LaunchPad's own
    generateNumericId scheme, reverse-engineered from its source so ids
@@ -3330,13 +3337,13 @@ async function commitBaselineTokens(kind) {
 
    The link between a pull-plan item and its LaunchPad row lives in the
    pull-plan item itself (launchpad_id / launchpad_day_label columns on
-   STY4schedule_items, persisted in Supabase) — NOT in browser localStorage.
+   {PROJECT_KEY}schedule_items, persisted in Supabase) — NOT in browser localStorage.
    That's what actually prevents push/pull from ever double-creating
    entries: the link survives across devices, browsers, and cleared
    storage, and a database unique index guarantees one LaunchPad row can
    never end up linked to two different pull-plan items.
    ========================================================================= */
-const LAUNCHPAD_TABLE = 'STY4BackEndData';
+const LAUNCHPAD_TABLE = `${PROJECT_KEY}BackEndData`;
 const LAUNCHPAD_SYNC_KEY = 'pullplan_launchpad_sync_enabled_v1';
 function loadLaunchPadSyncEnabled() { return localStorage.getItem(LAUNCHPAD_SYNC_KEY) === 'true'; }
 function saveLaunchPadSyncEnabled(v) { try { localStorage.setItem(LAUNCHPAD_SYNC_KEY, v ? 'true' : 'false'); } catch (e) {} }
@@ -3504,7 +3511,7 @@ function isPastOrToday(item) {
     return new Date(item.start_ts).getTime() <= endOfToday.getTime();
 }
 
-// The "result" column lives directly on STY4BackEndData now, so past and
+// The "result" column lives directly on {PROJECT_KEY}BackEndData now, so past and
 // current-day items can read it straight from Supabase via their own
 // launchpad_id — no round trip through the Apps Script lookup needed.
 const RESULT_CACHE = {}; // launchpad_id -> result string | null, cached so repeated lookups (e.g. across several predecessors) don't re-fetch
@@ -3647,7 +3654,7 @@ function maybeSyncToLaunchPad(item) {
     if (LAUNCHPAD_SYNC_ENABLED && item) syncItemToLaunchPad(item).catch(err => console.error('LaunchPad auto-sync failed', err));
 }
 
-// Pulls the current state of STY4BackEndData and reconciles it with the
+// Pulls the current state of {PROJECT_KEY}BackEndData and reconciles it with the
 // local schedule so there is only ever ONE pull-plan item per real-world
 // activity, no matter how messy the data on either side has gotten:
 //   0. First, consolidate any pre-existing duplicates already sitting in

@@ -5,7 +5,7 @@
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>STY4 LaunchPad</title>
+    <title>LaunchPad</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🚀</text></svg>">
     <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -1537,7 +1537,8 @@ body.dark-mode .phase-row {
 </div>
 <div id="equipment-tracker-view" style="display: none; height: 100%; width: 100%;">
     <iframe 
-        src="equipment-tracker.html" 
+        id="equipment-tracker-iframe"
+        data-src-base="equipment-tracker.html"
         style="width: 100%; height: 100%; border: none; margin: 0; padding: 0; display: block;"
         title="Equipment Status Tracker">
     </iframe>
@@ -1545,7 +1546,8 @@ body.dark-mode .phase-row {
 
 <div id="bridge-view" style="display: none; height: 100%; width: 100%;">
     <iframe 
-        src="bridge.html" 
+        id="bridge-iframe"
+        data-src-base="bridge.html"
         style="width: 100%; height: 100%; border: none; margin: 0; padding: 0; display: block;"
         title="The Bridge">
     </iframe>
@@ -1553,7 +1555,8 @@ body.dark-mode .phase-row {
 
 <div id="tamperseals-view" style="display: none; height: 100%; width: 100%;">
     <iframe 
-        src="tamperseal.html" 
+        id="tamperseal-iframe"
+        data-src-base="tamperseal.html"
         style="width: 100%; height: 100%; border: none; margin: 0; padding: 0; display: block;"
         title="Tamper Seals">
     </iframe>
@@ -1647,6 +1650,12 @@ body.dark-mode .phase-row {
         <button onclick="window.location.href=window.location.origin + window.location.pathname" style="padding: 10px 20px; background: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; cursor: pointer;">Cancel</button>
     </div>
     <p id="grant-status" style="margin-top: 15px; font-size: 14px; display: none;"></p>
+</div>
+
+<div id="project-picker" style="display: none; flex-direction: column; text-align: center; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); color: #333; max-width: 420px; margin: 0 20px; width: 100%;">
+    <h2 style="margin-top:0;">Select a Project</h2>
+    <p style="color:#666; font-size:14px; margin-bottom:20px;">Your account has access to more than one LaunchPad project.</p>
+    <div id="project-picker-list"></div>
 </div>
 
 <div id="auth-prompt" style="display: none; text-align: center; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); color: #333; max-width: 400px; margin: 0 20px;">
@@ -2034,7 +2043,7 @@ async function refreshScheduleData(btn) {
     
     try {
         // 1. Fetch latest dropdown options (in case someone added a new asset/activity)
-        await fetchSTY4dropdownoptions();
+        await fetchDropdownOptions();
         refreshDropdowns();
         
         // 2. Fetch the latest schedule line items
@@ -2192,7 +2201,7 @@ async function showCellHistory(e, rowId, colIndex) {
     content.innerHTML = '<p style="text-align:center; color:#666;">Loading history...</p>';
 
     const { data, error } = await _supabase
-        .from('STY4edit_history')
+        .from(T('edit_history'))
         .select('*')
         .eq('row_id', rowId)
         .eq('col_index', colIndex)
@@ -3853,6 +3862,32 @@ async function triggerFullStatusRefresh() {
         const { createClient } = supabase;
         const _supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+        // ===== MULTI-PROJECT CONFIG =====
+        // Populated by selectProject() once we know which LaunchPad project
+        // the logged-in user is working in (see launchpad_registry_setup.sql
+        // for the launchpad_projects / launchpad_memberships tables this
+        // reads from). Nothing that depends on LP_CONFIG should run before
+        // it's populated — see the reordered startApp() below.
+        window.LP_CONFIG = {
+            projectKey: null,
+            displayName: null,
+            tablePrefix: null,
+            googleScriptUrl: null,
+            adminEmail: null,
+            logoUrl: null,
+            themeColor: '#1b5e20'
+        };
+
+        // Every table name in this file should be built with T('name') instead
+        // of a hardcoded 'STY4name' string, so the exact same code works for
+        // any project once LP_CONFIG.tablePrefix is set.
+        function T(tableName) {
+            if (!window.LP_CONFIG.tablePrefix) {
+                console.error('T() called before a project was selected — this table lookup will fail:', tableName);
+            }
+            return `${window.LP_CONFIG.tablePrefix}${tableName}`;
+        }
+
         // --- THE FIX: Let Supabase officially flag when a password reset happens ---
         _supabase.auth.onAuthStateChange((event, session) => {
             if (event === 'PASSWORD_RECOVERY') {
@@ -3871,7 +3906,11 @@ async function triggerFullStatusRefresh() {
         });
 
         // 1. Define the Admin Email at the top of your <script>
-const ADMIN_EMAIL = "cbaldwin@criticalarccx.com"; // Change to your actual email
+// ADMIN_EMAIL now comes from the selected project's row in
+// launchpad_projects (see selectProject()) instead of being hardcoded per
+// deployment. Code elsewhere still reads the name "ADMIN_EMAIL" via this
+// getter so nothing else needs to change.
+Object.defineProperty(window, 'ADMIN_EMAIL', { get: () => window.LP_CONFIG.adminEmail, configurable: true });
 
 function toggleAdminPanel() {
     // 1. HARD SECURITY BLOCK: If they are not an admin in the database, stop immediately.
@@ -3893,7 +3932,7 @@ async function declineUser(email, requestId) { // Added email parameter here
 
     try {
         // 1. Remove from STY4access_requests
-        const { error } = await _supabase.from('STY4access_requests').delete().eq('id', requestId);
+        const { error } = await _supabase.from(T('access_requests')).delete().eq('id', requestId);
         if (error) throw error;
 
         // 2. Send Notification Email via Google Script
@@ -3909,7 +3948,7 @@ async function declineUser(email, requestId) { // Added email parameter here
 
 async function refreshRequestList() {
     const listContainer = document.getElementById('request-list');
-    const { data, error } = await _supabase.from('STY4access_requests').select('*');
+    const { data, error } = await _supabase.from(T('access_requests')).select('*');
 
     if (error || !data || data.length === 0) {
         listContainer.innerHTML = '<p style="color: #666; font-size: 13px; text-align: center; padding: 20px;">No pending requests.</p>';
@@ -3938,13 +3977,13 @@ async function admitUser(email, company, requestId) {
     try {
         // 1. Add to STY4authorized_editors including the company
         const { error: addError } = await _supabase
-            .from('STY4authorized_editors')
+            .from(T('authorized_editors'))
             .insert([{ email: email.toLowerCase(), company: company, has_account: false }]);
         
         if (addError) throw addError;
 
         // 2. Remove from STY4access_requests
-        await _supabase.from('STY4access_requests').delete().eq('id', requestId);
+        await _supabase.from(T('access_requests')).delete().eq('id', requestId);
 
         // 3. Send Notification Email via Google Script
         const url = `${GOOGLE_SCRIPT_URL}?action=notifyAdmit&email=${encodeURIComponent(email)}`;
@@ -3961,8 +4000,8 @@ let presenceChannel;
 
 async function initPresence(userEmail) {
     // --- THE FIX: Create a site-specific Presence Channel ---
-    // By changing 'online-users' to 'online-users-STY4', you isolate this room!
-    presenceChannel = _supabase.channel('online-users-STY4', {
+    // By changing 'online-users' to `online-users-${window.LP_CONFIG.projectKey}`, you isolate this room!
+    presenceChannel = _supabase.channel(`online-users-${window.LP_CONFIG.projectKey}`, {
         config: { presence: { key: userEmail } }
     });
 
@@ -4021,7 +4060,7 @@ function initRealtimeSync() {
         .on('postgres_changes', { 
             event: '*', 
             schema: 'public', 
-            table: 'STY4BackEndData' 
+            table: T('BackEndData') 
         }, payload => {
             if (payload.eventType === 'UPDATE' || payload.eventType === 'INSERT') {
                 const row = payload.new;
@@ -4059,7 +4098,7 @@ function initRealtimeSync() {
             .on('postgres_changes', { 
                 event: '*', 
                 schema: 'public', 
-                table: 'STY4access_requests' 
+                table: T('access_requests') 
             }, payload => {
                 // Auto-refresh the panel if it's currently open on screen
                 const panel = document.getElementById('admin-panel');
@@ -4090,10 +4129,10 @@ function initRealtimeSync() {
         .on('postgres_changes', { 
             event: '*', 
             schema: 'public', 
-            table: 'STY4dropdownoptions' 
+            table: T('dropdownoptions') 
         }, payload => {
             console.log("System data changed by another user. Refreshing dropdowns silently...");
-            fetchSTY4dropdownoptions();
+            fetchDropdownOptions();
         })
         .subscribe();
 }
@@ -4170,7 +4209,7 @@ async function handleForgotPin() {
 // 1. Verify if email exists in your STY4authorized_editors table
 async function verifyPermission(email) {
     const { data, error } = await _supabase
-        .from('STY4authorized_editors')
+        .from(T('authorized_editors'))
         .select('is_admin, company, has_account') // Fetch company + account-creation status here
         .eq('email', email.toLowerCase())
         .single();
@@ -4274,11 +4313,11 @@ async function completeAppLaunch() {
     
     try {
         // Kick off the heavy schedule data fetch IMMEDIATELY in the background
-        const scheduleDataPromise = _supabase.from('STY4BackEndData').select('*');
+        const scheduleDataPromise = _supabase.from(T('BackEndData')).select('*');
 
         // Execute all heavy network config requests simultaneously
         await Promise.all([
-            fetchSTY4dropdownoptions(),
+            fetchDropdownOptions(),
             loadEquivalentActivities(),
             loadScheduleConfig(),
             loadAppConfig()
@@ -4303,6 +4342,121 @@ async function completeAppLaunch() {
     }
 }
 
+// The project prefix this specific deployment/URL was originally built for.
+// Existing sites that haven't been added to launchpad_memberships yet (or
+// whose user has no membership row) fall back to this, so nothing breaks
+// for teams who don't touch the new registry at all.
+const DEFAULT_PROJECT_KEY = 'STY4';
+
+// Loads one project's row from launchpad_projects into window.LP_CONFIG.
+async function applyProjectConfig(projectKey) {
+    const { data: project, error } = await _supabase
+        .from('launchpad_projects')
+        .select('*')
+        .eq('project_key', projectKey)
+        .single();
+
+    if (error || !project) {
+        console.error('Could not load project config for', projectKey, error);
+        return false;
+    }
+
+    window.LP_CONFIG = {
+        projectKey: project.project_key,
+        displayName: project.display_name,
+        tablePrefix: project.table_prefix,
+        googleScriptUrl: project.google_script_url,
+        adminEmail: project.admin_email,
+        logoUrl: project.logo_url,
+        themeColor: project.theme_color || '#1b5e20'
+    };
+    localStorage.setItem('launchpad_project', projectKey);
+    return true;
+}
+
+// Figures out which project this user should land in. Returns true if
+// LP_CONFIG is ready to use immediately; returns false if the picker screen
+// is now showing and waiting on a click (chooseProject() below resumes the
+// launch sequence once one is picked).
+async function selectProject(userEmail) {
+    const { data: memberships, error } = await _supabase
+        .from('launchpad_memberships')
+        .select('project_key')
+        .eq('email', userEmail.toLowerCase());
+
+    if (error || !memberships || memberships.length === 0) {
+        // Not in the new registry at all yet — behave exactly like this
+        // deployment always has, so existing sites keep working untouched.
+        return applyProjectConfig(DEFAULT_PROJECT_KEY);
+    }
+
+    if (memberships.length === 1) {
+        return applyProjectConfig(memberships[0].project_key);
+    }
+
+    const lastUsed = localStorage.getItem('launchpad_project');
+    if (lastUsed && memberships.some(m => m.project_key === lastUsed)) {
+        return applyProjectConfig(lastUsed);
+    }
+
+    const { data: projects } = await _supabase
+        .from('launchpad_projects')
+        .select('*')
+        .in('project_key', memberships.map(m => m.project_key));
+    renderProjectPicker(projects || []);
+    return false;
+}
+
+function renderProjectPicker(projects) {
+    document.getElementById('loading-spinner-section').style.display = 'none';
+    const picker = document.getElementById('project-picker');
+    const list = document.getElementById('project-picker-list');
+    list.innerHTML = projects.map(p => `
+        <button class="tool-btn" style="display:flex; align-items:center; gap:10px; width:100%; margin-bottom:10px; padding:16px; font-size:15px; text-align:left; justify-content:flex-start;" onclick="chooseProject('${p.project_key}')">
+            ${p.logo_url ? `<img src="${p.logo_url}" style="height:28px; width:28px; object-fit:contain;">` : '📁'}
+            <span>${p.display_name}</span>
+        </button>
+    `).join('');
+    picker.style.display = 'flex';
+}
+
+// Called when the user clicks a project on the picker screen. Resumes
+// whichever flow triggered it — a restored session (startApp) or a fresh
+// login-form submission (handleAuthAction), since both can hit the picker.
+async function chooseProject(projectKey) {
+    document.getElementById('project-picker').style.display = 'none';
+    document.getElementById('loading-spinner-section').style.display = 'block';
+    const ok = await applyProjectConfig(projectKey);
+    if (!ok) {
+        document.getElementById('loading-spinner-section').style.display = 'none';
+        const errorEl = document.getElementById('auth-error');
+        if (errorEl) { errorEl.innerText = 'Could not load that project. Please try again.'; errorEl.style.display = 'block'; }
+        return;
+    }
+    const { data: { user } } = await _supabase.auth.getUser();
+    if (user) {
+        continueStartAppAfterProject(user);
+    } else {
+        document.getElementById('loading-spinner-section').style.display = 'none';
+        document.getElementById('auth-prompt').style.display = 'block';
+        handleAuthAction();
+    }
+}
+
+// Now that LP_CONFIG is populated, point every iframe-based module at this
+// project. Setting .src here (instead of a static src="..." in the HTML) is
+// what stops them from loading before we know which project's data to show.
+function setIframeProjectSources() {
+    ['equipment-tracker-iframe', 'bridge-iframe', 'tamperseal-iframe'].forEach(id => {
+        const iframe = document.getElementById(id);
+        if (!iframe || iframe.src) return;
+        const base = iframe.getAttribute('data-src-base');
+        const params = new URLSearchParams({ project: window.LP_CONFIG.projectKey });
+        if (window.LP_CONFIG.googleScriptUrl) params.set('scriptUrl', window.LP_CONFIG.googleScriptUrl);
+        iframe.src = `${base}?${params.toString()}`;
+    });
+}
+
 async function startApp() {
     createSections();
     const urlParams = new URLSearchParams(window.location.search);
@@ -4310,6 +4464,7 @@ async function startApp() {
     const spinnerSection = document.getElementById('loading-spinner-section');
     const authPrompt = document.getElementById('auth-prompt');
     const loader = document.getElementById('loading-overlay');
+    window.__grantTarget = grantTarget;
 
     // --- THE FIX: Ask Google Apps Script to read the URL outside the iframe ---
     let currentHash = window.location.hash;
@@ -4342,58 +4497,13 @@ try {
         const { data: { user } } = await _supabase.auth.getUser();
 
         if (user && savedEmail) {
-            // --- NEW: Admin Grant Logic ---
-            if (grantTarget && user.email === ADMIN_EMAIL) {
-                document.getElementById('loading-spinner-section').style.display = 'none';
-                document.getElementById('admin-grant-prompt').style.display = 'block';
-                document.getElementById('grant-email-display').innerText = grantTarget;
-                window.pendingGrantEmail = grantTarget; // Store for the button click
-                return;
-            }
-            const isAuth = await verifyPermission(user.email);
-            if (isAuth) {
-                window.isAuthorized = true;
-const permissions = await verifyPermission(user.email); 
-if (permissions.isAuthorized) { 
-    window.isAuthorized = true;
-    window.isAdmin = permissions.isAdmin; 
-    
-    if (window.isAdmin) {
-        console.log("🧹 Admin detected: Cleaning up old history records...");
-        const { error } = await _supabase.rpc('delete_old_STY4edit_history');
-        if (error) console.error("Cleanup Error:", error);
-    }
+            // Resolve which project this user belongs to BEFORE anything else
+            // touches a project-specific table (verifyPermission included).
+            const projectReady = await selectProject(user.email);
+            if (!projectReady) return;
 
-    if (window.isAdmin) {
-         document.getElementById('admin-share-btn').style.display = 'inline-block';
-         const scheduleSetupBtn = document.getElementById('schedule-setup-btn');
-         if (scheduleSetupBtn) scheduleSetupBtn.style.display = 'inline-block';
-         const navSettings = document.getElementById('nav-settings');
-         if (navSettings) navSettings.style.display = 'flex'; 
-     }
-    
-    // Kick off the heavy schedule data fetch IMMEDIATELY in the background
-    const scheduleDataPromise = _supabase.from('STY4BackEndData').select('*');
-
-    // Continue with the rest of the launch sequence concurrently
-    await Promise.all([
-        fetchSTY4dropdownoptions(),
-        loadEquivalentActivities(),
-        loadScheduleConfig(),
-        loadAppConfig()
-    ]);
-    
-    initPresence(user.email); 
-    refreshDropdowns();
-    await loadData(false, scheduleDataPromise);
-    initRealtimeSync();
-    applyViewFilter('view2');
-    collapseEverything();
-    loader.classList.add('hidden');
-    setTimeout(() => { loader.style.display = 'none'; autoCleanUI(); }, 800);
-    return;
-}
-            }
+            await continueStartAppAfterProject(user);
+            return;
         }
         
         spinnerSection.style.display = 'none';
@@ -4401,6 +4511,66 @@ if (permissions.isAuthorized) {
     } catch (e) {
         console.error("Launch Error:", e);
     }
+}
+
+// Everything startApp() used to do after confirming a logged-in user —
+// unchanged in substance, just pulled out so both the "resolved
+// immediately" and "resolved after picker click" paths can reach it.
+async function continueStartAppAfterProject(user) {
+    const spinnerSection = document.getElementById('loading-spinner-section');
+    const loader = document.getElementById('loading-overlay');
+    const grantTarget = window.__grantTarget;
+    setIframeProjectSources();
+
+    // --- NEW: Admin Grant Logic ---
+    if (grantTarget && user.email === ADMIN_EMAIL) {
+        document.getElementById('loading-spinner-section').style.display = 'none';
+        document.getElementById('admin-grant-prompt').style.display = 'block';
+        document.getElementById('grant-email-display').innerText = grantTarget;
+        window.pendingGrantEmail = grantTarget;
+        return;
+    }
+    const permissions = await verifyPermission(user.email); 
+    if (permissions.isAuthorized) { 
+        window.isAuthorized = true;
+        window.isAdmin = permissions.isAdmin; 
+        
+        if (window.isAdmin) {
+            console.log("🧹 Admin detected: Cleaning up old history records...");
+            const { error } = await _supabase.rpc(`delete_old_${T('edit_history')}`);
+            if (error) console.error("Cleanup Error:", error);
+        }
+
+        if (window.isAdmin) {
+             document.getElementById('admin-share-btn').style.display = 'inline-block';
+             const scheduleSetupBtn = document.getElementById('schedule-setup-btn');
+             if (scheduleSetupBtn) scheduleSetupBtn.style.display = 'inline-block';
+             const navSettings = document.getElementById('nav-settings');
+             if (navSettings) navSettings.style.display = 'flex'; 
+         }
+        
+        const scheduleDataPromise = _supabase.from(T('BackEndData')).select('*');
+
+        await Promise.all([
+            fetchDropdownOptions(),
+            loadEquivalentActivities(),
+            loadScheduleConfig(),
+            loadAppConfig()
+        ]);
+        
+        initPresence(user.email); 
+        refreshDropdowns();
+        await loadData(false, scheduleDataPromise);
+        initRealtimeSync();
+        applyViewFilter('view2');
+        collapseEverything();
+        loader.classList.add('hidden');
+        setTimeout(() => { loader.style.display = 'none'; autoCleanUI(); }, 800);
+        return;
+    }
+
+    spinnerSection.style.display = 'none';
+    document.getElementById('auth-prompt').style.display = 'block';
 }
 
 async function processGrantAccess() {
@@ -4418,7 +4588,7 @@ async function processGrantAccess() {
     try {
         // --- THE INTERACTION WITH SUPABASE ---
         const { error } = await _supabase
-            .from('STY4authorized_editors')
+            .from(T('authorized_editors'))
             .insert([{ email: emailToAdd.toLowerCase() }]);
 
         if (error) throw error;
@@ -4747,7 +4917,11 @@ async function syncAllAssetLookups() {
     }
 }
 
-const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxkJfxdnt3j9l_8EH0ZUmAc48PSVP2W53t1ps-9LH_RlGGwO41Uq6jbnt78JMinDIDN/exec';
+// GOOGLE_SCRIPT_URL now comes from the selected project's row in
+// launchpad_projects instead of being hardcoded per deployment. Every
+// existing "GOOGLE_SCRIPT_URL" reference elsewhere in this file keeps
+// working unchanged via this getter.
+Object.defineProperty(window, 'GOOGLE_SCRIPT_URL', { get: () => window.LP_CONFIG.googleScriptUrl, configurable: true });
 
 let dropdownData = { col1: [], col2: [], col3: [], col4: [], col6: [], col7: [] };
 
@@ -4780,7 +4954,7 @@ function rebuildFilterOptionsFromBackendData(rows) {
     renderSidebarFilters();
 }
 
-async function fetchSTY4dropdownoptions() {
+async function fetchDropdownOptions() {
     const newData = { col1: [], col2: [], col3: [], col4: [], col6: [], col7: [] };
     const assetToPlaceMap = {}; // Dictionary to link Assets to Places
 
@@ -4791,7 +4965,7 @@ async function fetchSTY4dropdownoptions() {
     // Loop through Supabase pages until all rows are loaded
     while (hasMore) {
         const { data, error } = await _supabase
-            .from('STY4dropdownoptions')
+            .from(T('dropdownoptions'))
             .select('Times, Places, Activities, Assets, Trade_Partners, Results')
             .range(page * pageSize, (page + 1) * pageSize - 1);
 
@@ -5403,7 +5577,7 @@ function saveCell(cell, value, colIndex, isImmediate = false) {
         const updateObj = { id: parseInt(rowNum), day_label: dateId };
         updateObj[dbCols[colIndex]] = currentValue; // <-- Map the number to the new name
         const { data, error } = await _supabase
-            .from('STY4BackEndData')
+            .from(T('BackEndData'))
             .upsert([updateObj])
             .select();
 
@@ -5414,7 +5588,7 @@ function saveCell(cell, value, colIndex, isImmediate = false) {
             // --- LOG TO EDIT HISTORY ---
             // Only log if this wasn't a redundant failsafe save
             if (currentValue !== oldValue) {
-                await _supabase.from('STY4edit_history').insert([{
+                await _supabase.from(T('edit_history')).insert([{
                     row_id: parseInt(rowNum),
                     col_index: colIndex,
                     old_value: oldValue,
@@ -5605,6 +5779,17 @@ async function handleAuthAction() {
         }
 
         // --- 2. STANDARD LOGIN/SIGNUP LOGIC ---
+        // Resolve which project this email belongs to before touching any
+        // project-specific table (verifyPermission included). If there's
+        // more than one project, show the picker and pause here;
+        // chooseProject() re-calls handleAuthAction() once one is picked.
+        if (!window.LP_CONFIG.tablePrefix) {
+            document.getElementById('auth-prompt').style.display = 'none';
+            const projectReady = await selectProject(email);
+            if (!projectReady) { btn.disabled = false; return; }
+            document.getElementById('auth-prompt').style.display = 'block';
+        }
+
         const perm = await verifyPermission(email);
 
         if (isSignUpMode) {
@@ -5630,7 +5815,7 @@ async function handleAuthAction() {
             // future failed login is correctly reported as a wrong PIN
             // instead of "you need to create a PIN".
             await _supabase
-                .from('STY4authorized_editors')
+                .from(T('authorized_editors'))
                 .update({ has_account: true })
                 .eq('email', email);
 
@@ -6022,7 +6207,7 @@ async function deleteFullRow(wrapperId, bypassConfirm = false) {
         }
 
         try {
-            const { error } = await _supabase.from('STY4BackEndData').delete().eq('id', rowNumericId);
+            const { error } = await _supabase.from(T('BackEndData')).delete().eq('id', rowNumericId);
             if (error) throw error;
         } catch (err) {
             console.error("Delete error:", err.message);
@@ -6133,7 +6318,7 @@ async function saveRow(rowNum, dayLabel, col6Override = null) {
     };
 
     try {
-        const { error } = await _supabase.from('STY4BackEndData').upsert(rowData, { onConflict: 'id' });
+        const { error } = await _supabase.from(T('BackEndData')).upsert(rowData, { onConflict: 'id' });
         if (!error) document.getElementById('saveIndicator').innerText = `Last saved at: ${getTimestamp()}`;
     } catch (err) {
         console.error("🔴 Save Error:", err);
@@ -6354,7 +6539,7 @@ async function switchToRequestView() {
     document.getElementById('auth-success').style.display = 'none';
     
     // 1. Wait for the company list to finish downloading
-    await fetchSTY4dropdownoptions(); 
+    await fetchDropdownOptions(); 
     
     // 2. Inject the Trade Partners (Col 6) into the dropdown
     const companySelect = document.getElementById('request-company-select');
@@ -6414,9 +6599,17 @@ async function submitAccessRequest() {
     successEl.style.display = 'block';
 
     try {
+        // A brand-new visitor has no launchpad_memberships row yet (that's
+        // the whole point of requesting access), so this always resolves
+        // to DEFAULT_PROJECT_KEY unless LP_CONFIG is already set — correct
+        // for a single-project deployment.
+        if (!window.LP_CONFIG.tablePrefix) {
+            await selectProject(email);
+        }
+
         // 1a. Check if this email is already an authorized member
         const { data: existingMember, error: memberCheckErr } = await _supabase
-            .from('STY4authorized_editors')
+            .from(T('authorized_editors'))
             .select('email')
             .eq('email', email)
             .maybeSingle();
@@ -6433,7 +6626,7 @@ async function submitAccessRequest() {
 
         // 1b. Check if a request for this email is already pending
         const { data: existingRequest, error: requestCheckErr } = await _supabase
-            .from('STY4access_requests')
+            .from(T('access_requests'))
             .select('email')
             .eq('email', email)
             .maybeSingle();
@@ -6450,7 +6643,7 @@ async function submitAccessRequest() {
 
         // 2. Log request with Company in Supabase
         const { error: dbError } = await _supabase
-            .from('STY4access_requests')
+            .from(T('access_requests'))
             .insert([{ email, company }]);
         
         if (dbError) throw dbError;
@@ -6493,7 +6686,7 @@ async function loadData(isSilent = false, preFetchedPromise = null) {
             data = result.data;
             error = result.error;
         } else {
-            const result = await _supabase.from('STY4BackEndData').select('*');
+            const result = await _supabase.from(T('BackEndData')).select('*');
             data = result.data;
             error = result.error;
         }

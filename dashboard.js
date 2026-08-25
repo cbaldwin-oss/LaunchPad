@@ -356,7 +356,23 @@ export class CriticalArcDashboard {
       const sel = this.q('ca-projectSelect');
       sel.innerHTML = projects.map(p => `<option value="${p.project_id}">${p.name}</option>`).join('');
       sel.onchange = () => { this.STATE.project = sel.value; this.loadProject(sel.value); };
-      this.STATE.project = projects[0].project_id;
+
+      // Every project export we've seen so far (see projects.json) contains
+      // exactly one entry — project_id here is CxAlloy's own numeric ID
+      // (e.g. "50506"), unrelated to LaunchPad's project_key (e.g. "PHXA7"),
+      // so we can't match them directly. When there's only one project to
+      // choose from anyway, just pick it and hide the now-redundant
+      // dropdown. Safely falls back to the original behavior if a
+      // deployment ever legitimately has more than one.
+      if (projects.length === 1) {
+        this.STATE.project = projects[0].project_id;
+        sel.value = projects[0].project_id;
+        const wrapper = sel.closest('div') || sel.parentElement;
+        if (wrapper) wrapper.style.display = 'none';
+      } else {
+        this.STATE.project = projects[0].project_id;
+      }
+
       await this.loadProject(this.STATE.project);
     } catch (e) {
       this.q('ca-loading').textContent = 'Error: ' + e.message; 

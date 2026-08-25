@@ -813,7 +813,18 @@ body.dark-mode .frozen-group-bar .frozen-combined {
     window.rowFilterData = [];
     window.rowNodes = [];
 
-    const API_URL = 'https://script.google.com/macros/s/AKfycbxkJfxdnt3j9l_8EH0ZUmAc48PSVP2W53t1ps-9LH_RlGGwO41Uq6jbnt78JMinDIDN/exec'; 
+    // The project prefix, passed in via ?project=XXX by the LaunchPad shell
+    // (index.html). Falls back to the prefix this file was originally built
+    // for, so it still works if opened directly without a project param.
+    const PROJECT_KEY = new URLSearchParams(window.location.search).get('project') || 'STY4';
+
+    // Each project has its own separately-deployed Apps Script (they're
+    // container-bound to one spreadsheet each — there's no shared/routable
+    // version of this backend). The LaunchPad shell passes the right one in
+    // via ?scriptUrl=...; this hardcoded value is only the fallback for
+    // opening this file directly during dev.
+    const API_URL = new URLSearchParams(window.location.search).get('scriptUrl')
+        || 'https://script.google.com/macros/s/AKfycbxkJfxdnt3j9l_8EH0ZUmAc48PSVP2W53t1ps-9LH_RlGGwO41Uq6jbnt78JMinDIDN/exec'; 
 
     let globalConfig = { 
         showL2Gate: true, showL3Gate: true, showL4Gate: true,
