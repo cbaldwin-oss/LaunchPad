@@ -4448,7 +4448,7 @@ function renderProjectPicker(projects) {
             onmouseout="this.style.background='#fafafa'; this.style.borderColor='#dcdcdc';"
             onclick="chooseProject('${p.project_key}')">
             <span style="font-weight:600; color:#1b1b1b; padding: 10px 14px; display:flex; align-items:center; flex:1; min-width:0;">${p.project_name || p.project_key}</span>
-            ${p.logo_url ? `<img src="${p.logo_url}" style="align-self:stretch; width:110px; object-fit:cover; flex-shrink:0; display:block;">` : '<span style="font-size:22px; flex-shrink:0; display:flex; align-items:center; padding-right:14px;">📁</span>'}
+            ${p.logo_url ? `<img src="${p.logo_url}" style="align-self:stretch; width:300px; object-fit:cover; flex-shrink:0; display:block;">` : '<span style="font-size:22px; flex-shrink:0; display:flex; align-items:center; padding-right:14px;">📁</span>'}
         </button>
     `;
 
