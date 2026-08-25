@@ -1652,10 +1652,13 @@ body.dark-mode .phase-row {
     <p id="grant-status" style="margin-top: 15px; font-size: 14px; display: none;"></p>
 </div>
 
-<div id="project-picker" style="display: none; flex-direction: column; text-align: center; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); color: #333; max-width: 420px; margin: 0 20px; width: 100%;">
-    <h2 style="margin-top:0;">Select a Project</h2>
-    <p style="color:#666; font-size:14px; margin-bottom:20px;">Your account has access to more than one LaunchPad project.</p>
-    <div id="project-picker-list"></div>
+<div id="project-picker" style="display: none; flex-direction: column; text-align: center; background: white; padding: 0; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); color: #333; max-width: 440px; margin: 0 20px; width: 100%; overflow: hidden;">
+    <div style="background: linear-gradient(135deg, #1b5e20, #2e7d32); padding: 28px 40px 22px;">
+        <img src="https://lh3.googleusercontent.com/u/0/d/1gLRje3JNgpPYtxb5n3SP2BLgmvhmOuC4" alt="CriticalArc" style="height: 42px; object-fit: contain; margin-bottom: 14px; filter: brightness(0) invert(1);">
+        <h2 style="margin: 0; color: white; font-size: 22px; letter-spacing: -0.3px;">Select a Project</h2>
+        <p style="color: rgba(255,255,255,0.85); font-size: 13.5px; margin: 6px 0 0;">Your account has access to more than one LaunchPad project.</p>
+    </div>
+    <div id="project-picker-list" style="padding: 24px 24px 28px; max-height: 60vh; overflow-y: auto;"></div>
 </div>
 
 <div id="auth-prompt" style="display: none; text-align: center; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); color: #333; max-width: 400px; margin: 0 20px;">
@@ -3870,7 +3873,7 @@ async function triggerFullStatusRefresh() {
         // it's populated — see the reordered startApp() below.
         window.LP_CONFIG = {
             projectKey: null,
-            displayName: null,
+            clientName: null,
             tablePrefix: null,
             googleScriptUrl: null,
             adminEmail: null,
@@ -4363,7 +4366,7 @@ async function applyProjectConfig(projectKey) {
 
     window.LP_CONFIG = {
         projectKey: project.project_key,
-        displayName: project.display_name,
+        clientName: project.client_name,
         tablePrefix: project.table_prefix,
         googleScriptUrl: project.google_script_url,
         adminEmail: project.admin_email,
@@ -4411,12 +4414,39 @@ function renderProjectPicker(projects) {
     document.getElementById('loading-spinner-section').style.display = 'none';
     const picker = document.getElementById('project-picker');
     const list = document.getElementById('project-picker-list');
-    list.innerHTML = projects.map(p => `
-        <button class="tool-btn" style="display:flex; align-items:center; gap:10px; width:100%; margin-bottom:10px; padding:16px; font-size:15px; text-align:left; justify-content:flex-start;" onclick="chooseProject('${p.project_key}')">
-            ${p.logo_url ? `<img src="${p.logo_url}" style="height:28px; width:28px; object-fit:contain;">` : '📁'}
-            <span>${p.display_name}</span>
+
+    // Group by client. A client with only one project shows as a plain
+    // button labeled with the client name (today's simple case for
+    // STY4/PHXA7/RNO04, none of which currently share a client). A client
+    // with 2+ projects gets its own header, with each project underneath
+    // labeled by its project_key since the client name is already shown
+    // once, above them.
+    const groups = {};
+    projects.forEach(p => {
+        const key = p.client_name || 'Other';
+        (groups[key] = groups[key] || []).push(p);
+    });
+
+    const projectButton = (p, label) => `
+        <button class="tool-btn" style="display:flex; align-items:center; gap:12px; width:100%; margin-bottom:10px; padding:14px 16px; font-size:15px; text-align:left; justify-content:flex-start; border:1px solid #dcdcdc; border-radius:8px; background:#fafafa; transition: background 0.15s, border-color 0.15s;"
+            onmouseover="this.style.background='#e8f5e9'; this.style.borderColor='#2e7d32';"
+            onmouseout="this.style.background='#fafafa'; this.style.borderColor='#dcdcdc';"
+            onclick="chooseProject('${p.project_key}')">
+            ${p.logo_url ? `<img src="${p.logo_url}" style="height:28px; width:28px; object-fit:contain; border-radius:4px;">` : '<span style="font-size:20px;">📁</span>'}
+            <span style="font-weight:600; color:#1b1b1b;">${label}</span>
         </button>
-    `).join('');
+    `;
+
+    list.innerHTML = Object.entries(groups).map(([clientName, group], idx) => {
+        if (group.length > 1) {
+            return `
+                <div style="text-align:left; font-size:12px; font-weight:700; letter-spacing:0.4px; text-transform:uppercase; color:#2e7d32; margin: ${idx === 0 ? '0' : '18px'} 0 8px; padding-top: ${idx === 0 ? '0' : '8px'}; border-top: ${idx === 0 ? 'none' : '1px solid #eee'};">${clientName}</div>
+                ${group.map(p => projectButton(p, p.project_key)).join('')}
+            `;
+        }
+        return projectButton(group[0], clientName);
+    }).join('');
+
     picker.style.display = 'flex';
 }
 
