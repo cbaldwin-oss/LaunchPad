@@ -3992,6 +3992,29 @@ async function admitUser(email, company, requestId) {
         
         if (addError) throw addError;
 
+        // 1b. Also add them to the master launchpad_memberships table, so
+        // the project picker knows about this project for them right away
+        // — without this, they'd be authorized inside this project but
+        // invisible to the picker's routing logic until someone manually
+        // ran an INSERT for them.
+        const { error: membershipError } = await _supabase
+            .from('launchpad_memberships')
+            .insert([{
+                email: email.toLowerCase(),
+                project_key: window.LP_CONFIG.projectKey,
+                is_admin: false,
+                company: company
+            }])
+            .select();
+
+        // Don't hard-fail the whole admit flow over this — the user is
+        // already authorized in the project itself either way. Just warn
+        // loudly so it doesn't go unnoticed (e.g. a duplicate-key conflict
+        // if they somehow already had a membership row here).
+        if (membershipError) {
+            console.error('Failed to add launchpad_memberships row for', email, membershipError);
+        }
+
         // 2. Remove from STY4access_requests
         await _supabase.from(T('access_requests')).delete().eq('id', requestId);
 
@@ -3999,7 +4022,7 @@ async function admitUser(email, company, requestId) {
         const url = `${GOOGLE_SCRIPT_URL}?action=notifyAdmit&email=${encodeURIComponent(email)}`;
         await fetch(url);
 
-        alert(`Access granted and email sent to ${email}`);
+        alert(`Access granted and email sent to ${email}` + (membershipError ? '\n\n(Warning: could not add them to launchpad_memberships — check the console and add that row manually.)' : ''));
         refreshRequestList();
     } catch (e) {
         alert("Error admitting user: " + e.message);
