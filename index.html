@@ -1360,6 +1360,9 @@ body.dark-mode .phase-row {
     
     <div style="margin-top: auto; width: 100%;">
         
+        <div class="nav-item" onclick="openProjectPicker()">
+            <span class="nav-icon">📁</span> <span class="nav-text">Switch Project</span>
+        </div>
         <div class="nav-item" onclick="logout()" style="border-top: 1px solid #eee;">
             <span class="nav-icon" style="color: #d32f2f;">🚪</span> <span class="nav-text" style="color: #d32f2f; font-weight: bold;">Logout</span>
         </div>
@@ -1690,29 +1693,7 @@ body.dark-mode .phase-row {
             <span style="color: #d33b3b;">|</span>
             <a href="javascript:void(0)" onclick="handleForgotPin()" style="color: #e53737; text-decoration: none;">Forgot PIN?</a>
             <span style="color: #ccc;">|</span>
-            <a href="javascript:void(0)" onclick="switchToRequestView()" style="color: #2e7d32; text-decoration: none; font-weight: 600;">Request Access</a>
-        </div>
-    </div>
-
-    <div id="auth-request-view" style="display: none;">
-        <h2 style="margin-top: 0; color: #2e7d32; font-size: 26px;">Request Access</h2>
-        <p style="margin-bottom: 25px; color: #666;">Enter your details to request terminal access.</p>
-        
-        <input type="email" id="request-email-input" placeholder="Email Address" 
-               style="padding: 14px; width: 100%; border-radius: 6px; border: 2px solid #eee; margin-bottom: 10px; box-sizing: border-box; font-size: 16px;">
-        
-        <select id="request-company-select" 
-               style="padding: 14px; width: 100%; border-radius: 6px; border: 2px solid #eee; margin-bottom: 20px; box-sizing: border-box; font-size: 16px; background-color: white;">
-            <option value="">Select Company...</option>
-        </select>
-        
-        <button id="request-submit-btn" onclick="submitAccessRequest()" 
-                style="background: #2e7d32; color: white; border: none; padding: 14px; border-radius: 6px; cursor: pointer; width: 100%; font-weight: bold; font-size: 16px;">
-            Submit Request
-        </button>
-
-        <div style="margin-top: 20px; font-size: 14px;">
-            <a href="javascript:void(0)" onclick="switchToLoginView()" style="color: #2e7d32; text-decoration: none; font-weight: 600;">Back to Sign In</a>
+            <a href="javascript:void(0)" onclick="showAccessRequestPicker()" style="color: #2e7d32; text-decoration: none; font-weight: 600;">Need Access?</a>
         </div>
     </div>
 
@@ -4446,14 +4427,21 @@ async function selectProject(userEmail) {
         .from('launchpad_projects')
         .select('*')
         .in('project_key', memberships.map(m => m.project_key));
-    renderProjectPicker(projects || []);
+
+    const withAdminFlag = (projects || []).map(p => ({
+        ...p,
+        isAdminHere: memberships.some(m => m.project_key === p.project_key && m.is_admin)
+    }));
+    renderProjectPicker(withAdminFlag, { showRequestAccess: true, allowCancel: false });
     return false;
 }
 
-function renderProjectPicker(projects) {
+function renderProjectPicker(projects, opts) {
+    opts = opts || {};
     document.getElementById('loading-spinner-section').style.display = 'none';
     const picker = document.getElementById('project-picker');
     const list = document.getElementById('project-picker-list');
+    window.__pickerAllowCancel = !!opts.allowCancel;
 
     // Group by client so multiple projects under one client sit together
     // under a shared header. Every client gets a header now, even ones
@@ -4465,22 +4453,83 @@ function renderProjectPicker(projects) {
         (groups[key] = groups[key] || []).push(p);
     });
 
+    const adminCodeRow = (p) => p.isAdminHere ? `
+        <div style="display:flex; align-items:center; gap:8px; font-size:12px; color:#666; padding:6px 4px 12px;">
+            <span>Access code: <strong style="letter-spacing:1px;" id="access-code-display-${p.project_key}">${p.access_code || '——————'}</strong></span>
+            <a href="javascript:void(0)" onclick="regenerateAccessCode('${p.project_key}', event)" style="color:#2e7d32; text-decoration:none; font-weight:600;">Regenerate</a>
+        </div>
+    ` : '';
+
     const projectButton = (p) => `
-        <button class="tool-btn" style="display:flex; align-items:stretch; gap:0; width:100%; margin-bottom:8px; padding:0; font-size:15px; text-align:left; border:1px solid #dcdcdc; border-radius:10px; background:#fafafa; overflow:hidden; transition: background 0.15s, border-color 0.15s;"
+        <button class="tool-btn" style="display:flex; align-items:stretch; gap:0; width:100%; margin-bottom:0; padding:0; font-size:15px; text-align:left; border:1px solid #dcdcdc; border-radius:10px; background:#fafafa; overflow:hidden; transition: background 0.15s, border-color 0.15s;"
             onmouseover="this.style.background='#e8f5e9'; this.style.borderColor='#2e7d32';"
             onmouseout="this.style.background='#fafafa'; this.style.borderColor='#dcdcdc';"
             onclick="chooseProject('${p.project_key}')">
             <span style="font-weight:600; color:#1b1b1b; padding: 10px 14px; display:flex; align-items:center; flex:1; min-width:0;">${p.project_name || p.project_key}</span>
             ${p.logo_url ? `<img src="${p.logo_url}" style="align-self:stretch; width:300px; object-fit:cover; flex-shrink:0; display:block;">` : '<span style="font-size:22px; flex-shrink:0; display:flex; align-items:center; padding-right:14px;">📁</span>'}
         </button>
+        ${adminCodeRow(p)}
+        <div style="margin-bottom:8px;"></div>
     `;
 
-    list.innerHTML = Object.entries(groups).map(([clientName, group], idx) => `
-        <div style="text-align:left; font-size:13px; font-weight:700; letter-spacing:0.4px; text-transform:uppercase; color:#2e7d32; margin: ${idx === 0 ? '0' : '22px'} 0 10px; padding-top: ${idx === 0 ? '0' : '10px'}; border-top: ${idx === 0 ? 'none' : '1px solid #eee'};">${clientName}</div>
-        ${group.map(projectButton).join('')}
-    `).join('');
+    const projectsHtml = projects.length
+        ? Object.entries(groups).map(([clientName, group], idx) => `
+            <div style="text-align:left; font-size:13px; font-weight:700; letter-spacing:0.4px; text-transform:uppercase; color:#2e7d32; margin: ${idx === 0 ? '0' : '18px'} 0 10px; padding-top: ${idx === 0 ? '0' : '10px'}; border-top: ${idx === 0 ? 'none' : '1px solid #eee'};">${clientName}</div>
+            ${group.map(projectButton).join('')}
+        `).join('')
+        : `<p style="color:#666; font-size:14px; text-align:left; margin: 4px 0 8px;">Enter the access code your admin gave you to request access to a project.</p>`;
 
+    const requestAccessSection = opts.showRequestAccess === false ? '' : `
+        <div style="margin-top: ${projects.length ? '18px' : '0'}; padding-top: ${projects.length ? '16px' : '0'}; border-top: ${projects.length ? '1px solid #eee' : 'none'}; text-align:left;">
+            <a href="javascript:void(0)" onclick="toggleAccessRequestForm()" id="access-request-toggle" style="color:#2e7d32; font-weight:600; font-size:14px; text-decoration:none;">${projects.length ? '+ Request access to another project' : '+ Enter access code'}</a>
+            <div id="access-request-form" style="display:${projects.length ? 'none' : 'block'}; margin-top:14px;">
+                <input type="text" id="access-code-input" placeholder="6-digit access code" maxlength="6" inputmode="numeric" style="padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:10px; box-sizing:border-box; font-size:15px; text-align:center; letter-spacing:3px;">
+                <input type="email" id="access-request-email" placeholder="Email address" style="padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:10px; box-sizing:border-box; font-size:15px;">
+                <input type="text" id="access-request-company" placeholder="Company" style="padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:14px; box-sizing:border-box; font-size:15px;">
+                <button id="access-request-submit-btn" onclick="submitAccessRequest()" style="background:#2e7d32; color:white; border:none; padding:12px; border-radius:6px; cursor:pointer; width:100%; font-weight:bold; font-size:15px;">Submit Request</button>
+                <p id="access-request-error" style="color:#d32f2f; display:none; font-size:13px; margin-top:10px; font-weight:600;"></p>
+                <p id="access-request-success" style="color:#2e7d32; display:none; font-size:13px; margin-top:10px; font-weight:600;"></p>
+            </div>
+        </div>
+    `;
+
+    const cancelLink = window.__pickerAllowCancel
+        ? `<div style="margin-top:16px; text-align:center;"><a href="javascript:void(0)" onclick="switchToLoginView()" style="font-size:13px; color:#999; text-decoration:none;">Back to Sign In</a></div>`
+        : '';
+
+    list.innerHTML = projectsHtml + requestAccessSection + cancelLink;
     picker.style.display = 'flex';
+}
+
+// Reachable from the login screen without any session at all — shows just
+// the access-code request form (no project list, since an unauthenticated
+// visitor has no memberships to show).
+function showAccessRequestPicker() {
+    document.getElementById('auth-prompt').style.display = 'none';
+    renderProjectPicker([], { showRequestAccess: true, allowCancel: true });
+}
+
+function toggleAccessRequestForm() {
+    const form = document.getElementById('access-request-form');
+    form.style.display = form.style.display === 'none' ? 'block' : 'none';
+}
+
+// Lets a project's own admin (checked server-side via RLS, not just this
+// client-side flag) generate a fresh code, invalidating the old one.
+async function regenerateAccessCode(projectKey, event) {
+    if (event) event.stopPropagation();
+    const newCode = String(Math.floor(100000 + Math.random() * 900000));
+    const { error } = await _supabase
+        .from('launchpad_projects')
+        .update({ access_code: newCode })
+        .eq('project_key', projectKey);
+
+    if (error) {
+        alert('Could not regenerate code: ' + error.message);
+        return;
+    }
+    const display = document.getElementById(`access-code-display-${projectKey}`);
+    if (display) display.innerText = newCode;
 }
 
 // Called when the user clicks a project on the picker screen. Resumes
@@ -4704,7 +4753,7 @@ async function logout() {
 window.onload = startApp;
 
 function refreshDropdowns() {
-    const allSelects = document.querySelectorAll('select:not(#setting-category-select):not(#request-company-select)');
+    const allSelects = document.querySelectorAll('select:not(#setting-category-select)');
     
     allSelects.forEach(select => {
         const currentVal = select.value;
@@ -5873,7 +5922,7 @@ async function handleAuthAction() {
 
         if (isSignUpMode) {
             if (!perm.isAuthorized) {
-                errorEl.innerText = "Access Denied: This email is not authorized. Please use \"Request Access\" instead.";
+                errorEl.innerText = "Access Denied: This email is not authorized. Please use \"Need Access?\" below to request it.";
                 errorEl.style.display = 'block';
                 btn.disabled = false;
                 return;
@@ -5919,7 +5968,7 @@ async function handleAuthAction() {
 
             if (loginError || !perm.isAuthorized) {
                 const reasons = [];
-                if (!perm.isAuthorized) reasons.push("this email is not authorized for access.  Please use \"Request Access\" instead");
+                if (!perm.isAuthorized) reasons.push("this email is not authorized for access. Please use \"Need Access?\" on the sign-in screen to request it");
                 if (loginError) {
                     const msg = (loginError.message || "").toLowerCase();
                     if (msg.includes("invalid login credentials") || msg.includes("invalid")) {
@@ -6611,37 +6660,14 @@ function autoCleanUI() {
 /**
  * View Switcher: Show Request Access Screen
  */
-async function switchToRequestView() {
-    document.getElementById('auth-login-view').style.display = 'none';
-    document.getElementById('auth-request-view').style.display = 'block';
-    document.getElementById('auth-error').style.display = 'none';
-    document.getElementById('auth-success').style.display = 'none';
-    
-    // 1. Wait for the company list to finish downloading
-    await fetchDropdownOptions(); 
-    
-    // 2. Inject the Trade Partners (Col 6) into the dropdown
-    const companySelect = document.getElementById('request-company-select');
-    if (companySelect && window.dropdownData && window.dropdownData.col6) {
-        // Reset the dropdown
-        companySelect.innerHTML = '<option value="">Select Company...</option>';
-        
-        // Add the companies dynamically
-        window.dropdownData.col6.forEach(company => {
-            companySelect.add(new Option(company, company));
-        });
-        
-        // --- NEW: Add the fallback option at the very bottom ---
-        companySelect.add(new Option("Company not found", "Company not found"));
-    }
-}
-
 /**
- * View Switcher: Return to Login Screen
+ * View Switcher: Return to Login Screen (used as "Back to Sign In" from the
+ * picker's pre-login access-request mode)
  */
 function switchToLoginView() {
+    document.getElementById('project-picker').style.display = 'none';
     document.getElementById('auth-login-view').style.display = 'block';
-    document.getElementById('auth-request-view').style.display = 'none';
+    document.getElementById('auth-prompt').style.display = 'block';
     document.getElementById('auth-error').style.display = 'none';
     document.getElementById('auth-success').style.display = 'none';
     
@@ -6654,21 +6680,31 @@ function switchToLoginView() {
  * Handle the submission of the Access Request
  */
 async function submitAccessRequest() {
-    const email = document.getElementById('request-email-input').value.trim().toLowerCase();
-    const company = document.getElementById('request-company-select').value;
-    const errorEl = document.getElementById('auth-error');
-    const successEl = document.getElementById('auth-success');
-    const btn = document.getElementById('request-submit-btn');
+    const code = document.getElementById('access-code-input').value.trim();
+    const email = document.getElementById('access-request-email').value.trim().toLowerCase();
+    const company = document.getElementById('access-request-company').value.trim();
+    const errorEl = document.getElementById('access-request-error');
+    const successEl = document.getElementById('access-request-success');
+    const btn = document.getElementById('access-request-submit-btn');
+
+    if (!/^\d{6}$/.test(code)) {
+        errorEl.innerText = "Please enter the 6-digit access code your admin gave you.";
+        errorEl.style.display = 'block';
+        successEl.style.display = 'none';
+        return;
+    }
 
     if (!email || !email.includes('@')) {
         errorEl.innerText = "Please enter your valid email address.";
         errorEl.style.display = 'block';
+        successEl.style.display = 'none';
         return;
     }
 
     if (!company) {
-        errorEl.innerText = "Please select your company.";
+        errorEl.innerText = "Please enter your company.";
         errorEl.style.display = 'block';
+        successEl.style.display = 'none';
         return;
     }
 
@@ -6678,17 +6714,31 @@ async function submitAccessRequest() {
     successEl.style.display = 'block';
 
     try {
-        // A brand-new visitor has no launchpad_memberships row yet (that's
-        // the whole point of requesting access), so this always resolves
-        // to DEFAULT_PROJECT_KEY unless LP_CONFIG is already set — correct
-        // for a single-project deployment.
-        if (!window.LP_CONFIG.tablePrefix) {
-            await selectProject(email);
+        // Resolve which project this code belongs to. This intentionally
+        // does NOT touch window.LP_CONFIG/T() — an already-logged-in user
+        // requesting a SECOND project shouldn't have their active project
+        // context changed just by submitting this form.
+        const { data: project, error: projectLookupErr } = await _supabase
+            .from('launchpad_projects')
+            .select('project_key, table_prefix, google_script_url, admin_email')
+            .eq('access_code', code)
+            .maybeSingle();
+
+        if (projectLookupErr) throw projectLookupErr;
+
+        if (!project) {
+            errorEl.innerText = "That access code doesn't match any project. Please double-check it with your admin.";
+            errorEl.style.display = 'block';
+            successEl.style.display = 'none';
+            btn.disabled = false;
+            return;
         }
 
-        // 1a. Check if this email is already an authorized member
+        const prefix = project.table_prefix;
+
+        // 1a. Check if this email is already an authorized member of THIS project
         const { data: existingMember, error: memberCheckErr } = await _supabase
-            .from(T('authorized_editors'))
+            .from(`${prefix}authorized_editors`)
             .select('email')
             .eq('email', email)
             .maybeSingle();
@@ -6696,16 +6746,16 @@ async function submitAccessRequest() {
         if (memberCheckErr) throw memberCheckErr;
 
         if (existingMember) {
-            errorEl.innerText = "This email is already a member. Please sign in instead.";
+            errorEl.innerText = "This email is already a member of that project. Please sign in instead.";
             errorEl.style.display = 'block';
             successEl.style.display = 'none';
             btn.disabled = false;
             return;
         }
 
-        // 1b. Check if a request for this email is already pending
+        // 1b. Check if a request for this email is already pending on THIS project
         const { data: existingRequest, error: requestCheckErr } = await _supabase
-            .from(T('access_requests'))
+            .from(`${prefix}access_requests`)
             .select('email')
             .eq('email', email)
             .maybeSingle();
@@ -6713,30 +6763,31 @@ async function submitAccessRequest() {
         if (requestCheckErr) throw requestCheckErr;
 
         if (existingRequest) {
-            errorEl.innerText = "You've already requested access with this email. Please wait for an admin to review it.";
+            errorEl.innerText = "You've already requested access to this project with this email. Please wait for an admin to review it.";
             errorEl.style.display = 'block';
             successEl.style.display = 'none';
             btn.disabled = false;
             return;
         }
 
-        // 2. Log request with Company in Supabase
+        // 2. Log the request against THIS project's own access_requests table
         const { error: dbError } = await _supabase
-            .from(T('access_requests'))
+            .from(`${prefix}access_requests`)
             .insert([{ email, company }]);
         
         if (dbError) throw dbError;
 
-        // 2. Notify Admin via Google Script
-        const url = `${GOOGLE_SCRIPT_URL}?action=requestAccess&email=${encodeURIComponent(email)}&company=${encodeURIComponent(company)}&admin=${encodeURIComponent(ADMIN_EMAIL)}`;
+        // 3. Notify that project's own admin via that project's own Apps Script
+        const url = `${project.google_script_url}?action=requestAccess&email=${encodeURIComponent(email)}&company=${encodeURIComponent(company)}&admin=${encodeURIComponent(project.admin_email || '')}`;
         
         const response = await fetch(url);
         const data = await response.json();
 
         if (data.success) {
             successEl.innerText = "Request sent! The admin will be notified.";
-            document.getElementById('request-email-input').value = "";
-            document.getElementById('request-company-select').value = "";
+            document.getElementById('access-code-input').value = "";
+            document.getElementById('access-request-email').value = "";
+            document.getElementById('access-request-company').value = "";
         } else {
             throw new Error(data.error || "Unknown server error");
         }
