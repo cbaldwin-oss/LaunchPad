@@ -4557,6 +4557,11 @@ function openProjectPicker() {
 // realtime subscriptions and already-loaded iframes in place).
 async function toggleSwitchProjectPopover(event) {
     event.stopPropagation();
+    // Capture this NOW — event.currentTarget goes null once we hit an
+    // await and the event's synchronous dispatch phase ends, so reading it
+    // later throws and silently aborts the whole function.
+    const clickedEl = event.currentTarget;
+
     const existing = document.getElementById('switch-project-popover');
     if (existing) { existing.remove(); return; }
 
@@ -4567,7 +4572,7 @@ async function toggleSwitchProjectPopover(event) {
     popover.id = 'switch-project-popover';
     popover.style.cssText = 'position:fixed; background:white; border:1px solid #ddd; border-radius:10px; box-shadow:0 8px 24px rgba(0,0,0,0.18); z-index:3000; min-width:220px; max-height:280px; overflow-y:auto; padding:6px;';
 
-    const rect = event.currentTarget.getBoundingClientRect();
+    const rect = clickedEl.getBoundingClientRect();
     popover.style.left = (rect.right + 8) + 'px';
     popover.style.bottom = (window.innerHeight - rect.bottom) + 'px';
 
@@ -6789,8 +6794,11 @@ function handleAccessCodeInput() {
         if (document.getElementById('access-code-input').value.trim() !== code) return;
 
         if (error || !project) {
+            if (error) console.error('Access code lookup failed:', error);
             statusEl.style.color = '#d32f2f';
-            statusEl.innerText = "That code doesn't match any project.";
+            statusEl.innerText = error
+                ? "Something went wrong looking up that code — check the console for details."
+                : "That code doesn't match any project.";
             return;
         }
 
