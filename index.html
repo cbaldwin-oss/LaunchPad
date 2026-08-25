@@ -1360,8 +1360,8 @@ body.dark-mode .phase-row {
     
     <div style="margin-top: auto; width: 100%;">
         
-        <div class="nav-item" onclick="openProjectPicker()">
-            <span class="nav-icon">📁</span> <span class="nav-text">Switch Project</span>
+        <div class="nav-item" onclick="toggleSwitchProjectPopover(event)" style="position: relative;">
+            <span class="nav-icon">🔀</span> <span class="nav-text">Switch Project</span>
         </div>
         <div class="nav-item" onclick="logout()" style="border-top: 1px solid #eee;">
             <span class="nav-icon" style="color: #d32f2f;">🚪</span> <span class="nav-text" style="color: #d32f2f; font-weight: bold;">Logout</span>
@@ -4483,9 +4483,12 @@ function renderProjectPicker(projects, opts) {
         <div style="margin-top: ${projects.length ? '18px' : '0'}; padding-top: ${projects.length ? '16px' : '0'}; border-top: ${projects.length ? '1px solid #eee' : 'none'}; text-align:left;">
             <a href="javascript:void(0)" onclick="toggleAccessRequestForm()" id="access-request-toggle" style="color:#2e7d32; font-weight:600; font-size:14px; text-decoration:none;">${projects.length ? '+ Request access to another project' : '+ Enter access code'}</a>
             <div id="access-request-form" style="display:${projects.length ? 'none' : 'block'}; margin-top:14px;">
-                <input type="text" id="access-code-input" placeholder="6-digit access code" maxlength="6" inputmode="numeric" style="padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:10px; box-sizing:border-box; font-size:15px; text-align:center; letter-spacing:3px;">
+                <input type="text" id="access-code-input" placeholder="6-digit access code" maxlength="6" inputmode="numeric" oninput="handleAccessCodeInput()" style="padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:6px; box-sizing:border-box; font-size:15px; text-align:center; letter-spacing:3px;">
+                <p id="access-code-status" style="font-size:12.5px; margin:0 0 10px; min-height:16px;"></p>
                 <input type="email" id="access-request-email" placeholder="Email address" style="padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:10px; box-sizing:border-box; font-size:15px;">
-                <input type="text" id="access-request-company" placeholder="Company" style="padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:14px; box-sizing:border-box; font-size:15px;">
+                <select id="access-request-company" disabled style="padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:14px; box-sizing:border-box; font-size:15px; background-color:white; color:#999;">
+                    <option value="">Enter a valid code to load the company list...</option>
+                </select>
                 <button id="access-request-submit-btn" onclick="submitAccessRequest()" style="background:#2e7d32; color:white; border:none; padding:12px; border-radius:6px; cursor:pointer; width:100%; font-weight:bold; font-size:15px;">Submit Request</button>
                 <p id="access-request-error" style="color:#d32f2f; display:none; font-size:13px; margin-top:10px; font-weight:600;"></p>
                 <p id="access-request-success" style="color:#2e7d32; display:none; font-size:13px; margin-top:10px; font-weight:600;"></p>
@@ -4543,6 +4546,76 @@ async function regenerateAccessCode(projectKey, event) {
 // fresh login, with no special-casing needed.
 function openProjectPicker() {
     localStorage.removeItem('launchpad_project');
+    location.reload();
+}
+
+// Compact alternative to openProjectPicker() — instead of leaving the app
+// for the full "Select a Project" screen, shows a small popover right next
+// to the sidebar icon listing the OTHER projects this user belongs to.
+// Clicking one switches straight there (still a reload under the hood, same
+// reasoning as openProjectPicker(): avoids trying to tear down/rebuild live
+// realtime subscriptions and already-loaded iframes in place).
+async function toggleSwitchProjectPopover(event) {
+    event.stopPropagation();
+    const existing = document.getElementById('switch-project-popover');
+    if (existing) { existing.remove(); return; }
+
+    const { data: { user } } = await _supabase.auth.getUser();
+    if (!user) return;
+
+    const popover = document.createElement('div');
+    popover.id = 'switch-project-popover';
+    popover.style.cssText = 'position:fixed; background:white; border:1px solid #ddd; border-radius:10px; box-shadow:0 8px 24px rgba(0,0,0,0.18); z-index:3000; min-width:220px; max-height:280px; overflow-y:auto; padding:6px;';
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    popover.style.left = (rect.right + 8) + 'px';
+    popover.style.bottom = (window.innerHeight - rect.bottom) + 'px';
+
+    popover.innerHTML = '<div style="padding:10px; font-size:13px; color:#999;">Loading...</div>';
+    document.body.appendChild(popover);
+
+    const { data: memberships } = await _supabase
+        .from('launchpad_memberships')
+        .select('project_key')
+        .eq('email', user.email.toLowerCase());
+
+    const otherKeys = (memberships || [])
+        .map(m => m.project_key)
+        .filter(k => k !== window.LP_CONFIG.projectKey);
+
+    if (otherKeys.length === 0) {
+        popover.innerHTML = '<div style="padding:12px; font-size:13px; color:#999; text-align:center;">No other projects</div>';
+    } else {
+        const { data: projects } = await _supabase
+            .from('launchpad_projects')
+            .select('project_key, project_name, logo_url')
+            .in('project_key', otherKeys);
+
+        popover.innerHTML = (projects || []).map(p => `
+            <div onclick="switchToProjectDirect('${p.project_key}')" style="display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:7px; cursor:pointer; font-size:14px; font-weight:600; color:#1b1b1b;"
+                 onmouseover="this.style.background='#e8f5e9'" onmouseout="this.style.background='transparent'">
+                ${p.logo_url ? `<img src="${p.logo_url}" style="height:24px; width:24px; object-fit:cover; border-radius:4px; flex-shrink:0;">` : '<span style="font-size:18px;">📁</span>'}
+                <span>${p.project_name || p.project_key}</span>
+            </div>
+        `).join('') + `
+            <div onclick="openProjectPicker()" style="margin-top:4px; padding-top:8px; border-top:1px solid #eee; padding-left:12px; padding-right:12px; padding-bottom:8px; font-size:12.5px; color:#2e7d32; font-weight:600; cursor:pointer;">
+                View full picker
+            </div>
+        `;
+    }
+
+    setTimeout(() => {
+        document.addEventListener('click', function closePopover(e) {
+            if (!popover.contains(e.target)) {
+                popover.remove();
+                document.removeEventListener('click', closePopover);
+            }
+        });
+    }, 0);
+}
+
+function switchToProjectDirect(projectKey) {
+    localStorage.setItem('launchpad_project', projectKey);
     location.reload();
 }
 
@@ -6679,6 +6752,70 @@ function switchToLoginView() {
 /**
  * Handle the submission of the Access Request
  */
+// Debounced so we're not hammering Supabase on every keystroke before the
+// 6th digit lands.
+let __accessCodeLookupTimer = null;
+function handleAccessCodeInput() {
+    clearTimeout(__accessCodeLookupTimer);
+    const statusEl = document.getElementById('access-code-status');
+    const companySelect = document.getElementById('access-request-company');
+    const code = document.getElementById('access-code-input').value.trim();
+
+    // Reset to the "not yet resolved" state on every keystroke; a fresh
+    // lookup below will repopulate it if the code turns out valid.
+    window.__resolvedAccessRequestProject = null;
+    companySelect.disabled = true;
+    companySelect.style.color = '#999';
+    companySelect.innerHTML = '<option value="">Enter a valid code to load the company list...</option>';
+
+    if (!/^\d{6}$/.test(code)) {
+        statusEl.innerText = '';
+        return;
+    }
+
+    statusEl.style.color = '#666';
+    statusEl.innerText = 'Looking up that code...';
+
+    __accessCodeLookupTimer = setTimeout(async () => {
+        const { data: project, error } = await _supabase
+            .from('launchpad_projects')
+            .select('project_key, project_name, table_prefix, google_script_url, admin_email')
+            .eq('access_code', code)
+            .maybeSingle();
+
+        // The person may have kept typing/changed the code while this was
+        // in flight — bail out quietly if it no longer matches what's in
+        // the field.
+        if (document.getElementById('access-code-input').value.trim() !== code) return;
+
+        if (error || !project) {
+            statusEl.style.color = '#d32f2f';
+            statusEl.innerText = "That code doesn't match any project.";
+            return;
+        }
+
+        window.__resolvedAccessRequestProject = project;
+        statusEl.style.color = '#2e7d32';
+        statusEl.innerText = `✓ ${project.project_name || project.project_key}`;
+
+        // Pull that project's own Trade Partners (col6) list, same source
+        // the in-app dropdowns use, so this matches whatever that project
+        // actually calls its contractors/companies.
+        const { data: options, error: optionsErr } = await _supabase
+            .from(`${project.table_prefix}dropdownoptions`)
+            .select('Trade_Partners');
+
+        companySelect.innerHTML = '<option value="">Select Company...</option>';
+        if (!optionsErr && options) {
+            const companies = [...new Set(options.map(r => r.Trade_Partners).filter(Boolean))].sort();
+            companies.forEach(c => companySelect.add(new Option(c, c)));
+        }
+        companySelect.add(new Option("Company not found", "Company not found"));
+        companySelect.disabled = false;
+        companySelect.style.color = '#333';
+    }, 350);
+}
+
 async function submitAccessRequest() {
     const code = document.getElementById('access-code-input').value.trim();
     const email = document.getElementById('access-request-email').value.trim().toLowerCase();
@@ -6702,7 +6839,7 @@ async function submitAccessRequest() {
     }
 
     if (!company) {
-        errorEl.innerText = "Please enter your company.";
+        errorEl.innerText = "Please select your company.";
         errorEl.style.display = 'block';
         successEl.style.display = 'none';
         return;
@@ -6714,26 +6851,19 @@ async function submitAccessRequest() {
     successEl.style.display = 'block';
 
     try {
-        // Resolve which project this code belongs to. This intentionally
-        // does NOT touch window.LP_CONFIG/T() — an already-logged-in user
-        // requesting a SECOND project shouldn't have their active project
-        // context changed just by submitting this form.
-        const { data: project, error: projectLookupErr } = await _supabase
-            .from('launchpad_projects')
-            .select('project_key, table_prefix, google_script_url, admin_email')
-            .eq('access_code', code)
-            .maybeSingle();
-
-        if (projectLookupErr) throw projectLookupErr;
-
-        if (!project) {
+        // handleAccessCodeInput() already resolved this code as the person
+        // typed it. Re-validate it's still the same code rather than
+        // trusting stale state (e.g. they typed a code, it resolved, then
+        // edited it further without it re-resolving yet).
+        const resolved = window.__resolvedAccessRequestProject;
+        if (!resolved) {
             errorEl.innerText = "That access code doesn't match any project. Please double-check it with your admin.";
             errorEl.style.display = 'block';
             successEl.style.display = 'none';
             btn.disabled = false;
             return;
         }
-
+        const project = resolved;
         const prefix = project.table_prefix;
 
         // 1a. Check if this email is already an authorized member of THIS project
@@ -6787,7 +6917,10 @@ async function submitAccessRequest() {
             successEl.innerText = "Request sent! The admin will be notified.";
             document.getElementById('access-code-input').value = "";
             document.getElementById('access-request-email').value = "";
-            document.getElementById('access-request-company').value = "";
+            document.getElementById('access-request-company').innerHTML = '<option value="">Enter a valid code to load the company list...</option>';
+            document.getElementById('access-request-company').disabled = true;
+            document.getElementById('access-code-status').innerText = "";
+            window.__resolvedAccessRequestProject = null;
         } else {
             throw new Error(data.error || "Unknown server error");
         }
