@@ -1306,7 +1306,7 @@ body.dark-mode .phase-row {
         <img src="https://lh3.googleusercontent.com/u/0/d/1gLRje3JNgpPYtxb5n3SP2BLgmvhmOuC4" alt="Logo">
     </div>
     <div class="header-center">
-        <span>LaunchPad</span>
+        <span onclick="openProjectPicker()" style="cursor: pointer;" title="Switch project">LaunchPad</span>
     </div>
     <div class="header-right">
         <button id="dark-mode-toggle" class="view-btn" onclick="toggleDarkMode()" style="font-size: 18px; margin-right: 15px;" title="Toggle Dark Mode">
@@ -4423,6 +4423,17 @@ function renderProjectPicker(projects) {
 // Called when the user clicks a project on the picker screen. Resumes
 // whichever flow triggered it — a restored session (startApp) or a fresh
 // login-form submission (handleAuthAction), since both can hit the picker.
+// Clicking the "LaunchPad" title calls this. Rather than tearing down all
+// the live state a running session has (realtime subscriptions, already-
+// loaded iframes, presence channels) and rebuilding it in place, just clear
+// the "last used project" shortcut and reload — that routes straight back
+// through the same selectProject()/picker logic that already runs on every
+// fresh login, with no special-casing needed.
+function openProjectPicker() {
+    localStorage.removeItem('launchpad_project');
+    location.reload();
+}
+
 async function chooseProject(projectKey) {
     document.getElementById('project-picker').style.display = 'none';
     document.getElementById('loading-spinner-section').style.display = 'block';
