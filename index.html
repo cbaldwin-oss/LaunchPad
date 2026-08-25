@@ -4423,10 +4423,12 @@ async function selectProject(userEmail) {
         return applyProjectConfig(lastUsed);
     }
 
-    const { data: projects } = await _supabase
+    const { data: projects, error: projectsErr } = await _supabase
         .from('launchpad_projects')
         .select('*')
         .in('project_key', memberships.map(m => m.project_key));
+
+    if (projectsErr) console.error('Failed to load projects for picker:', projectsErr);
 
     const withAdminFlag = (projects || []).map(p => ({
         ...p,
@@ -4591,10 +4593,16 @@ async function toggleSwitchProjectPopover(event) {
     if (otherKeys.length === 0) {
         popover.innerHTML = '<div style="padding:12px; font-size:13px; color:#999; text-align:center;">No other projects</div>';
     } else {
-        const { data: projects } = await _supabase
+        const { data: projects, error: projectsErr } = await _supabase
             .from('launchpad_projects')
             .select('project_key, project_name, logo_url')
             .in('project_key', otherKeys);
+
+        if (projectsErr) {
+            console.error('Switch-project popover: failed to load project details:', projectsErr);
+            popover.innerHTML = '<div style="padding:12px; font-size:13px; color:#d32f2f; text-align:center;">Couldn\'t load projects — check the console.</div>';
+            return;
+        }
 
         popover.innerHTML = (projects || []).map(p => `
             <div onclick="switchToProjectDirect('${p.project_key}')" style="display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:7px; cursor:pointer; font-size:14px; font-weight:600; color:#1b1b1b;"
