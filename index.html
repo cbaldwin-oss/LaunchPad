@@ -4581,6 +4581,16 @@ async function applyProjectConfig(projectKey) {
 // is now showing and waiting on a click (chooseProject() below resumes the
 // launch sequence once one is picked).
 async function selectProject(userEmail) {
+    // A "quick switch" (from the Switch Project popover) sets this to skip
+    // straight to the chosen project instead of showing the picker —
+    // consumed once, so a normal login/refresh afterward goes back to
+    // always showing the picker first.
+    const skipOnce = sessionStorage.getItem('launchpad_skip_picker_once');
+    if (skipOnce) {
+        sessionStorage.removeItem('launchpad_skip_picker_once');
+        return applyProjectConfig(skipOnce);
+    }
+
     const { data: memberships, error } = await _supabase
         .from('launchpad_memberships')
         .select('project_key')
@@ -4592,15 +4602,9 @@ async function selectProject(userEmail) {
         return applyProjectConfig(DEFAULT_PROJECT_KEY);
     }
 
-    if (memberships.length === 1) {
-        return applyProjectConfig(memberships[0].project_key);
-    }
-
-    const lastUsed = localStorage.getItem('launchpad_project');
-    if (lastUsed && memberships.some(m => m.project_key === lastUsed)) {
-        return applyProjectConfig(lastUsed);
-    }
-
+    // Always show the picker now, even with just a single membership, so
+    // the person always has the option to request access to another
+    // project rather than only ever landing straight in their one project.
     const { data: projects, error: projectsErr } = await _supabase
         .from('launchpad_projects')
         .select('*')
@@ -4929,7 +4933,7 @@ async function toggleSwitchProjectPopover(event) {
 }
 
 function switchToProjectDirect(projectKey) {
-    localStorage.setItem('launchpad_project', projectKey);
+    sessionStorage.setItem('launchpad_skip_picker_once', projectKey);
     location.reload();
 }
 
@@ -5033,10 +5037,6 @@ async function continueStartAppAfterProject(user) {
     const loader = document.getElementById('loading-overlay');
     const grantTarget = window.__grantTarget;
     setIframeProjectSources(user.email);
-    if (window.userRole === 'viewer') {
-        document.body.classList.add('viewer-mode');
-        enableViewerGate();
-    }
 
     // --- NEW: Admin Grant Logic ---
     if (grantTarget && user.email === ADMIN_EMAIL) {
@@ -5050,6 +5050,14 @@ async function continueStartAppAfterProject(user) {
     if (permissions.isAuthorized) { 
         window.isAuthorized = true;
         window.isAdmin = permissions.isAdmin; 
+
+        // window.userRole is only set once verifyPermission() resolves —
+        // checking it any earlier than this always reads undefined, which
+        // is why the viewer gate never actually activated before.
+        if (window.userRole === 'viewer') {
+            document.body.classList.add('viewer-mode');
+            enableViewerGate();
+        }
         
         if (window.isAdmin) {
             console.log("🧹 Admin detected: Cleaning up old history records...");
