@@ -1363,6 +1363,9 @@ body.dark-mode .phase-row {
         <div class="nav-item" onclick="toggleSwitchProjectPopover(event)" style="position: relative;">
             <span class="nav-icon">🔀</span> <span class="nav-text">Switch Project</span>
         </div>
+        <div id="nav-settings" class="nav-item" style="display: none;" onclick="openScheduleConfigModal()">
+            <span class="nav-icon" style="color: #555;">⚙️</span> <span class="nav-text">Settings</span>
+        </div>
         <div class="nav-item" onclick="logout()" style="border-top: 1px solid #eee;">
             <span class="nav-icon" style="color: #d32f2f;">🚪</span> <span class="nav-text" style="color: #d32f2f; font-weight: bold;">Logout</span>
         </div>
@@ -1619,7 +1622,6 @@ body.dark-mode .phase-row {
                     
                     <button class="tool-btn" onclick="uncheckAll()" style="background: #e0e0e0; color: #333; border-color: #ccc;">Cancel</button>
                 </div>
-                <button id="schedule-setup-btn" class="tool-btn" onclick="openScheduleConfigModal()" style="display: none; background: #f1f3f4; border-color: #dcdcdc; color: #555;">  Setup Config</button>
                 <span id="saveIndicator">Saved</span>
                 
                 <!-- NEW: Refresh Button -->
@@ -4138,27 +4140,47 @@ async function refreshRequestList() {
 
 async function admitUser(email, company, requestId, role) {
     role = role || 'editor';
+    const emailLower = email.toLowerCase();
     try {
-        // 1. Add to STY4authorized_editors including the company and role
-        const { error: addError } = await _supabase
+        // Someone requesting a role UPGRADE (e.g. viewer -> editor via
+        // requestHigherAccess()) is already a row in authorized_editors —
+        // trying to INSERT them again fails on the unique email constraint.
+        // Check first, and update in place if they already exist instead.
+        const { data: existingMember, error: lookupError } = await _supabase
             .from(T('authorized_editors'))
-            .insert([{ email: email.toLowerCase(), company: company, has_account: false, role: role, is_admin: role === 'admin' }]);
-        
-        if (addError) throw addError;
+            .select('email')
+            .eq('email', emailLower)
+            .maybeSingle();
+
+        if (lookupError) throw lookupError;
+
+        if (existingMember) {
+            const { error: updateError } = await _supabase
+                .from(T('authorized_editors'))
+                .update({ company: company, role: role, is_admin: role === 'admin' })
+                .eq('email', emailLower);
+            if (updateError) throw updateError;
+        } else {
+            const { error: addError } = await _supabase
+                .from(T('authorized_editors'))
+                .insert([{ email: emailLower, company: company, has_account: false, role: role, is_admin: role === 'admin' }]);
+            if (addError) throw addError;
+        }
 
         // 1b. Also add them to the master launchpad_memberships table, so
         // the project picker knows about this project for them right away
         // — without this, they'd be authorized inside this project but
         // invisible to the picker's routing logic until someone manually
-        // ran an INSERT for them.
+        // ran an INSERT for them. Upsert here too, for the same reason as
+        // above — an upgrade request means this row likely already exists.
         const { error: membershipError } = await _supabase
             .from('launchpad_memberships')
-            .insert([{
-                email: email.toLowerCase(),
+            .upsert([{
+                email: emailLower,
                 project_key: window.LP_CONFIG.projectKey,
                 is_admin: role === 'admin',
                 company: company
-            }])
+            }], { onConflict: 'email,project_key' })
             .select();
 
         // Don't hard-fail the whole admit flow over this — the user is
@@ -5044,7 +5066,6 @@ async function continueStartAppAfterProject(user) {
     const spinnerSection = document.getElementById('loading-spinner-section');
     const loader = document.getElementById('loading-overlay');
     const grantTarget = window.__grantTarget;
-    setIframeProjectSources(user.email);
 
     // --- NEW: Admin Grant Logic ---
     if (grantTarget && user.email === ADMIN_EMAIL) {
@@ -5059,13 +5080,18 @@ async function continueStartAppAfterProject(user) {
         window.isAuthorized = true;
         window.isAdmin = permissions.isAdmin; 
 
-        // window.userRole is only set once verifyPermission() resolves —
-        // checking it any earlier than this always reads undefined, which
-        // is why the viewer gate never actually activated before.
+        // Only NOW does window.userRole actually hold a real value — this
+        // has to happen after verifyPermission() resolves, both for the
+        // gate check below AND for setIframeProjectSources() further down,
+        // which reads window.userRole to build the iframe URLs. Calling it
+        // any earlier meant every iframe (Bridge, Tamper Seals, Equipment
+        // Tracker) always got role=undefined and silently fell back to
+        // 'editor' regardless of the real role.
         if (window.userRole === 'viewer') {
             document.body.classList.add('viewer-mode');
             enableViewerGate();
         }
+        setIframeProjectSources(user.email);
         
         if (window.isAdmin) {
             console.log("🧹 Admin detected: Cleaning up old history records...");
@@ -5075,8 +5101,6 @@ async function continueStartAppAfterProject(user) {
 
         if (window.isAdmin) {
              document.getElementById('admin-share-btn').style.display = 'flex';
-             const scheduleSetupBtn = document.getElementById('schedule-setup-btn');
-             if (scheduleSetupBtn) scheduleSetupBtn.style.display = 'inline-block';
              const navSettings = document.getElementById('nav-settings');
              if (navSettings) navSettings.style.display = 'flex'; 
          }

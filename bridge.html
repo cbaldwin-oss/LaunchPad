@@ -382,7 +382,7 @@ input,select,textarea{font-family:inherit;}
         <span class="count">0</span> selected — drag one to move them together
         <button class="preview-remove" onclick="clearMultiSelect()" title="Clear selection" style="color:var(--green-dark);">✕</button>
     </span>
-    <div class="menu-btn-wrap">
+    <div class="menu-btn-wrap" id="add-menu-wrap">
         <button class="tool-btn" onclick="toggleMenu('addMenu', event)">➕ Add ▾</button>
         <div class="menu-dropdown right" id="addMenu">
             <div class="menu-item" onclick="closeAllMenus(); openModal('itemModal')">➕ New Item</div>
@@ -781,6 +781,17 @@ const isViewerRole = USER_ROLE === 'viewer';
 // trigger add/bulk-add actions. Capture-phase so it intercepts before the
 // app's own drag/click handlers ever see the event.
 if (isViewerRole) {
+    // Hide the Add menu (New Item / Bulk Add / Import Baseline) outright —
+    // a viewer shouldn't even see these options, not just be blocked from
+    // using them. Also visually mark items as non-interactive.
+    const style = document.createElement('style');
+    style.innerHTML = `
+        #add-menu-wrap { display: none !important; }
+        .gantt-item { cursor: default !important; }
+        .resize-handle, .link-handle { display: none !important; }
+    `;
+    document.head.appendChild(style);
+
     ['pointerdown', 'mousedown', 'click', 'dblclick'].forEach(evt => {
         document.addEventListener(evt, function(e) {
             const editSurface = e.target.closest('.gantt-item, .resize-handle, .link-handle, .menu-btn-wrap .tool-btn, .menu-item');
