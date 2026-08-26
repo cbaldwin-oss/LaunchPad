@@ -675,10 +675,10 @@ input:not([type="checkbox"]), textarea, select {
     </div>
 
 <script>
-// Now points at the SAME shared Supabase project index.html/bridge.html use
-// (was previously its own separate project — see the multi-project
-// consolidation notes; the STY4Assets/STY4AssetRegistry data itself still
-// needs to be migrated into this project by hand, this only repoints the code).
+// Now points at the SAME shared Supabase project index.html/bridge.html use.
+// The Assets data has been migrated in and its old separate AssetRegistry
+// table is no longer used — asset/location suggestions now come from the
+// shared dropdownoptions table instead (see fetchLookupData()).
 const SUPABASE_URL = 'https://rcnxetcomdrlxvlarqoc.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJjbnhldGNvbWRybHh2bGFycW9jIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY0NDIyMjksImV4cCI6MjA5MjAxODIyOX0.gP37sT5OrCOVRZXekMrBZHm5mtfnr6JrC2YGflWsDQU';
 
@@ -915,17 +915,19 @@ function generateReinspectionPreview() {
 }
 
 async function fetchLookupData() {
-    // Replace 'STY4AssetRegistry' with your actual reference table name
-    const { data, error } = await _supabase.from(T('AssetRegistry')).select('asset_name, location');
+    // Assets and their locations now come from the same dropdownoptions
+    // table the rest of the app already uses (Assets/Places columns) —
+    // no separate AssetRegistry table needed.
+    const { data, error } = await _supabase.from(T('dropdownoptions')).select('Assets, Places');
     
     if (error) {
         console.error("Error fetching lookups:", error);
         return;
     }
 
-    // Filter unique values
-    lookupData.assets = [...new Set(data.map(item => item.asset_name))].sort();
-    lookupData.locations = [...new Set(data.map(item => item.location))].sort();
+    // Filter unique, non-empty values
+    lookupData.assets = [...new Set(data.map(item => item.Assets).filter(Boolean))].sort();
+    lookupData.locations = [...new Set(data.map(item => item.Places).filter(Boolean))].sort();
 
     // Populate HTML Datalists
     document.getElementById('asset-list').innerHTML = lookupData.assets.map(a => `<option value="${a}">`).join('');
