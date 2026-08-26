@@ -4616,7 +4616,7 @@ async function selectProject(userEmail) {
         ...p,
         isAdminHere: memberships.some(m => m.project_key === p.project_key && m.is_admin)
     }));
-    renderProjectPicker(withAdminFlag, { showRequestAccess: true, allowCancel: false });
+    renderProjectPicker(withAdminFlag, { showRequestAccess: true, allowCancel: false, currentUserEmail: userEmail });
     return false;
 }
 
@@ -4637,22 +4637,19 @@ function renderProjectPicker(projects, opts) {
         (groups[key] = groups[key] || []).push(p);
     });
 
-    const adminCodeRow = (p) => p.isAdminHere ? `
-        <div style="display:flex; align-items:center; gap:8px; font-size:12px; color:#666; padding:6px 4px 12px;">
-            <span>Access code: <strong style="letter-spacing:1px;" id="access-code-display-${p.project_key}">${p.access_code || '——————'}</strong></span>
-            <a href="javascript:void(0)" onclick="regenerateAccessCode('${p.project_key}', event)" style="color:#2e7d32; text-decoration:none; font-weight:600;">Regenerate</a>
-        </div>
-    ` : '';
-
     const projectButton = (p) => `
         <button class="tool-btn" style="display:flex; align-items:stretch; gap:0; width:100%; margin-bottom:0; padding:0; font-size:15px; text-align:left; border:1px solid #dcdcdc; border-radius:10px; background:#fafafa; overflow:hidden; transition: background 0.15s, border-color 0.15s;"
             onmouseover="this.style.background='#e8f5e9'; this.style.borderColor='#2e7d32';"
             onmouseout="this.style.background='#fafafa'; this.style.borderColor='#dcdcdc';"
             onclick="chooseProject('${p.project_key}')">
-            <span style="font-weight:600; color:#1b1b1b; padding: 10px 14px; display:flex; align-items:center; flex:1; min-width:0;">${p.project_name || p.project_key}</span>
+            <span style="font-weight:600; color:#1b1b1b; padding: 10px 14px; display:flex; align-items:center; flex:1; min-width:0;">${p.project_name || p.project_key}: <span id="access-code-display-${p.project_key}" style="letter-spacing:1px; margin-left:5px;">${p.access_code || '——————'}</span></span>
             ${p.logo_url ? `<img src="${p.logo_url}" style="align-self:stretch; width:300px; object-fit:cover; flex-shrink:0; display:block;">` : '<span style="font-size:22px; flex-shrink:0; display:flex; align-items:center; padding-right:14px;">📁</span>'}
         </button>
-        ${adminCodeRow(p)}
+        ${p.isAdminHere ? `
+            <div style="display:flex; align-items:center; gap:8px; font-size:12px; color:#666; padding:6px 4px 12px;">
+                <a href="javascript:void(0)" onclick="regenerateAccessCode('${p.project_key}', event)" style="color:#2e7d32; text-decoration:none; font-weight:600;">Regenerate code</a>
+            </div>
+        ` : ''}
         <div style="margin-bottom:8px;"></div>
     `;
 
@@ -4663,13 +4660,18 @@ function renderProjectPicker(projects, opts) {
         `).join('')
         : `<p style="color:#666; font-size:14px; text-align:left; margin: 4px 0 8px;">Enter the access code your admin gave you to request access to a project.</p>`;
 
+    const emailFieldHtml = opts.currentUserEmail
+        ? `<p style="font-size:13px; color:#666; margin:0 0 10px; text-align:left;">Requesting as <strong>${opts.currentUserEmail}</strong></p>
+           <input type="hidden" id="access-request-email" value="${opts.currentUserEmail}">`
+        : `<input type="email" id="access-request-email" placeholder="Email address" style="padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:10px; box-sizing:border-box; font-size:15px;">`;
+
     const requestAccessSection = opts.showRequestAccess === false ? '' : `
         <div style="margin-top: ${projects.length ? '18px' : '0'}; padding-top: ${projects.length ? '16px' : '0'}; border-top: ${projects.length ? '1px solid #eee' : 'none'}; text-align:left;">
             <a href="javascript:void(0)" onclick="toggleAccessRequestForm()" id="access-request-toggle" style="color:#2e7d32; font-weight:600; font-size:14px; text-decoration:none;">${projects.length ? '+ Request access to another project' : '+ Enter access code'}</a>
             <div id="access-request-form" style="display:${projects.length ? 'none' : 'block'}; margin-top:14px;">
                 <input type="text" id="access-code-input" placeholder="6-digit access code" maxlength="6" inputmode="numeric" oninput="handleAccessCodeInput()" style="padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:6px; box-sizing:border-box; font-size:15px; text-align:center; letter-spacing:3px;">
                 <p id="access-code-status" style="font-size:12.5px; margin:0 0 10px; min-height:16px;"></p>
-                <input type="email" id="access-request-email" placeholder="Email address" style="padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:10px; box-sizing:border-box; font-size:15px;">
+                ${emailFieldHtml}
                 <select id="access-request-company" disabled onchange="handleCompanySelectChange()" style="padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:10px; box-sizing:border-box; font-size:15px; background-color:white; color:#999;">
                     <option value="">Enter a valid code to load the company list...</option>
                 </select>
@@ -4788,17 +4790,23 @@ function enableViewerGate() {
         body.viewer-mode .cell-row input:disabled,
         body.viewer-mode .cell-row select:disabled,
         body.viewer-mode .cell-row textarea:disabled {
-            cursor: default;
+            cursor: not-allowed;
             opacity: 0.85;
+            pointer-events: none; /* let the click fall through to the row below, since a disabled control never dispatches its own click event to catch */
         }
     `;
     document.head.appendChild(style);
 
-    // Belt-and-suspenders: if anything still slips through (a button we
-    // didn't anticipate), clicking it shows the upsell instead of silently
-    // doing nothing or throwing an error.
+    // Disabled elements never fire click events at all (not even to
+    // bubble), so with pointer-events:none above, a click on what LOOKS
+    // like a locked cell actually lands on the row div underneath — catch
+    // it here and show the upsell instead of it silently doing nothing.
     document.addEventListener('click', function(e) {
         if (window.userRole !== 'viewer') return;
+        if (e.target.closest('.cell-row')) {
+            showViewerUpsell();
+            return;
+        }
         if (e.target.closest('#batch-add-btn, .add-rows-btn')) {
             e.preventDefault();
             e.stopPropagation();
@@ -4900,7 +4908,7 @@ async function toggleSwitchProjectPopover(event) {
     } else {
         const { data: projects, error: projectsErr } = await _supabase
             .from('launchpad_projects')
-            .select('project_key, project_name, logo_url')
+            .select('project_key, project_name, logo_url, access_code')
             .in('project_key', otherKeys);
 
         if (projectsErr) {
@@ -4913,7 +4921,7 @@ async function toggleSwitchProjectPopover(event) {
             <div onclick="switchToProjectDirect('${p.project_key}')" style="display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:7px; cursor:pointer; font-size:14px; font-weight:600; color:#1b1b1b;"
                  onmouseover="this.style.background='#e8f5e9'" onmouseout="this.style.background='transparent'">
                 ${p.logo_url ? `<img src="${p.logo_url}" style="height:24px; width:24px; object-fit:cover; border-radius:4px; flex-shrink:0;">` : '<span style="font-size:18px;">📁</span>'}
-                <span>${p.project_name || p.project_key}</span>
+                <span>${p.project_name || p.project_key}: <span style="letter-spacing:1px; font-weight:700;">${p.access_code || '——————'}</span></span>
             </div>
         `).join('') + `
             <div onclick="openProjectPicker()" style="margin-top:4px; padding-top:8px; border-top:1px solid #eee; padding-left:12px; padding-right:12px; padding-bottom:8px; font-size:12.5px; color:#2e7d32; font-weight:600; cursor:pointer;">
