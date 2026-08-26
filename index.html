@@ -1694,8 +1694,6 @@ body.dark-mode .phase-row {
             <a href="javascript:void(0)" id="auth-toggle-link" onclick="toggleAuthMode()" style="color: #2e7d32; text-decoration: none; font-weight: 600;">First time? Create your PIN</a>
             <span style="color: #d33b3b;">|</span>
             <a href="javascript:void(0)" onclick="handleForgotPin()" style="color: #e53737; text-decoration: none;">Forgot PIN?</a>
-            <span style="color: #ccc;">|</span>
-            <a href="javascript:void(0)" onclick="showAccessRequestPicker()" style="color: #2e7d32; text-decoration: none; font-weight: 600;">Need Access?</a>
         </div>
     </div>
 
@@ -4183,9 +4181,16 @@ async function admitUser(email, company, requestId, role) {
                 throw new Error("The update didn't apply to any rows. This usually means there's no RLS UPDATE policy on this table for logged-in admins — run rbac_update_policy.sql.");
             }
         } else {
+            // has_account defaults to true here, not false: since "Need
+            // Access" was removed, submitting an access request now
+            // requires already being logged in (it's only reachable from
+            // the post-login picker) — so by construction, anyone an admin
+            // is admitting from a pending request already has a working
+            // LaunchPad account. Defaulting to false here would incorrectly
+            // tell them to "create a PIN" they already have.
             const { error: addError } = await _supabase
                 .from(T('authorized_editors'))
-                .insert([{ email: emailLower, company: company, has_account: false, role: role, is_admin: role === 'admin' }]);
+                .insert([{ email: emailLower, company: company, has_account: true, role: role, is_admin: role === 'admin' }]);
             if (addError) throw addError;
         }
 
@@ -4422,7 +4427,7 @@ async function handleForgotPin() {
         return;
     }
     const { error } = await _supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: "https://launchpad-inky-six.vercel.app/" 
+        redirectTo: "https://sty4a-launch-pad.vercel.app/" 
     }); // <-- ADDED THE MISSING `});` HERE
 
     if (error) {
@@ -4641,9 +4646,26 @@ async function selectProject(userEmail) {
         .eq('email', userEmail.toLowerCase());
 
     if (error || !memberships || memberships.length === 0) {
-        // Not in the new registry at all yet — behave exactly like this
-        // deployment always has, so existing sites keep working untouched.
-        return applyProjectConfig(DEFAULT_PROJECT_KEY);
+        // Zero memberships is ambiguous by itself — it's the normal state
+        // both for (a) an existing user of a site that hasn't been
+        // backfilled into launchpad_memberships yet, and (b) someone who
+        // just signed up for a LaunchPad account and hasn't requested
+        // access to any project yet. Distinguish them by checking whether
+        // they're a real row in the default project's own table.
+        const { data: legacyMember } = await _supabase
+            .from(`${DEFAULT_PROJECT_KEY}authorized_editors`)
+            .select('email')
+            .ilike('email', userEmail)
+            .maybeSingle();
+
+        if (legacyMember) {
+            return applyProjectConfig(DEFAULT_PROJECT_KEY);
+        }
+
+        // Genuinely new — nothing to auto-select. Show the picker with
+        // just the request-access form so they can use their access code.
+        renderProjectPicker([], { showRequestAccess: true, allowCancel: false, currentUserEmail: userEmail });
+        return false;
     }
 
     // Always show the picker now, even with just a single membership, so
@@ -4738,14 +4760,6 @@ function renderProjectPicker(projects, opts) {
 
     list.innerHTML = projectsHtml + requestAccessSection + cancelLink;
     picker.style.display = 'flex';
-}
-
-// Reachable from the login screen without any session at all — shows just
-// the access-code request form (no project list, since an unauthenticated
-// visitor has no memberships to show).
-function showAccessRequestPicker() {
-    document.getElementById('auth-prompt').style.display = 'none';
-    renderProjectPicker([], { showRequestAccess: true, allowCancel: true });
 }
 
 function toggleAccessRequestForm() {
@@ -6400,6 +6414,44 @@ async function handleAuthAction() {
         }
 
         // --- 2. STANDARD LOGIN/SIGNUP LOGIC ---
+        if (isSignUpMode) {
+            // Signing up creates a LaunchPad account only — it's
+            // intentionally decoupled from any specific project now. Once
+            // they confirm their email and log in, they'll land on the
+            // picker (having zero memberships) where they can request
+            // access to a specific project via its access code.
+            const { data: signUpData, error } = await _supabase.auth.signUp({
+                email: email,
+                password: pin,
+                options: {
+                    // This dynamically sends them back to the exact current page folder
+                    emailRedirectTo: window.location.origin + window.location.pathname
+                }
+            });
+
+            if (error) throw error;
+
+            // Supabase auth accounts are global across every LaunchPad site on
+            // this backend, so it's possible this email already has an
+            // account from a different project. signUp() deliberately
+            // doesn't error for an existing email (to prevent account-
+            // enumeration attacks) — the documented way to detect it is
+            // that a genuinely new sign-up gets at least one entry in
+            // data.user.identities, while an existing account comes back
+            // with an empty array.
+            const alreadyHasAccount = signUpData && signUpData.user &&
+                Array.isArray(signUpData.user.identities) && signUpData.user.identities.length === 0;
+
+            if (alreadyHasAccount) {
+                errorEl.innerText = "You already have a LaunchPad account with this email — the PIN you just entered wasn't saved. Please sign in with your existing PIN, or use \"Forgot PIN?\" below if you don't remember it.";
+                errorEl.style.display = 'block';
+                btn.disabled = false;
+                return;
+            }
+
+            successEl.innerText = "Success! Check your email to verify your account. Once verified, sign in here and you'll be able to request access to a project.";
+            successEl.style.display = 'block';
+        } else {
         // Resolve which project this email belongs to before touching any
         // project-specific table (verifyPermission included). If there's
         // more than one project, show the picker and pause here;
@@ -6413,36 +6465,7 @@ async function handleAuthAction() {
 
         const perm = await verifyPermission(email);
 
-        if (isSignUpMode) {
-            if (!perm.isAuthorized) {
-                errorEl.innerText = "Access Denied: This email is not authorized. Please use \"Need Access?\" below to request it.";
-                errorEl.style.display = 'block';
-                btn.disabled = false;
-                return;
-            }
 
-            const { error } = await _supabase.auth.signUp({
-                email: email,
-                password: pin,
-                options: {
-                    // This dynamically sends them back to the exact current page folder
-                    emailRedirectTo: window.location.origin + window.location.pathname
-                }
-            }); // <-- ADDED THE MISSING `});` HERE
-
-            if (error) throw error;
-
-            // Record that this user has now created their PIN/account, so a
-            // future failed login is correctly reported as a wrong PIN
-            // instead of "you need to create a PIN".
-            await _supabase
-                .from(T('authorized_editors'))
-                .update({ has_account: true })
-                .eq('email', email);
-
-            successEl.innerText = "Success! Check your email to verify your account.";
-            successEl.style.display = 'block';
-        } else {
             // Special case: they're on the approved list, but never finished
             // creating a PIN (never completed Sign Up). A normal login attempt
             // here would just fail with Supabase's generic "invalid
@@ -6461,7 +6484,7 @@ async function handleAuthAction() {
 
             if (loginError || !perm.isAuthorized) {
                 const reasons = [];
-                if (!perm.isAuthorized) reasons.push("this email is not authorized for access. Please use \"Need Access?\" on the sign-in screen to request it");
+                if (!perm.isAuthorized) reasons.push("this email is not authorized for this project");
                 if (loginError) {
                     const msg = (loginError.message || "").toLowerCase();
                     if (msg.includes("invalid login credentials") || msg.includes("invalid")) {
