@@ -4181,16 +4181,9 @@ async function admitUser(email, company, requestId, role) {
                 throw new Error("The update didn't apply to any rows. This usually means there's no RLS UPDATE policy on this table for logged-in admins — run rbac_update_policy.sql.");
             }
         } else {
-            // has_account defaults to true here, not false: since "Need
-            // Access" was removed, submitting an access request now
-            // requires already being logged in (it's only reachable from
-            // the post-login picker) — so by construction, anyone an admin
-            // is admitting from a pending request already has a working
-            // LaunchPad account. Defaulting to false here would incorrectly
-            // tell them to "create a PIN" they already have.
             const { error: addError } = await _supabase
                 .from(T('authorized_editors'))
-                .insert([{ email: emailLower, company: company, has_account: true, role: role, is_admin: role === 'admin' }]);
+                .insert([{ email: emailLower, company: company, role: role, is_admin: role === 'admin' }]);
             if (addError) throw addError;
         }
 
@@ -4448,18 +4441,18 @@ async function handleForgotPin() {
 async function verifyPermission(email) {
     const { data, error } = await _supabase
         .from(T('authorized_editors'))
-        .select('is_admin, company, has_account, role') // Fetch company + account-creation status + role here
+        .select('is_admin, company, role') // Fetch company + role here
         .eq('email', email.toLowerCase())
         .single();
 
-    if (error || !data) return { isAuthorized: false, isAdmin: false, role: null, company: null, hasAccount: false };
+    if (error || !data) return { isAuthorized: false, isAdmin: false, role: null, company: null };
     
     // Save it globally for the filter
     window.userCompany = data.company;
     // Fall back gracefully for any row that predates the role column/migration.
     const role = data.role || (data.is_admin ? 'admin' : 'editor');
     window.userRole = role;
-    return { isAuthorized: true, isAdmin: role === 'admin', role, company: data.company, hasAccount: !!data.has_account };
+    return { isAuthorized: true, isAdmin: role === 'admin', role, company: data.company };
 }
 
 async function loadAppConfig() {
@@ -6466,18 +6459,6 @@ async function handleAuthAction() {
         const perm = await verifyPermission(email);
 
 
-            // Special case: they're on the approved list, but never finished
-            // creating a PIN (never completed Sign Up). A normal login attempt
-            // here would just fail with Supabase's generic "invalid
-            // credentials" error, which would misleadingly read as a wrong
-            // PIN — catch it explicitly instead.
-            if (perm.isAuthorized && !perm.hasAccount) {
-                errorEl.innerText = "You're approved for this project, but haven't created a PIN yet. Please use \"Sign Up\" to create one.";
-                errorEl.style.display = 'block';
-                btn.disabled = false;
-                return;
-            }
-
             // Attempt the sign-in itself so we can tell a bad PIN apart from a
             // not-yet-authorized email, and report both if both are true.
             const { error: loginError } = await _supabase.auth.signInWithPassword({ email, password: pin });
@@ -6488,7 +6469,7 @@ async function handleAuthAction() {
                 if (loginError) {
                     const msg = (loginError.message || "").toLowerCase();
                     if (msg.includes("invalid login credentials") || msg.includes("invalid")) {
-                        reasons.push("the PIN entered is incorrect");
+                        reasons.push("the PIN entered is incorrect, or you haven't created one yet — use \"First time? Create your PIN\" below if this is your first time signing in");
                     } else if (msg.includes("email not confirmed")) {
                         reasons.push("this email hasn't been verified yet \u2014 check your inbox for the confirmation link");
                     } else {
@@ -6499,7 +6480,7 @@ async function handleAuthAction() {
                 // already have an account), use the exact simple phrasing
                 // instead of the combined "Sign in failed: ..." message.
                 if (perm.isAuthorized && loginError && reasons.length === 1) {
-                    errorEl.innerText = "Incorrect PIN entered.";
+                    errorEl.innerText = "Incorrect PIN entered, or you haven't created one yet — use \"First time? Create your PIN\" below if this is your first time signing in.";
                 } else {
                     errorEl.innerText = "Sign in failed: " + reasons.join(", and ") + ".";
                 }
