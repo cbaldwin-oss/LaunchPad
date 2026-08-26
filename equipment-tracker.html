@@ -1310,12 +1310,12 @@ async function fetchTrackerData(isSilent = false) {
             const response = await fetch(API_URL, fetchOptions);
             const payload = await response.json(); 
             
-            if (payload.debug) {
-                console.warn("=== BACKEND DIAGNOSTICS ===");
-                payload.debug.forEach(msg => console.warn(msg));
-                console.warn("===========================");
-            }
-            
+            // Backend diagnostics used to be dumped wholesale to the console
+            // here on every single fetch (including the silent 60s
+            // background poll) — that meant all the raw equipment status
+            // data was effectively always sitting in F12. Removed; if you
+            // need to debug the backend, temporarily re-add a console.warn
+            // loop over payload.debug.
             if (payload.error) {
                 console.error("Backend Error:", payload.error);
                 document.getElementById('sync-status').innerText = 'Sync Error: Check Backend 🔴';
