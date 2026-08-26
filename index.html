@@ -4422,7 +4422,7 @@ async function handleForgotPin() {
         return;
     }
     const { error } = await _supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: "https://sty4a-launch-pad.vercel.app/" 
+        redirectTo: "https://launchpad-inky-six.vercel.app/" 
     }); // <-- ADDED THE MISSING `});` HERE
 
     if (error) {
