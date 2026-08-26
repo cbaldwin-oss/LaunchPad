@@ -769,6 +769,49 @@ if (SUPABASE_CONFIGURED && window.supabase) {
 // directly (e.g. during local development) without a project param.
 const PROJECT_KEY = new URLSearchParams(window.location.search).get('project') || 'STY4';
 
+// The current user's role/email, passed in by the LaunchPad shell
+// (index.html). Defaults to 'editor' so this still works normally if
+// opened directly (e.g. during local development) without these params.
+const USER_ROLE = new URLSearchParams(window.location.search).get('role') || 'editor';
+const USER_EMAIL = new URLSearchParams(window.location.search).get('email') || '';
+const isViewerRole = USER_ROLE === 'viewer';
+
+// ===== VIEWER ROLE GATING =====
+// A viewer can look at the schedule but can't drag/resize/edit items or
+// trigger add/bulk-add actions. Capture-phase so it intercepts before the
+// app's own drag/click handlers ever see the event.
+if (isViewerRole) {
+    ['mousedown', 'click', 'dblclick'].forEach(evt => {
+        document.addEventListener(evt, function(e) {
+            const editSurface = e.target.closest('.gantt-item, .resize-handle, .link-handle, .menu-btn-wrap .tool-btn, .menu-item');
+            // Filters/search/zoom/group-by and the "Clear filters" button stay
+            // usable — those are read-only conveniences, not edits.
+            const readOnlyOk = e.target.closest('#groupBySelect, #dayWidthSelect, #expandToggleBtn, #criticalPathToggle, #globalSearch, #clearAllFiltersBtn, .filter-chip');
+            if (editSurface && !readOnlyOk) {
+                e.preventDefault();
+                e.stopPropagation();
+                if (evt === 'click') showBridgeViewerUpsell();
+            }
+        }, true);
+    });
+}
+
+function showBridgeViewerUpsell() {
+    if (document.getElementById('bridge-viewer-upsell')) return;
+    const modal = document.createElement('div');
+    modal.id = 'bridge-viewer-upsell';
+    modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.4); z-index:5000; display:flex; align-items:center; justify-content:center;';
+    modal.innerHTML = `
+        <div style="background:white; border-radius:10px; padding:28px; max-width:340px; text-align:center; box-shadow:0 10px 40px rgba(0,0,0,0.25); font-family: inherit;">
+            <div style="font-size:34px; margin-bottom:8px;">🔒</div>
+            <h3 style="margin:0 0 8px; color:#333;">View-Only Access</h3>
+            <p style="color:#666; font-size:14px; margin-bottom:18px;">You can view the pull plan but can't edit it. Ask an admin to switch to LaunchPad and request editor access from there.</p>
+            <button onclick="document.getElementById('bridge-viewer-upsell').remove()" style="background:#2e7d32; color:white; border:none; padding:11px 20px; border-radius:6px; cursor:pointer; font-weight:bold; width:100%;">Got it</button>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
 // Table names. {PROJECT_KEY}schedule_items is the one table this app writes
 // the actual pull-plan data to. Everything else — the option lists that
 // populate dropdowns/checklists — is read from your existing

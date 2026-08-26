@@ -682,6 +682,17 @@ input:not([type="checkbox"]), textarea, select {
 const SUPABASE_URL = 'https://rcnxetcomdrlxvlarqoc.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJjbnhldGNvbWRybHh2bGFycW9jIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY0NDIyMjksImV4cCI6MjA5MjAxODIyOX0.gP37sT5OrCOVRZXekMrBZHm5mtfnr6JrC2YGflWsDQU';
 
+// The current user's role/email, passed in by the LaunchPad shell
+// (index.html). Defaults to editor/no-email so this still behaves
+// reasonably if opened directly during local development.
+const USER_ROLE = new URLSearchParams(window.location.search).get('role') || 'editor';
+const USER_EMAIL = (new URLSearchParams(window.location.search).get('email') || '').toLowerCase();
+
+// Tamper Seal editing is intentionally stricter than the general per-project
+// role system: it doesn't matter if someone is an "editor" on the project
+// overall — actually logging/editing seals is CriticalArc-staff-only.
+const canEditTamperSeals = (USER_ROLE === 'editor' || USER_ROLE === 'admin') && USER_EMAIL.endsWith('@criticalarccx.com');
+
 // The project prefix, passed in via ?project=XXX by the LaunchPad shell
 // (index.html). Falls back to the prefix this file was originally built
 // for, so it still works if opened directly without a project param.
@@ -710,6 +721,20 @@ let isPreviewMode = false;
 
 // Update initApp (around line 420)
 async function initApp() {
+    // Tamper Seal editing is CriticalArc-staff-only (editor/admin role AND
+    // @criticalarccx.com email) — hide the mutating controls entirely for
+    // everyone else rather than letting them click in and fail later.
+    if (!canEditTamperSeals) {
+        ['addBtn', 'editBtn', 'duplicateBtn', 'deleteBtn'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.style.display = 'none';
+        });
+        const banner = document.createElement('div');
+        banner.style.cssText = 'background:#fff3e0; color:#e65100; font-size:12.5px; font-weight:600; text-align:center; padding:6px; border-bottom:1px solid #ffe0b2;';
+        banner.innerText = 'View-only — editing Tamper Seals is restricted to CriticalArc staff.';
+        document.body.insertBefore(banner, document.body.firstChild);
+    }
+
     await fetchLookupData();
     
     // Check if there is a saved preview to restore
@@ -908,6 +933,7 @@ async function fetchLookupData() {
 }
 
 async function toggleEditMode() {
+    if (!canEditTamperSeals) { alert('Editing Tamper Seals is restricted to CriticalArc staff.'); return; }
     const editBtn = document.getElementById('editBtn');
     const deleteBtn = document.getElementById('deleteBtn');
     const addBtn = document.getElementById('addBtn');
@@ -1426,6 +1452,7 @@ async function fetchAndRender(container, assetName) {
 let isEditMode = false;
 
 async function deleteSelected() {
+    if (!canEditTamperSeals) { alert('Editing Tamper Seals is restricted to CriticalArc staff.'); return; }
     const checkedRows = document.querySelectorAll('.row-selector:checked');
     if (checkedRows.length === 0) {
         alert("Please select at least one item to delete.");
@@ -1680,6 +1707,7 @@ function proceedToStandardForm() {
 }
 
 function showAddModal() {
+    if (!canEditTamperSeals) { alert('Editing Tamper Seals is restricted to CriticalArc staff.'); return; }
     isReinspectionMode = false;
     selectedBrokenSeals = [];
     
