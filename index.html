@@ -3987,13 +3987,19 @@ async function refreshMembersList() {
 }
 
 async function updateMemberRole(email, newRole) {
-    const { error } = await _supabase
+    const { data: updatedRows, error } = await _supabase
         .from(T('authorized_editors'))
         .update({ role: newRole, is_admin: newRole === 'admin' })
-        .eq('email', email);
+        .ilike('email', email)
+        .select();
 
     if (error) {
         alert('Could not update role: ' + error.message);
+        return;
+    }
+
+    if (!updatedRows || updatedRows.length === 0) {
+        alert("The update didn't apply to any rows. This usually means there's no RLS UPDATE policy on this table for logged-in admins — run rbac_update_policy.sql.");
         return;
     }
 
@@ -4149,17 +4155,27 @@ async function admitUser(email, company, requestId, role) {
         const { data: existingMember, error: lookupError } = await _supabase
             .from(T('authorized_editors'))
             .select('email')
-            .eq('email', emailLower)
+            .ilike('email', emailLower)
             .maybeSingle();
 
         if (lookupError) throw lookupError;
 
         if (existingMember) {
-            const { error: updateError } = await _supabase
+            const { data: updatedRows, error: updateError } = await _supabase
                 .from(T('authorized_editors'))
                 .update({ company: company, role: role, is_admin: role === 'admin' })
-                .eq('email', emailLower);
+                .ilike('email', emailLower)
+                .select();
+
             if (updateError) throw updateError;
+
+            // Supabase doesn't error when RLS silently filters an update
+            // down to zero matching rows — it just "succeeds" having
+            // changed nothing. Catch that explicitly instead of reporting
+            // false success.
+            if (!updatedRows || updatedRows.length === 0) {
+                throw new Error("The update didn't apply to any rows. This usually means there's no RLS UPDATE policy on this table for logged-in admins — run rbac_update_policy.sql.");
+            }
         } else {
             const { error: addError } = await _supabase
                 .from(T('authorized_editors'))

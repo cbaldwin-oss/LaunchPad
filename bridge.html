@@ -813,14 +813,60 @@ function showBridgeViewerUpsell() {
     modal.id = 'bridge-viewer-upsell';
     modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.4); z-index:5000; display:flex; align-items:center; justify-content:center;';
     modal.innerHTML = `
-        <div style="background:white; border-radius:10px; padding:28px; max-width:340px; text-align:center; box-shadow:0 10px 40px rgba(0,0,0,0.25); font-family: inherit;">
-            <div style="font-size:34px; margin-bottom:8px;">🔒</div>
+        <div style="background:white; border-radius:10px; padding:28px; max-width:360px; text-align:center; box-shadow:0 10px 40px rgba(0,0,0,0.25); font-family: inherit;">
+            <div style="font-size:36px; margin-bottom:10px;">🔒</div>
             <h3 style="margin:0 0 8px; color:#333;">View-Only Access</h3>
-            <p style="color:#666; font-size:14px; margin-bottom:18px;">You can view the pull plan but can't edit it. Ask an admin to switch to LaunchPad and request editor access from there.</p>
-            <button onclick="document.getElementById('bridge-viewer-upsell').remove()" style="background:#2e7d32; color:white; border:none; padding:11px 20px; border-radius:6px; cursor:pointer; font-weight:bold; width:100%;">Got it</button>
+            <p style="color:#666; font-size:14px; margin-bottom:20px;">You have viewer access to this project and can't make changes here. Want to request editor access?</p>
+            <button onclick="requestBridgeHigherAccess()" style="background:#2e7d32; color:white; border:none; padding:12px 20px; border-radius:6px; cursor:pointer; font-weight:bold; width:100%; margin-bottom:8px;">Request Editor Access</button>
+            <button onclick="document.getElementById('bridge-viewer-upsell').remove()" style="background:none; border:none; color:#999; cursor:pointer; font-size:13px;">Cancel</button>
         </div>
     `;
     document.body.appendChild(modal);
+}
+
+async function requestBridgeHigherAccess() {
+    const modal = document.getElementById('bridge-viewer-upsell');
+    if (modal) modal.innerHTML = '<div style="background:white; border-radius:10px; padding:28px; text-align:center; font-size:14px; color:#666;">Sending request...</div>';
+
+    try {
+        if (!USER_EMAIL) throw new Error('No email was passed in from LaunchPad — please request access from there instead.');
+
+        // Look up this project's own Apps Script URL / admin email directly
+        // rather than assuming a scriptUrl param was passed in, so this
+        // stays correct regardless of how this file was opened.
+        const { data: project, error: projectErr } = await _supabase
+            .from('launchpad_projects')
+            .select('google_script_url, admin_email')
+            .eq('project_key', PROJECT_KEY)
+            .maybeSingle();
+
+        if (projectErr || !project) throw new Error("Could not find this project's configuration.");
+
+        const accessRequestsTable = `${PROJECT_KEY}access_requests`;
+
+        // Avoid spamming duplicate upgrade requests if one's already pending.
+        const { data: existing } = await _supabase
+            .from(accessRequestsTable)
+            .select('email')
+            .ilike('email', USER_EMAIL)
+            .maybeSingle();
+
+        if (!existing) {
+            const { error: insertErr } = await _supabase
+                .from(accessRequestsTable)
+                .insert([{ email: USER_EMAIL, company: '', requested_role: 'editor' }]);
+            if (insertErr) throw insertErr;
+        }
+
+        const url = `${project.google_script_url}?action=requestAccess&email=${encodeURIComponent(USER_EMAIL)}&company=${encodeURIComponent('')}&admin=${encodeURIComponent(project.admin_email || '')}`;
+        await fetch(url);
+
+        if (modal) modal.remove();
+        alert('Your request for editor access has been sent to the admin.');
+    } catch (e) {
+        if (modal) modal.remove();
+        alert('Could not send the request: ' + e.message);
+    }
 }
 
 // Table names. {PROJECT_KEY}schedule_items is the one table this app writes
