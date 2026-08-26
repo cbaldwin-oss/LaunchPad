@@ -1363,7 +1363,7 @@ body.dark-mode .phase-row {
         <div class="nav-item" onclick="toggleSwitchProjectPopover(event)" style="position: relative;">
             <span class="nav-icon">🔀</span> <span class="nav-text">Switch Project</span>
         </div>
-        <div id="nav-settings" class="nav-item" style="display: none;" onclick="openScheduleConfigModal()">
+        <div id="nav-settings" class="nav-item" style="display: none;" onclick="openSettingsForCurrentView()">
             <span class="nav-icon" style="color: #555;">⚙️</span> <span class="nav-text">Settings</span>
         </div>
         <div class="nav-item" onclick="logout()" style="border-top: 1px solid #eee;">
@@ -1761,7 +1761,8 @@ const defaultScheduleConfig = [
     { id: 6, name: 'Trade Partners', visible: true, width: 15 },
     { id: 7, name: 'Result', visible: true, width: 10 },
     { id: 8, name: 'Notes', visible: true, width: 10 },
-    { id: 9, name: 'Duration', visible: true, width: 5 }
+    { id: 9, name: 'Duration', visible: true, width: 5 },
+    { id: 10, name: 'LOTO', visible: true, width: 8 }
 ];
 
 async function loadScheduleConfig() {
@@ -1773,6 +1774,9 @@ async function loadScheduleConfig() {
             
             if (!scheduleColConfig.find(c => c.id === 9)) {
                 scheduleColConfig.push({ id: 9, name: 'Duration', visible: true, width: 5 });
+            }
+            if (!scheduleColConfig.find(c => c.id === 10)) {
+                scheduleColConfig.push({ id: 10, name: 'LOTO', visible: true, width: 8 });
             }
             
             // 🟢 THE FIX: Guarantee every column has a valid width number!
@@ -2236,6 +2240,8 @@ document.addEventListener('click', (e) => {
 });
 
 function switchMainView(viewType, btn) {
+    window.__currentView = viewType;
+
     // 1. Target the main view containers
     const dash = document.getElementById('dashboard-view');
     const sched = document.getElementById('schedule-view');
@@ -4371,10 +4377,10 @@ function updateRowInUI(row) {
 
     rowEl.setAttribute('data-occupied', 'true');
     // Column Name Mapping
-    const dbCols = { 1: 'time', 2: 'place', 3: 'activity', 4: 'asset', 5: 'status', 6: 'trade_partners', 7: 'result', 8: 'notes', 9: 'duration' };
+    const dbCols = { 1: 'time', 2: 'place', 3: 'activity', 4: 'asset', 5: 'status', 6: 'trade_partners', 7: 'result', 8: 'notes', 9: 'duration', 10: 'loto' };
 
-    // Update columns 1 through 9
-    for (let i = 1; i <= 9; i++) {
+    // Update columns 1 through 10
+    for (let i = 1; i <= 10; i++) {
         const cellId = `${row.day_label}-r${row.id}-c${i}`;
         const el = document.getElementById(cellId);
         
@@ -5248,6 +5254,31 @@ function refreshDropdowns() {
     });
 }
 
+// The single sidebar "Settings" icon routes to whichever view is currently
+// active. Schedule's config lives directly in this document; Equipment
+// Tracker's lives inside its own iframe, so it's triggered via postMessage
+// instead of trying to reach into that document directly. Bridge and
+// Tamper Seals don't have a settings modal of their own (yet), so there's
+// nothing to open for those views.
+function openSettingsForCurrentView() {
+    const view = window.__currentView || 'schedule';
+
+    if (view === 'schedule') {
+        openScheduleConfigModal();
+        return;
+    }
+
+    if (view === 'equipment') {
+        const iframe = document.getElementById('equipment-tracker-iframe');
+        if (iframe && iframe.contentWindow) {
+            iframe.contentWindow.postMessage({ type: 'OPEN_SETTINGS' }, '*');
+        }
+        return;
+    }
+
+    alert("There are no settings for this view yet.");
+}
+
 function openScheduleConfigModal() {
     const list = document.getElementById('schedule-col-list');
     list.innerHTML = '';
@@ -5787,6 +5818,19 @@ function addRowsToContainer(container, dayLabel, anchorBtn = null, startIdx = 0,
                     saveCell(element, element.value, col, true);
                 };
             }
+            else if (col === 10) {
+                // LOTO (Lock-Out/Tag-Out) — simple Yes/No select, no need for
+                // the searchable custom menu the dropdown-list columns use
+                // since there are only ever two options.
+                element = document.createElement('select');
+                element.id = cellId;
+                element.setAttribute('data-col-index', col);
+                element.innerHTML = '<option value="">Select...</option><option value="Yes">Yes</option><option value="No">No</option>';
+                element.onchange = () => {
+                    applyCellColor(element, element.value);
+                    saveCell(element, element.value, col, true);
+                };
+            }
             else if (col === 9) {
                 // 🟢 THE FIX: Generates a locked, non-editable text input for Col 9 (Duration)
                 element = document.createElement('input');
@@ -6149,7 +6193,7 @@ function saveCell(cell, value, colIndex, isImmediate = false) {
         if (currentValue.includes("Checking") || (isFailsafe && currentValue === oldValue)) return;
 
         // Column Name Mapping
-        const dbCols = { 1: 'time', 2: 'place', 3: 'activity', 4: 'asset', 5: 'status', 6: 'trade_partners', 7: 'result', 8: 'notes', 9: 'duration' };
+        const dbCols = { 1: 'time', 2: 'place', 3: 'activity', 4: 'asset', 5: 'status', 6: 'trade_partners', 7: 'result', 8: 'notes', 9: 'duration', 10: 'loto' };
 
         const updateObj = { id: parseInt(rowNum), day_label: dateId };
         updateObj[dbCols[colIndex]] = currentValue; // <-- Map the number to the new name
@@ -7372,9 +7416,9 @@ async function loadData(isSilent = false, preFetchedPromise = null) {
                 }
 
                 // THE FIX: Activity is now 2, Place is now 3
-                const dbCols = { 1: 'time', 2: 'place', 3: 'activity', 4: 'asset', 5: 'status', 6: 'trade_partners', 7: 'result', 8: 'notes', 9: 'duration' };
+                const dbCols = { 1: 'time', 2: 'place', 3: 'activity', 4: 'asset', 5: 'status', 6: 'trade_partners', 7: 'result', 8: 'notes', 9: 'duration', 10: 'loto' };
 
-                for (let col = 1; col <= 9; col++) {
+                for (let col = 1; col <= 10; col++) {
                     const cellId = `${row.day_label}-r${row.id}-c${col}`;
                     const el = document.getElementById(cellId);
                     if (el && el !== document.activeElement) {

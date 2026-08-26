@@ -1570,11 +1570,13 @@ window.onload = function() {
     // 3. Listen for the secure reply from index.html
     window.addEventListener('message', function(event) {
         if (event.data && event.data.type === 'AUTH_STATUS') {
-            // Unhide the config button if they are an admin!
-            if (event.data.isAdmin === true) {
-                const setupBtn = document.getElementById('setup-config-btn');
-                if (setupBtn) setupBtn.style.display = 'flex';
-            }
+            // Admin status is still tracked (used for other admin-only
+            // controls elsewhere in this file), but the Setup Config button
+            // itself now lives in the main LaunchPad sidebar instead of
+            // here — see the OPEN_SETTINGS listener below.
+        }
+        if (event.data && event.data.type === 'OPEN_SETTINGS') {
+            openSettingsModal();
         }
     });
 
