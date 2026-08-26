@@ -725,7 +725,7 @@ async function initApp() {
     // @criticalarccx.com email) — hide the mutating controls entirely for
     // everyone else rather than letting them click in and fail later.
     if (!canEditTamperSeals) {
-        ['addBtn', 'editBtn', 'duplicateBtn', 'deleteBtn'].forEach(id => {
+        ['addBtn', 'editBtn', 'deleteBtn'].forEach(id => {
             const el = document.getElementById(id);
             if (el) el.style.display = 'none';
         });

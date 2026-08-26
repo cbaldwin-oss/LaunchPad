@@ -3970,7 +3970,7 @@ async function refreshMembersList() {
         <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 0; border-bottom:1px solid #f5f5f5;">
             <div style="min-width:0;">
                 <div style="font-size:13px; font-weight:bold; color:#333; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${m.email}</div>
-                <div style="font-size:11px; color:#666;">${m.company || 'Unknown'}</div>
+                <div style="font-size:11px; color:#666; display:flex; align-items:center; gap:4px; margin-top:3px;">${buildCompanyEditor('mem-' + m.email.replace(/[^a-zA-Z0-9]/g, '_'), m.company, 'member', m.email)}</div>
             </div>
             <div style="display:flex; align-items:center; gap:6px; flex-shrink:0;">
                 <select onchange="updateMemberRole('${m.email}', this.value)" style="font-size:11px; padding:5px; border-radius:4px; border:1px solid #ccc;">
@@ -4043,6 +4043,65 @@ async function declineUser(email, requestId) { // Added email parameter here
     }
 }
 
+// Reusable inline "company" editor: a dropdown of this project's known
+// companies (same list the schedule's own dropdowns use) plus an "+ Add New"
+// option that reveals a free-text field. Used by both the Pending Requests
+// and Members lists in Manage Access.
+function buildCompanyEditor(uid, currentValue, targetType, targetId) {
+    const companies = (window.dropdownData && window.dropdownData.col6) || [];
+    const isKnown = currentValue && companies.includes(currentValue);
+    return `
+        <select id="company-select-${uid}" onchange="onCompanySelectChange('${uid}', '${targetType}', '${targetId}', this.value)" style="font-size:11px; padding:4px; border-radius:4px; border:1px solid #ccc; max-width:130px;">
+            <option value="">Unknown</option>
+            ${companies.map(c => `<option value="${c}" ${c === currentValue ? 'selected' : ''}>${c}</option>`).join('')}
+            <option value="__add_new__">+ Add New</option>
+        </select>
+        <input type="text" id="company-new-${uid}" placeholder="New company"
+            value="${!isKnown && currentValue ? currentValue : ''}"
+            onkeydown="if(event.key==='Enter'){ commitCompanyChange('${targetType}', '${targetId}', this.value); }"
+            onblur="commitCompanyChange('${targetType}', '${targetId}', this.value)"
+            style="display:${!isKnown && currentValue ? 'inline-block' : 'none'}; font-size:11px; padding:4px; border-radius:4px; border:1px solid #ccc; max-width:110px; margin-left:4px;">
+    `;
+}
+
+function onCompanySelectChange(uid, targetType, targetId, value) {
+    const newInput = document.getElementById(`company-new-${uid}`);
+    if (value === '__add_new__') {
+        newInput.style.display = 'inline-block';
+        newInput.value = '';
+        newInput.focus();
+        return;
+    }
+    newInput.style.display = 'none';
+    commitCompanyChange(targetType, targetId, value);
+}
+
+async function commitCompanyChange(targetType, targetId, value) {
+    value = value.trim();
+    if (!value) return;
+
+    const table = targetType === 'request' ? T('access_requests') : T('authorized_editors');
+    const column = targetType === 'request' ? 'id' : 'email';
+    // targetId comes through as a string from the inline onclick attribute;
+    // access_requests.id is numeric, so cast it back for the request case.
+    const matchValue = targetType === 'request' ? Number(targetId) : targetId;
+
+    const { error } = await _supabase.from(table).update({ company: value }).eq(column, matchValue);
+    if (error) {
+        alert('Could not update company: ' + error.message);
+    }
+}
+
+// Reads whatever company value is CURRENTLY showing in one of the inline
+// editors above — used so actions like "Admit" pick up an edit the admin
+// just made, instead of whatever company string was baked in at render time.
+function getCurrentCompanyValue(uid) {
+    const select = document.getElementById(`company-select-${uid}`);
+    const newInput = document.getElementById(`company-new-${uid}`);
+    if (!select) return '';
+    return select.value === '__add_new__' ? newInput.value.trim() : select.value;
+}
+
 async function refreshRequestList() {
     const listContainer = document.getElementById('request-list');
     const { data, error } = await _supabase.from(T('access_requests')).select('*');
@@ -4055,14 +4114,16 @@ async function refreshRequestList() {
     listContainer.innerHTML = data.map(req => `
         <div style="padding: 10px 0; border-bottom: 1px solid #f5f5f5;">
             <div style="font-size: 13px; font-weight: bold; color: #333;">${req.email}</div>
-            <div style="font-size: 11px; color: #666; margin-bottom: 6px;">Company: ${req.company || 'Unknown'}</div>
+            <div style="font-size: 11px; color: #666; margin-bottom: 6px; display:flex; align-items:center; gap:4px;">
+                Company: ${buildCompanyEditor('req-' + req.id, req.company, 'request', req.id)}
+            </div>
             <select id="admit-role-${req.id}" style="font-size: 11px; padding: 4px; border-radius: 4px; border: 1px solid #ccc; margin-bottom: 8px;">
                 <option value="viewer" ${req.requested_role === 'viewer' ? 'selected' : ''}>Viewer</option>
                 <option value="editor" ${req.requested_role === 'editor' || !req.requested_role ? 'selected' : ''}>Editor</option>
                 <option value="admin">Admin</option>
             </select>
             <div style="display: flex; gap: 5px;">
-                <button onclick="admitUser('${req.email}', '${req.company}', ${req.id}, document.getElementById('admit-role-${req.id}').value)" 
+                <button onclick="admitUser('${req.email}', getCurrentCompanyValue('req-${req.id}'), ${req.id}, document.getElementById('admit-role-${req.id}').value)" 
                         style="background: #2e7d32; color: white; border: none; padding: 6px 10px; border-radius: 4px; font-size: 11px; cursor: pointer; font-weight: bold;">
                     Admit
                 </button>
@@ -4605,9 +4666,10 @@ function renderProjectPicker(projects, opts) {
                 <input type="text" id="access-code-input" placeholder="6-digit access code" maxlength="6" inputmode="numeric" oninput="handleAccessCodeInput()" style="padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:6px; box-sizing:border-box; font-size:15px; text-align:center; letter-spacing:3px;">
                 <p id="access-code-status" style="font-size:12.5px; margin:0 0 10px; min-height:16px;"></p>
                 <input type="email" id="access-request-email" placeholder="Email address" style="padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:10px; box-sizing:border-box; font-size:15px;">
-                <select id="access-request-company" disabled style="padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:14px; box-sizing:border-box; font-size:15px; background-color:white; color:#999;">
+                <select id="access-request-company" disabled onchange="handleCompanySelectChange()" style="padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:10px; box-sizing:border-box; font-size:15px; background-color:white; color:#999;">
                     <option value="">Enter a valid code to load the company list...</option>
                 </select>
+                <input type="text" id="access-request-new-company" placeholder="Enter your company name" style="display:none; padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:14px; box-sizing:border-box; font-size:15px;">
                 <div style="text-align:left; margin-bottom:14px; font-size:14px; color:#333;">
                     <div style="font-weight:600; margin-bottom:6px;">Access level requested:</div>
                     <label style="margin-right:20px; cursor:pointer;"><input type="radio" name="access-request-role" value="viewer" checked style="margin-right:5px;">Viewer <span style="color:#999; font-size:12px;">(view only)</span></label>
@@ -4682,21 +4744,60 @@ function enableViewerGate() {
     if (__viewerGateEnabled) return;
     __viewerGateEnabled = true;
 
+    // Disabling the actual form controls is far more reliable than trying
+    // to intercept click/focus events — native <select> elements in
+    // particular don't reliably respect preventDefault() on click in every
+    // browser, which is why the previous event-based approach could still
+    // let a viewer interact with them. A disabled control simply can't be
+    // focused, clicked into, or changed via keyboard, full stop.
+    function lockdownRow(row) {
+        row.querySelectorAll('input, select, textarea').forEach(el => { el.disabled = true; });
+        row.setAttribute('draggable', 'false');
+    }
+
+    // Lock down every row already on the page...
+    document.querySelectorAll('.cell-row').forEach(lockdownRow);
+
+    // ...and catch every row added later (date navigation, "+ Add 5 Rows",
+    // batch-add rendering, etc.) without needing to patch every call site
+    // that creates one.
+    const observer = new MutationObserver(mutations => {
+        mutations.forEach(m => {
+            m.addedNodes.forEach(node => {
+                if (node.nodeType !== 1) return;
+                if (node.classList && node.classList.contains('cell-row')) lockdownRow(node);
+                if (node.querySelectorAll) node.querySelectorAll('.cell-row').forEach(lockdownRow);
+            });
+        });
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    // Hide the known mutating action buttons entirely rather than just
+    // disabling them, since these live outside the schedule grid itself.
+    const style = document.createElement('style');
+    style.innerHTML = `
+        body.viewer-mode #batch-add-btn,
+        body.viewer-mode .add-rows-btn,
+        body.viewer-mode .row-checkbox {
+            display: none !important;
+        }
+        body.viewer-mode .cell-row input:disabled,
+        body.viewer-mode .cell-row select:disabled,
+        body.viewer-mode .cell-row textarea:disabled {
+            cursor: default;
+            opacity: 0.85;
+        }
+    `;
+    document.head.appendChild(style);
+
+    // Belt-and-suspenders: if anything still slips through (a button we
+    // didn't anticipate), clicking it shows the upsell instead of silently
+    // doing nothing or throwing an error.
     document.addEventListener('click', function(e) {
         if (window.userRole !== 'viewer') return;
-        const inScheduleRow = e.target.closest('.cell-row') && e.target.closest('input, select, textarea, button');
-        const bulkAddTrigger = e.target.closest('[onclick*="openBulkAddModal"], [onclick*="Batch Add"], #Batch-Add-Btn');
-        if (inScheduleRow || bulkAddTrigger) {
+        if (e.target.closest('#batch-add-btn, .add-rows-btn')) {
             e.preventDefault();
             e.stopPropagation();
-            showViewerUpsell();
-        }
-    }, true);
-
-    document.addEventListener('focusin', function(e) {
-        if (window.userRole !== 'viewer') return;
-        if (e.target.closest('.cell-row') && e.target.matches('input, select, textarea')) {
-            e.target.blur();
             showViewerUpsell();
         }
     }, true);
@@ -6986,6 +7087,8 @@ function handleAccessCodeInput() {
     companySelect.disabled = true;
     companySelect.style.color = '#999';
     companySelect.innerHTML = '<option value="">Enter a valid code to load the company list...</option>';
+    document.getElementById('access-request-new-company').style.display = 'none';
+    document.getElementById('access-request-new-company').value = '';
 
     if (!/^\d{6}$/.test(code)) {
         statusEl.innerText = '';
@@ -7032,16 +7135,31 @@ function handleAccessCodeInput() {
             const companies = [...new Set(options.map(r => r.Trade_Partners).filter(Boolean))].sort();
             companies.forEach(c => companySelect.add(new Option(c, c)));
         }
-        companySelect.add(new Option("Company not found", "Company not found"));
+        companySelect.add(new Option("+ Add New Company", "__add_new__"));
         companySelect.disabled = false;
         companySelect.style.color = '#333';
     }, 350);
 }
 
+function handleCompanySelectChange() {
+    const select = document.getElementById('access-request-company');
+    const newCompanyInput = document.getElementById('access-request-new-company');
+    if (select.value === '__add_new__') {
+        newCompanyInput.style.display = 'block';
+        newCompanyInput.focus();
+    } else {
+        newCompanyInput.style.display = 'none';
+        newCompanyInput.value = '';
+    }
+}
+
 async function submitAccessRequest() {
     const code = document.getElementById('access-code-input').value.trim();
     const email = document.getElementById('access-request-email').value.trim().toLowerCase();
-    const company = document.getElementById('access-request-company').value.trim();
+    const companySelectValue = document.getElementById('access-request-company').value.trim();
+    const company = companySelectValue === '__add_new__'
+        ? document.getElementById('access-request-new-company').value.trim()
+        : companySelectValue;
     const roleRadio = document.querySelector('input[name="access-request-role"]:checked');
     const requestedRole = roleRadio ? roleRadio.value : 'viewer';
     const errorEl = document.getElementById('access-request-error');
@@ -7142,6 +7260,8 @@ async function submitAccessRequest() {
             document.getElementById('access-code-input').value = "";
             document.getElementById('access-request-email').value = "";
             document.getElementById('access-request-company').innerHTML = '<option value="">Enter a valid code to load the company list...</option>';
+            document.getElementById('access-request-new-company').value = '';
+            document.getElementById('access-request-new-company').style.display = 'none';
             document.getElementById('access-request-company').disabled = true;
             document.getElementById('access-code-status').innerText = "";
             window.__resolvedAccessRequestProject = null;

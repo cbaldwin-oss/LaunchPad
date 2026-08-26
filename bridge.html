@@ -781,7 +781,7 @@ const isViewerRole = USER_ROLE === 'viewer';
 // trigger add/bulk-add actions. Capture-phase so it intercepts before the
 // app's own drag/click handlers ever see the event.
 if (isViewerRole) {
-    ['mousedown', 'click', 'dblclick'].forEach(evt => {
+    ['pointerdown', 'mousedown', 'click', 'dblclick'].forEach(evt => {
         document.addEventListener(evt, function(e) {
             const editSurface = e.target.closest('.gantt-item, .resize-handle, .link-handle, .menu-btn-wrap .tool-btn, .menu-item');
             // Filters/search/zoom/group-by and the "Clear filters" button stay
