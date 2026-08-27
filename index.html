@@ -6,6 +6,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LaunchPad</title>
+    <!-- Shown when someone saves this to their iOS home screen. Also kept
+         in sync with the currently-selected project's own logo_url once
+         one's picked — see applyProjectConfig(). -->
+    <link rel="apple-touch-icon" id="apple-touch-icon-link" href="https://lh3.googleusercontent.com/u/0/d/10HrjiJKbZuZSi_OYqJBKD6EVtbfE8-KR">
+    <link rel="icon" id="favicon-link" href="https://lh3.googleusercontent.com/u/0/d/1Wy_ftXtce-UG5jV-5vwS80lV1yt7QTbG">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🚀</text></svg>">
     <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -4619,6 +4624,15 @@ async function applyProjectConfig(projectKey) {
     const headerLogo = document.getElementById('main-header-logo');
     if (headerLogo && window.LP_CONFIG.logoUrl) {
         headerLogo.src = window.LP_CONFIG.logoUrl;
+    }
+
+    // Same idea for the home-screen icon (apple-touch-icon) and favicon —
+    // defaults to the CriticalArc logo until/unless a project has its own.
+    const touchIcon = document.getElementById('apple-touch-icon-link');
+    const favicon = document.getElementById('favicon-link');
+    if (window.LP_CONFIG.logoUrl) {
+        if (touchIcon) touchIcon.href = window.LP_CONFIG.logoUrl;
+        if (favicon) favicon.href = window.LP_CONFIG.logoUrl;
     }
 
     return true;
