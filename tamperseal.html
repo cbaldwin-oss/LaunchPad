@@ -71,7 +71,8 @@
 }
 
         .frozen-grid { display: flex; width: 100%; align-items: center; gap: 5px; }
-        .header-cell { flex: 1; text-align: center; font-size: 11px; font-weight: bold; text-transform: uppercase; }
+        .header-cell { flex: 1; text-align: center; font-size: 11px; font-weight: bold; text-transform: uppercase; border-right: 1px solid rgba(255,255,255,0.5); padding: 4px 0; box-sizing: border-box; }
+        .header-cell:last-of-type { border-right: none; }
 
         /* ASSET ACCORDION STYLES */
         .asset-container { margin: 20px auto; width: 95%; border: 2px solid #d6445a; border-radius: 8px; background: #ffffff; overflow: hidden; }
@@ -429,6 +430,8 @@ body.is-editing .edit-only-cell,
 body.is-editing .edit-only-header { 
     display: flex !important; 
     flex: 1;
+    border-right: 1px solid rgba(255,255,255,0.5);
+    box-sizing: border-box;
 }
 
 /* 3. Visual feedback for fields you are currently editing */
@@ -647,25 +650,15 @@ input:not([type="checkbox"]), textarea, select {
     <div class="frozen-grid">
         <div class="edit-header-cell"></div>
         <div class="edit-only-header">Asset Name</div>
-        <span class="sep edit-only-cell">|</span>
         <div class="edit-only-header">Location</div>
-        <span class="sep edit-only-cell">|</span>
         <div class="header-cell">Sub Area</div>
-        <span class="sep">|</span>
         <div class="header-cell">Seal #</div>
-        <span class="sep">|</span>
         <div class="header-cell">Inspection Date</div>
-        <span class="sep">|</span>
         <div class="header-cell">Signoff</div>
-        <span class="sep">|</span>
         <div class="header-cell">Inspection Notes</div>
-        <span class="sep">|</span>
         <div class="header-cell">Status</div>
-        <span class="sep">|</span>
         <div class="header-cell">Break Date</div>
-        <span class="sep">|</span>
         <div class="header-cell">Responsible Party</div>
-        <span class="sep">|</span>
         <div class="header-cell">Break Reason</div>
         <div class="spacer"></div>
     </div>
