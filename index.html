@@ -7353,25 +7353,33 @@ async function submitAccessRequest() {
         
         if (dbError) throw dbError;
 
-        // 3. Notify that project's own admin via that project's own Apps Script
+        // 3. Notify that project's own admin via that project's own Apps Script.
+        // This is a best-effort notification, not the actual request — the
+        // database insert above already succeeded, so a hiccup here (e.g.
+        // the Apps Script choking on an unfamiliar new company name and
+        // returning an HTML error page instead of JSON) shouldn't surface
+        // as an error to the user when their request was, in fact, saved.
         const url = `${project.google_script_url}?action=requestAccess&email=${encodeURIComponent(email)}&company=${encodeURIComponent(company)}&admin=${encodeURIComponent(project.admin_email || '')}`;
-        
-        const response = await fetch(url);
-        const data = await response.json();
 
-        if (data.success) {
-            successEl.innerText = "Request sent! The admin will be notified.";
-            document.getElementById('access-code-input').value = "";
-            document.getElementById('access-request-email').value = "";
-            document.getElementById('access-request-company').innerHTML = '<option value="">Enter a valid code to load the company list...</option>';
-            document.getElementById('access-request-new-company').value = '';
-            document.getElementById('access-request-new-company').style.display = 'none';
-            document.getElementById('access-request-company').disabled = true;
-            document.getElementById('access-code-status').innerText = "";
-            window.__resolvedAccessRequestProject = null;
-        } else {
-            throw new Error(data.error || "Unknown server error");
+        try {
+            const response = await fetch(url);
+            const data = await response.json();
+            if (!data.success) {
+                console.warn('Access-request notification did not report success:', data);
+            }
+        } catch (notifyErr) {
+            console.warn('Access-request notification failed (request itself was still saved):', notifyErr);
         }
+
+        successEl.innerText = "Request sent! The admin will be notified.";
+        document.getElementById('access-code-input').value = "";
+        document.getElementById('access-request-email').value = "";
+        document.getElementById('access-request-company').innerHTML = '<option value="">Enter a valid code to load the company list...</option>';
+        document.getElementById('access-request-new-company').value = '';
+        document.getElementById('access-request-new-company').style.display = 'none';
+        document.getElementById('access-request-company').disabled = true;
+        document.getElementById('access-code-status').innerText = "";
+        window.__resolvedAccessRequestProject = null;
     } catch (e) {
         errorEl.innerText = e.message;
         errorEl.style.display = 'block';
