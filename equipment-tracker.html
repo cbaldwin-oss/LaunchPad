@@ -235,11 +235,11 @@
            status column, group header, and both flanking dividers — not
            just the Gate sub-column. */
         body.hide-l2-all #group-l2, body.hide-l2-all #l2-supp-header, body.hide-l2-all .l2-supp-summary,
-        body.hide-l2-all #group-l2 + .phase-gap, body.hide-l2-all #l2-supp-header + .phase-gap { display: none !important; }
+        body.hide-l2-all .phase-gap:has(+ #group-l2), body.hide-l2-all .phase-gap:has(+ .l2-gate-col) { display: none !important; }
         body.hide-l3-all #group-l3, body.hide-l3-all #l3-supp-header, body.hide-l3-all .l3-supp-summary,
-        body.hide-l3-all #group-l3 + .phase-gap, body.hide-l3-all #l3-supp-header + .phase-gap { display: none !important; }
+        body.hide-l3-all .phase-gap:has(+ #group-l3), body.hide-l3-all .phase-gap:has(+ .l3-gate-col) { display: none !important; }
         body.hide-l4-all #group-l4, body.hide-l4-all #l4-supp-header, body.hide-l4-all .l4-supp-summary,
-        body.hide-l4-all #group-l4 + .phase-gap, body.hide-l4-all #l4-supp-header + .phase-gap { display: none !important; }
+        body.hide-l4-all .phase-gap:has(+ #group-l4), body.hide-l4-all .phase-gap:has(+ .l4-gate-col) { display: none !important; }
 
         /* --- MODALS --- */
         .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 3000; display: none; align-items: center; justify-content: center; }
