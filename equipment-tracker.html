@@ -231,6 +231,16 @@
         body.hide-l3-gate .l3-gate-col { display: none !important; }
         body.hide-l4-gate .l4-gate-col { display: none !important; }
 
+        /* When both Gate AND Support are off, hide the whole phase group —
+           status column, group header, and both flanking dividers — not
+           just the Gate sub-column. */
+        body.hide-l2-all #group-l2, body.hide-l2-all #l2-supp-header, body.hide-l2-all .l2-supp-summary,
+        body.hide-l2-all #group-l2 + .phase-gap, body.hide-l2-all #l2-supp-header + .phase-gap { display: none !important; }
+        body.hide-l3-all #group-l3, body.hide-l3-all #l3-supp-header, body.hide-l3-all .l3-supp-summary,
+        body.hide-l3-all #group-l3 + .phase-gap, body.hide-l3-all #l3-supp-header + .phase-gap { display: none !important; }
+        body.hide-l4-all #group-l4, body.hide-l4-all #l4-supp-header, body.hide-l4-all .l4-supp-summary,
+        body.hide-l4-all #group-l4 + .phase-gap, body.hide-l4-all #l4-supp-header + .phase-gap { display: none !important; }
+
         /* --- MODALS --- */
         .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 3000; display: none; align-items: center; justify-content: center; }
         .modal-overlay.active { display: flex; }
@@ -1401,6 +1411,13 @@ async function fetchTrackerData(isSilent = false) {
             document.body.classList.toggle('hide-l2-gate', globalConfig.showL2Gate === false);
             document.body.classList.toggle('hide-l3-gate', globalConfig.showL3Gate === false);
             document.body.classList.toggle('hide-l4-gate', globalConfig.showL4Gate === false);
+
+            // When BOTH Gate and Support are off for a phase, hide the
+            // whole phase group — including its Status column and group
+            // header — not just the Gate sub-column.
+            document.body.classList.toggle('hide-l2-all', globalConfig.showL2Gate === false && globalConfig.showL2Supp === false);
+            document.body.classList.toggle('hide-l3-all', globalConfig.showL3Gate === false && globalConfig.showL3Supp === false);
+            document.body.classList.toggle('hide-l4-all', globalConfig.showL4Gate === false && globalConfig.showL4Supp === false);
 
             document.querySelectorAll('.dynamic-header').forEach(el => el.remove()); 
             document.querySelectorAll('.dynamic-gate-header').forEach(el => el.remove());
