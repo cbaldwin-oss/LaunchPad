@@ -1732,7 +1732,7 @@ function showAddModal() {
     document.getElementById('newLocation').value = "";
     document.getElementById('newAsset').value = "";
     document.getElementById('newSubArea').value = "";
-    document.getElementById('newSignoff').value = "";
+    document.getElementById('newSignoff').value = USER_EMAIL || "";
     
     // Reset the broken asset dropdown if it exists
     const brokenSelect = document.getElementById('brokenAssetSelect');

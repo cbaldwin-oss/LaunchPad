@@ -1839,6 +1839,11 @@ let scheduleColConfig = defaultScheduleConfig; // Now defaults to global variabl
 
 function saveScheduleConfig() {
     localStorage.setItem('userScheduleConfig', JSON.stringify(scheduleColConfig));
+    // Without this, reloading would route through the picker again (it now
+    // always shows on a fresh load) instead of landing back in this project.
+    if (window.LP_CONFIG && window.LP_CONFIG.projectKey) {
+        sessionStorage.setItem('launchpad_skip_picker_once', window.LP_CONFIG.projectKey);
+    }
     location.reload(); // Reload to apply changes cleanly
 }
 
@@ -5444,6 +5449,9 @@ async function saveAllSettings(btn) {
     }
 
     // 5. Finally, reload the page cleanly to fetch the newly written data
+    if (window.LP_CONFIG && window.LP_CONFIG.projectKey) {
+        sessionStorage.setItem('launchpad_skip_picker_once', window.LP_CONFIG.projectKey);
+    }
     location.reload(); 
 }
 
