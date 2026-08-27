@@ -4066,13 +4066,14 @@ function buildCompanyEditor(uid, currentValue, targetType, targetId) {
         <select id="company-select-${uid}" onchange="onCompanySelectChange('${uid}', '${targetType}', '${targetId}', this.value)" style="font-size:11px; padding:4px; border-radius:4px; border:1px solid #ccc; max-width:130px;">
             <option value="">Unknown</option>
             ${companies.map(c => `<option value="${c}" ${c === currentValue ? 'selected' : ''}>${c}</option>`).join('')}
+            ${!isKnown && currentValue ? `<option value="${currentValue}" selected>${currentValue}</option>` : ''}
             <option value="__add_new__">+ Add New</option>
         </select>
         <input type="text" id="company-new-${uid}" placeholder="New company"
-            value="${!isKnown && currentValue ? currentValue : ''}"
+            value=""
             onkeydown="if(event.key==='Enter'){ commitCompanyChange('${targetType}', '${targetId}', this.value); }"
             onblur="commitCompanyChange('${targetType}', '${targetId}', this.value)"
-            style="display:${!isKnown && currentValue ? 'inline-block' : 'none'}; font-size:11px; padding:4px; border-radius:4px; border:1px solid #ccc; max-width:110px; margin-left:4px;">
+            style="display:none; font-size:11px; padding:4px; border-radius:4px; border:1px solid #ccc; max-width:110px; margin-left:4px;">
     `;
 }
 
