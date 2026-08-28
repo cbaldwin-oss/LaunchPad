@@ -1673,9 +1673,6 @@ body.dark-mode .phase-row {
         <span style="position: relative; font-size: 46px; flex-shrink: 0; display: inline-block; transform: rotate(-45deg);" title="LaunchPad">🚀</span>
     </div>
     <div id="project-picker-list" style="padding: 28px 30px 20px; max-height: 65vh; overflow-y: auto; background: linear-gradient(rgba(255,255,255,0.85), rgba(255,255,255,0.85)), url('https://lh3.googleusercontent.com/u/0/d/1Wy_ftXtce-UG5jV-5vwS80lV1yt7QTbG') center/70% no-repeat;"></div>
-    <div style="padding: 4px 30px 22px; text-align: center; border-top: 1px solid #eee;">
-        <a href="javascript:void(0)" onclick="logout()" style="color: #757575; text-decoration: none; font-size: 13.5px;">Sign out</a>
-    </div>
 </div>
 
 <div id="auth-prompt" style="display: none; text-align: center; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); color: #333; max-width: 400px; margin: 0 20px;">
@@ -4591,7 +4588,7 @@ async function completeAppLaunch() {
 // Existing sites that haven't been added to launchpad_memberships yet (or
 // whose user has no membership row) fall back to this, so nothing breaks
 // for teams who don't touch the new registry at all.
-const DEFAULT_PROJECT_KEY = 'STY4';
+const DEFAULT_PROJECT_KEY = 'CASB';
 
 // Loads one project's row from launchpad_projects into window.LP_CONFIG.
 async function applyProjectConfig(projectKey) {
@@ -4642,7 +4639,13 @@ async function applyProjectConfig(projectKey) {
 // LP_CONFIG is ready to use immediately; returns false if the picker screen
 // is now showing and waiting on a click (chooseProject() below resumes the
 // launch sequence once one is picked).
-async function selectProject(userEmail) {
+async function selectProject(userEmail, knownUser) {
+    // Remember whichever user object the caller already confirmed (if any),
+    // so chooseProject() can reuse it instead of re-fetching over the
+    // network later — that re-fetch was the actual bug behind occasionally
+    // bouncing back to the sign-in screen after picking a project.
+    window.__pickerKnownUser = knownUser || null;
+
     // A "quick switch" (from the Switch Project popover) sets this to skip
     // straight to the chosen project instead of showing the picker —
     // consumed once, so a normal login/refresh afterward goes back to
@@ -4994,11 +4997,7 @@ async function toggleSwitchProjectPopover(event) {
                 ${p.logo_url ? `<img src="${p.logo_url}" style="height:24px; width:24px; object-fit:cover; border-radius:4px; flex-shrink:0;">` : '<span style="font-size:18px;">📁</span>'}
                 <span>${p.project_name || p.project_key}: <span style="letter-spacing:1px; font-weight:700;">${p.access_code || '——————'}</span></span>
             </div>
-        `).join('') + `
-            <div onclick="openProjectPicker()" style="margin-top:4px; padding-top:8px; border-top:1px solid #eee; padding-left:12px; padding-right:12px; padding-bottom:8px; font-size:12.5px; color:#2e7d32; font-weight:600; cursor:pointer;">
-                View full picker
-            </div>
-        `;
+        `).join('');
     }
 
     setTimeout(() => {
@@ -5026,7 +5025,18 @@ async function chooseProject(projectKey) {
         if (errorEl) { errorEl.innerText = 'Could not load that project. Please try again.'; errorEl.style.display = 'block'; }
         return;
     }
-    const { data: { user } } = await _supabase.auth.getUser();
+
+    // Prefer whatever user object we already confirmed when the picker was
+    // first shown, rather than re-querying Supabase here — that re-query
+    // was an unnecessary network round-trip that could occasionally hiccup
+    // right after a session restore, incorrectly bouncing back to the
+    // sign-in form even though the session was genuinely still valid.
+    let user = window.__pickerKnownUser;
+    if (!user) {
+        const { data } = await _supabase.auth.getUser();
+        user = data && data.user;
+    }
+
     if (user) {
         continueStartAppAfterProject(user);
     } else {
@@ -5094,7 +5104,7 @@ try {
         if (user && savedEmail) {
             // Resolve which project this user belongs to BEFORE anything else
             // touches a project-specific table (verifyPermission included).
-            const projectReady = await selectProject(user.email);
+            const projectReady = await selectProject(user.email, user);
             if (!projectReady) return;
 
             await continueStartAppAfterProject(user);
