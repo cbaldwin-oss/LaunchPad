@@ -4813,6 +4813,7 @@ async function regenerateAccessCode(projectKey, event) {
 // ===== VIEWER ROLE GATING =====
 function openProjectPicker() {
     localStorage.removeItem('launchpad_project');
+    sessionStorage.removeItem('launchpad_skip_picker_once');
     location.reload();
 }
 
