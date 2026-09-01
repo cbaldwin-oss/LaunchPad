@@ -1879,8 +1879,19 @@ function applySidebarConfig() {
 }
 
 const activeSyncs = new Set(); // Track which rows are currently uploading
-const START_DATE = "2026-08-10"; // A Monday
-const WEEKS_TO_SHOW = 60; 
+// START_DATE and WEEKS_TO_SHOW now come from the selected project's own row
+// in launchpad_projects (start_date / duration_weeks) instead of being
+// hardcoded per deployment — same getter pattern as ADMIN_EMAIL/
+// GOOGLE_SCRIPT_URL above. Falls back to the old hardcoded values if a
+// project hasn't set these yet, so nothing breaks for existing projects.
+Object.defineProperty(window, 'START_DATE', {
+    get: () => (window.LP_CONFIG && window.LP_CONFIG.startDate) || "2026-08-10",
+    configurable: true
+});
+Object.defineProperty(window, 'WEEKS_TO_SHOW', {
+    get: () => (window.LP_CONFIG && window.LP_CONFIG.durationWeeks) || 60,
+    configurable: true
+});
 const INITIAL_ROWS = 30;
 // Add this near the top of your script area
 const deletingRows = new Set(); 
@@ -4610,7 +4621,9 @@ async function applyProjectConfig(projectKey) {
         googleScriptUrl: project.google_script_url,
         adminEmail: project.admin_email,
         logoUrl: project.logo_url,
-        themeColor: project.theme_color || '#1b5e20'
+        themeColor: project.theme_color || '#1b5e20',
+        startDate: project.start_date,
+        durationWeeks: project.duration_weeks
     };
     localStorage.setItem('launchpad_project', projectKey);
 
@@ -7221,6 +7234,41 @@ function switchToLoginView() {
 // Debounced so we're not hammering Supabase on every keystroke before the
 // 6th digit lands.
 let __accessCodeLookupTimer = null;
+// Same pagination approach as fetchDropdownOptions() — dropdownoptions can
+// have far more than 1000 rows (one row per possible option value across
+// six different dropdown categories), and a single unbounded .select()
+// gets silently capped at Supabase's default row limit, which can miss
+// real Trade Partner entries entirely if they don't happen to sit within
+// whatever the first page returns.
+async function fetchTradePartnersForProject(tablePrefix) {
+    const companies = [];
+    let page = 0;
+    const pageSize = 1000;
+    let hasMore = true;
+
+    while (hasMore) {
+        const { data, error } = await _supabase
+            .from(`${tablePrefix}dropdownoptions`)
+            .select('Trade_Partners')
+            .range(page * pageSize, (page + 1) * pageSize - 1);
+
+        if (error || !data || data.length === 0) {
+            hasMore = false;
+            break;
+        }
+
+        data.forEach(row => {
+            const trade = row.Trade_Partners?.toString().trim();
+            if (trade && !companies.includes(trade)) companies.push(trade);
+        });
+
+        if (data.length < pageSize) hasMore = false;
+        page++;
+    }
+
+    return companies.sort();
+}
+
 function handleAccessCodeInput() {
     clearTimeout(__accessCodeLookupTimer);
     const statusEl = document.getElementById('access-code-status');
@@ -7272,15 +7320,10 @@ function handleAccessCodeInput() {
         // Pull that project's own Trade Partners (col6) list, same source
         // the in-app dropdowns use, so this matches whatever that project
         // actually calls its contractors/companies.
-        const { data: options, error: optionsErr } = await _supabase
-            .from(`${project.table_prefix}dropdownoptions`)
-            .select('Trade_Partners');
+        const companies = await fetchTradePartnersForProject(project.table_prefix);
 
         companySelect.innerHTML = '<option value="">Select Company...</option>';
-        if (!optionsErr && options) {
-            const companies = [...new Set(options.map(r => r.Trade_Partners).filter(Boolean))].sort();
-            companies.forEach(c => companySelect.add(new Option(c, c)));
-        }
+        companies.forEach(c => companySelect.add(new Option(c, c)));
         companySelect.add(new Option("+ Add New Company", "__add_new__"));
         companySelect.disabled = false;
         companySelect.style.color = '#333';
