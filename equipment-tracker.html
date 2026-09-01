@@ -736,6 +736,11 @@ body.dark-mode .frozen-group-bar .frozen-combined {
                         <div id="cl-closed-list"></div>
                         <button class="btn btn-add" onclick="addStatusRow('cl-closed-list', '#c8e6c9')">+ Add Status</button>
                     </div>
+                    <div class="status-group" id="cl-cxcomplete-group" style="display: none; border-top: 2px dashed #4caf50; padding-top: 15px;">
+                        <h4>Cx Complete</h4>
+                        <div id="cl-cxcomplete-list"></div>
+                        <button class="btn btn-add" onclick="addStatusRow('cl-cxcomplete-list', '#81c784')">+ Add Status</button>
+                    </div>
                 </div>
                 
                 <div class="settings-col">
@@ -793,6 +798,7 @@ body.dark-mode .frozen-group-bar .frozen-combined {
                                 <th>Req. Prev Status</th>
                                 <th title="Max Gate CL Open">Max Gate</th>
                                 <th title="Max Support CL Open">Max Supp</th>
+                                <th title="Max Support CL Closed but NOT Cx Complete">Max Supp Pend. Cx</th>
                                 <th title="Max Gating Issues Open">Max Gate Iss.</th>
                                 <th title="Max Non-Gating Issues Open">Max Non-Gate Iss.</th>
                                 <th>Result Status</th>
@@ -839,7 +845,7 @@ body.dark-mode .frozen-group-bar .frozen-combined {
     let globalConfig = { 
         showL2Gate: true, showL3Gate: true, showL4Gate: true,
         showL2Supp: true, showL3Supp: true, showL4Supp: true,
-        openStatuses: [], closedStatuses: [],
+        openStatuses: [], closedStatuses: [], cxCompleteStatuses: [],
         testOpenStatuses: [], testClosedStatuses: [],
         issueOpenStatuses: [], issueClosedStatuses: [],
         gatingIssues: [], nonGatingIssues: [],
@@ -1014,10 +1020,12 @@ body.dark-mode .frozen-group-bar .frozen-combined {
 
         let openArr = globalConfig.openStatuses || [];
         let closedArr = globalConfig.closedStatuses || [];
+        let cxCompleteArr = globalConfig.cxCompleteStatuses || [];
         
         if (type === 'test') { 
             openArr = globalConfig.testOpenStatuses || []; 
             closedArr = globalConfig.testClosedStatuses || []; 
+            cxCompleteArr = [];
         } else if (type === 'issue') {
             openArr = globalConfig.issueOpenStatuses || []; 
             closedArr = globalConfig.issueClosedStatuses || []; 
@@ -1044,6 +1052,9 @@ body.dark-mode .frozen-group-bar .frozen-combined {
             }
         }
         
+        let exactCx = cxCompleteArr.find(s => s.name && lowerVal === String(s.name).toLowerCase().trim());
+        if (exactCx) return `background-color:${exactCx.color}; color:${getContrastYIQ(exactCx.color)};`;
+
         let exactClosed = closedArr.find(s => s.name && lowerVal === String(s.name).toLowerCase().trim());
         if (exactClosed) return `background-color:${exactClosed.color}; color:${getContrastYIQ(exactClosed.color)};`;
         let exactOpen = openArr.find(s => s.name && lowerVal === String(s.name).toLowerCase().trim());
@@ -1055,6 +1066,9 @@ body.dark-mode .frozen-group-bar .frozen-combined {
             let nonGateMatch = globalConfig.nonGatingIssues.find(s => s.name && lowerVal.includes(String(s.name).toLowerCase().trim()));
             if (nonGateMatch) return `background-color:${nonGateMatch.color}; color:${getContrastYIQ(nonGateMatch.color)};`;
         }
+
+        let matchCx = cxCompleteArr.find(s => s.name && lowerVal.includes(String(s.name).toLowerCase().trim()));
+        if (matchCx) return `background-color:${matchCx.color}; color:${getContrastYIQ(matchCx.color)};`;
 
         let matchClosed = closedArr.find(s => s.name && lowerVal.includes(String(s.name).toLowerCase().trim()));
         if (matchClosed) return `background-color:${matchClosed.color}; color:${getContrastYIQ(matchClosed.color)};`;
@@ -1224,6 +1238,10 @@ window.addEventListener('DOMContentLoaded', () => {
         let openIds = [];
         let rawIds = [];
         let closedArr = (level === 'L4') ? (globalConfig.testClosedStatuses || []) : (globalConfig.closedStatuses || []);
+        // Cx Complete only applies to L2/L3 Support CLs — when that phase has
+        // no Gate checklist to lean on, a Support CL marked Cx Complete
+        // should stop counting as "open" too, not just ones marked plain Closed.
+        let cxCompleteArr = (level === 'L4') ? [] : (globalConfig.cxCompleteStatuses || []);
         for (let i = 1; i <= maxCount; i++) {
             const val = row[`${level} Support CL ${i}`];
             const link = row[`${level} Support CL ${i}_Link`] || row[`${level} Support CL ${i} Link`];
@@ -1231,7 +1249,7 @@ window.addEventListener('DOMContentLoaded', () => {
                 const match = String(val).match(/(.+?)\s*\((.+)\)/);
                 let id = ""; let include = false;
                 if (match) {
-                    if (!isStatusMatch(match[2], closedArr) && !String(match[2]).toLowerCase().includes('no cl')) {
+                    if (!isStatusMatch(match[2], closedArr) && !isStatusMatch(match[2], cxCompleteArr) && !String(match[2]).toLowerCase().includes('no cl')) {
                         id = match[1].trim(); include = true;
                     }
                 } else if (String(val).toLowerCase() !== 'no cl' && String(val).toLowerCase() !== 'unknown') {
@@ -1616,6 +1634,16 @@ window.onload = function() {
             document.getElementById('cust-iss-status').value = globalConfig.customHeaders.issStatus;
         }
         document.getElementById('show-l2-gate').checked = globalConfig.showL2Gate !== false;
+
+        // Cx Complete only makes sense when L2 has no Gate checklist to rely
+        // on for granular tracking — show/hide the section to match, both on
+        // open and live as the admin toggles the checkbox.
+        const cxGroup = document.getElementById('cl-cxcomplete-group');
+        cxGroup.style.display = (globalConfig.showL2Gate === false) ? 'block' : 'none';
+        document.getElementById('show-l2-gate').addEventListener('change', function() {
+            cxGroup.style.display = this.checked ? 'none' : 'block';
+        });
+
         document.getElementById('show-l3-gate').checked = globalConfig.showL3Gate !== false;
         document.getElementById('show-l4-gate').checked = globalConfig.showL4Gate !== false;
         document.getElementById('show-l2-supp').checked = globalConfig.showL2Supp !== false;
@@ -1624,6 +1652,7 @@ window.onload = function() {
 
         const map = {
             'cl-open-list': globalConfig.openStatuses, 'cl-closed-list': globalConfig.closedStatuses,
+            'cl-cxcomplete-list': globalConfig.cxCompleteStatuses,
             'test-open-list': globalConfig.testOpenStatuses, 'test-closed-list': globalConfig.testClosedStatuses,
             'iss-open-list': globalConfig.issueOpenStatuses, 'iss-closed-list': globalConfig.issueClosedStatuses,
             'iss-gating-list': globalConfig.gatingIssues, 'iss-nongating-list': globalConfig.nonGatingIssues
@@ -1661,6 +1690,7 @@ window.onload = function() {
             <td><input type="text" class="r-prev" value="${r.prevStatus || ''}" placeholder="e.g. Complete"></td>
             <td><input type="text" class="r-mg" value="${r.maxGate !== undefined ? r.maxGate : ''}" placeholder="e.g. <=0"></td>
             <td><input type="text" class="r-ms" value="${r.maxSupport !== undefined ? r.maxSupport : ''}" placeholder="e.g. >0"></td>
+            <td><input type="text" class="r-mspcx" value="${r.maxSupportPendingCx !== undefined ? r.maxSupportPendingCx : ''}" placeholder="e.g. =0" title="Max closed checklists waiting for Cx Approval"></td>
             <td><input type="text" class="r-mgi" value="${r.maxGatingIssues !== undefined ? r.maxGatingIssues : ''}" placeholder="=0"></td>
             <td><input type="text" class="r-mngi" value="${r.maxNonGatingIssues !== undefined ? r.maxNonGatingIssues : ''}" placeholder="<=5"></td>
             <td><input type="text" class="r-res" value="${r.resultingStatus || ''}" placeholder="Result"></td>
@@ -1689,6 +1719,7 @@ window.onload = function() {
             prevStatus: row.querySelector('.r-prev').value.trim(),
             maxGate: row.querySelector('.r-mg').value.trim(),
             maxSupport: row.querySelector('.r-ms').value.trim(),
+            maxSupportPendingCx: row.querySelector('.r-mspcx').value.trim(),
             maxGatingIssues: row.querySelector('.r-mgi').value.trim(),
             maxNonGatingIssues: row.querySelector('.r-mngi').value.trim(),
             resultingStatus: row.querySelector('.r-res').value.trim(),
@@ -1708,6 +1739,7 @@ window.onload = function() {
 
         const payload = { 
             openStatuses: getListValues('cl-open-list'), closedStatuses: getListValues('cl-closed-list'),
+            cxCompleteStatuses: getListValues('cl-cxcomplete-list'),
             testOpenStatuses: getListValues('test-open-list'), testClosedStatuses: getListValues('test-closed-list'),
             issueOpenStatuses: getListValues('iss-open-list'), issueClosedStatuses: getListValues('iss-closed-list'),
             gatingIssues: getListValues('iss-gating-list'), nonGatingIssues: getListValues('iss-nongating-list'),
