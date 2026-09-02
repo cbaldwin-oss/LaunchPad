@@ -574,6 +574,7 @@ input:not([type="checkbox"]), textarea, select {
     <button id="cancelBtn" class="tool-btn" style="display:none; border-color:#757575; color:#757575; margin-right: 10px;" onclick="cancelEditMode()">Cancel Changes</button>
     
     <button id="deleteBtn" class="tool-btn" style="display:none; border-color:#d32f2f; color:#d32f2f; margin-right:10px;" onclick="deleteSelected()">Delete Selected</button>
+    <button id="colSettingsBtn" class="tool-btn" style="display:none; border-color:#555; color:#555; margin-right:10px;" onclick="openColumnSettingsModal()">⚙️ Settings</button>
     <button id="exportBtn" class="tool-btn" onclick="showExportOptions()">Export</button>
     <span id="saveIndicator">Synced</span>
 </div>
@@ -646,20 +647,32 @@ input:not([type="checkbox"]), textarea, select {
     </div>
 </div>
 
+<div id="colSettingsModal" class="modal-overlay">
+    <div class="modal-content" style="max-width: 480px;">
+        <h3>Column Settings</h3>
+        <p style="color:#666; font-size:13px; margin-top:-8px;">Drag to reorder, uncheck to hide. Saved for everyone on this project.</p>
+        <div id="col-settings-list" style="display:flex; flex-direction:column; gap:8px; max-height:400px; overflow-y:auto; margin-bottom:16px;"></div>
+        <div class="modal-btns">
+            <button class="tool-btn" style="background-color:#1b5e20; color:white; border-color:#1b5e20;" onclick="saveColumnSettings()">Save</button>
+            <button class="tool-btn" style="border-color:#757575; color:#757575;" onclick="closeColumnSettingsModal()">Cancel</button>
+        </div>
+    </div>
+</div>
+
 <div class="frozen-bar">
     <div class="frozen-grid">
-        <div class="edit-header-cell"></div>
-        <div class="edit-only-header">Asset Name</div>
-        <div class="edit-only-header">Location</div>
-        <div class="header-cell">Sub Area</div>
-        <div class="header-cell">Seal #</div>
-        <div class="header-cell">Inspection Date</div>
-        <div class="header-cell">Signoff</div>
-        <div class="header-cell">Inspection Notes</div>
-        <div class="header-cell">Status</div>
-        <div class="header-cell">Break Date</div>
-        <div class="header-cell">Responsible Party</div>
-        <div class="header-cell">Break Reason</div>
+        <div class="edit-header-cell" data-col="checkbox"></div>
+        <div class="edit-only-header" data-col="assetName">Asset Name</div>
+        <div class="edit-only-header" data-col="location">Location</div>
+        <div class="header-cell" data-col="subArea">Sub Area</div>
+        <div class="header-cell" data-col="sealNumber">Seal #</div>
+        <div class="header-cell" data-col="inspectionDate">Inspection Date</div>
+        <div class="header-cell" data-col="signoff">Signoff</div>
+        <div class="header-cell" data-col="inspectionNotes">Inspection Notes</div>
+        <div class="header-cell" data-col="status">Status</div>
+        <div class="header-cell" data-col="breakDate">Break Date</div>
+        <div class="header-cell" data-col="responsibleParty">Responsible Party</div>
+        <div class="header-cell" data-col="breakReason">Break Reason</div>
         <div class="spacer"></div>
     </div>
 </div>
@@ -685,6 +698,32 @@ const USER_EMAIL = (new URLSearchParams(window.location.search).get('email') || 
 // role system: it doesn't matter if someone is an "editor" on the project
 // overall — actually logging/editing seals is CriticalArc-staff-only.
 const canEditTamperSeals = (USER_ROLE === 'editor' || USER_ROLE === 'admin') && USER_EMAIL.endsWith('@criticalarccx.com');
+
+// The project's own Apps Script URL, passed in by the LaunchPad shell —
+// same one Equipment Tracker and the Schedule use, just a different action
+// for this file's own column layout config.
+const TS_SCRIPT_URL = new URLSearchParams(window.location.search).get('scriptUrl') || '';
+
+// Column layout is a shared, project-wide setting (like Equipment
+// Tracker's Setup Config) — not a personal per-browser preference — so
+// only admins can change it, but everyone sees the result.
+const canManageColumns = USER_ROLE === 'admin';
+
+const defaultColumnConfig = [
+    { id: 'checkbox', name: '(checkbox)', visible: true, locked: true },
+    { id: 'assetName', name: 'Asset Name', visible: true },
+    { id: 'location', name: 'Location', visible: true },
+    { id: 'subArea', name: 'Sub Area', visible: true },
+    { id: 'sealNumber', name: 'Seal #', visible: true },
+    { id: 'inspectionDate', name: 'Inspection Date', visible: true },
+    { id: 'signoff', name: 'Signoff', visible: true },
+    { id: 'inspectionNotes', name: 'Inspection Notes', visible: true },
+    { id: 'status', name: 'Status', visible: true },
+    { id: 'breakDate', name: 'Break Date', visible: true },
+    { id: 'responsibleParty', name: 'Responsible Party', visible: true },
+    { id: 'breakReason', name: 'Break Reason', visible: true }
+];
+let columnConfig = defaultColumnConfig.map(c => ({ ...c }));
 
 // The project prefix, passed in via ?project=XXX by the LaunchPad shell
 // (index.html). Falls back to the prefix this file was originally built
@@ -713,6 +752,122 @@ let accessToken = null;
 let isPreviewMode = false; 
 
 // Update initApp (around line 420)
+// ===== COLUMN SETTINGS (show/hide + reorder, saved to the project's Google
+// Sheet via the same Apps Script Equipment Tracker/Schedule use) =====
+// Both order and visibility are applied via one dynamically-generated
+// stylesheet keyed off each cell's data-col attribute, rather than
+// reordering the actual DOM — the table is already display:flex for both
+// the header and every row, so CSS `order` reorders columns uniformly
+// across all of them at once without touching the row-rendering logic.
+async function loadColumnConfig() {
+    if (!TS_SCRIPT_URL) { applyColumnConfig(); return; }
+    try {
+        const response = await fetch(`${TS_SCRIPT_URL}?action=getTamperSealColumnConfig`);
+        const data = await response.json();
+        if (data && Array.isArray(data.columnConfig) && data.columnConfig.length > 0) {
+            // Merge with defaults so a column added to the app later (or
+            // one missing from an older save) doesn't just disappear.
+            const savedIds = data.columnConfig.map(c => c.id);
+            const merged = data.columnConfig.map(saved => {
+                const def = defaultColumnConfig.find(d => d.id === saved.id);
+                return { ...(def || {}), ...saved };
+            });
+            defaultColumnConfig.forEach(def => {
+                if (!savedIds.includes(def.id)) merged.push({ ...def });
+            });
+            columnConfig = merged;
+        }
+    } catch (e) {
+        console.warn('Could not load column settings, using defaults:', e);
+    }
+    applyColumnConfig();
+}
+
+function applyColumnConfig() {
+    let styleEl = document.getElementById('column-config-style');
+    if (!styleEl) {
+        styleEl = document.createElement('style');
+        styleEl.id = 'column-config-style';
+        document.head.appendChild(styleEl);
+    }
+    let css = '';
+    columnConfig.forEach((col, index) => {
+        css += `[data-col="${col.id}"] { order: ${index}; }\n`;
+        if (!col.visible) css += `[data-col="${col.id}"] { display: none !important; }\n`;
+    });
+    styleEl.innerHTML = css;
+}
+
+function openColumnSettingsModal() {
+    const list = document.getElementById('col-settings-list');
+    list.innerHTML = '';
+    columnConfig.forEach((col) => {
+        if (col.locked) return; // the row-select checkbox column always stays put
+
+        const item = document.createElement('div');
+        item.style.cssText = "display:flex; align-items:center; width:100%; padding:10px 12px; background:#f8f9fa; border:1px solid #ddd; border-radius:6px; cursor:grab; user-select:none; box-sizing:border-box;";
+        item.draggable = true;
+        item.dataset.colId = col.id;
+
+        item.addEventListener('dragstart', (e) => {
+            e.dataTransfer.setData('text/plain', col.id);
+            item.style.opacity = '0.5';
+        });
+        item.addEventListener('dragend', () => {
+            item.style.opacity = '1';
+            document.querySelectorAll('#col-settings-list > div').forEach(el => el.style.border = '1px solid #ddd');
+        });
+        item.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            item.style.border = '2px dashed #2e7d32';
+        });
+        item.addEventListener('dragleave', () => {
+            item.style.border = '1px solid #ddd';
+        });
+        item.addEventListener('drop', (e) => {
+            e.preventDefault();
+            const draggedId = e.dataTransfer.getData('text/plain');
+            const draggedIndex = columnConfig.findIndex(c => c.id === draggedId);
+            const targetIndex = columnConfig.findIndex(c => c.id === col.id);
+            if (draggedIndex === -1 || targetIndex === -1 || draggedIndex === targetIndex) return;
+            const draggedItem = columnConfig.splice(draggedIndex, 1)[0];
+            columnConfig.splice(targetIndex, 0, draggedItem);
+            openColumnSettingsModal();
+        });
+
+        item.innerHTML = `
+            <span style="margin-right:12px; cursor:grab; color:#999; font-size:16px;" title="Drag to reorder">⣿</span>
+            <input type="checkbox" id="colcfg-${col.id}" ${col.visible ? 'checked' : ''} style="margin-right:12px; cursor:pointer; transform:scale(1.2);" onchange="columnConfig.find(c => c.id === '${col.id}').visible = this.checked;">
+            <span style="font-weight:600; color:#333; font-size:14px;">${col.name}</span>
+        `;
+        list.appendChild(item);
+    });
+    document.getElementById('colSettingsModal').style.display = 'flex';
+}
+
+function closeColumnSettingsModal() {
+    document.getElementById('colSettingsModal').style.display = 'none';
+}
+
+async function saveColumnSettings() {
+    applyColumnConfig();
+    closeColumnSettingsModal();
+
+    if (!TS_SCRIPT_URL) {
+        alert('Column layout applied for this session, but no backend connection was available to save it permanently.');
+        return;
+    }
+
+    try {
+        await fetch(TS_SCRIPT_URL, {
+            method: 'POST',
+            body: JSON.stringify({ action: 'setTamperSealColumnConfig', columnConfig: columnConfig })
+        });
+    } catch (e) {
+        alert('Column layout applied, but saving it to the backend failed: ' + e.message);
+    }
+}
+
 async function initApp() {
     // Tamper Seal editing is CriticalArc-staff-only (editor/admin role AND
     // @criticalarccx.com email) — hide the mutating controls entirely for
@@ -727,6 +882,12 @@ async function initApp() {
         banner.innerText = 'View-only — editing Tamper Seals is restricted to CriticalArc staff.';
         document.body.insertBefore(banner, document.body.firstChild);
     }
+
+    if (canManageColumns) {
+        const colBtn = document.getElementById('colSettingsBtn');
+        if (colBtn) colBtn.style.display = 'inline-block';
+    }
+    await loadColumnConfig();
 
     await fetchLookupData();
     
@@ -1543,34 +1704,34 @@ entries.forEach(entry => {
     const getVal = (field, dbVal) => (localEdits[id] && localEdits[id][field] !== undefined) ? localEdits[id][field] : (dbVal || '');
 
     row.innerHTML = `
-        <div class="edit-checkbox-cell">
+        <div class="edit-checkbox-cell" data-col="checkbox">
             <input type="checkbox" class="row-selector">
         </div>
         
-        <input class="edit-only-cell" list="asset-list" 
+        <input class="edit-only-cell" data-col="assetName" list="asset-list" 
                oninput="syncEdit('${id}', 'asset_name', this.value)"
                value="${getVal('asset_name', entry.asset_name)}" ${!isEditMode ? 'readonly' : ''}>
         
-        <input class="edit-only-cell" list="location-list" 
+        <input class="edit-only-cell" data-col="location" list="location-list" 
                oninput="syncEdit('${id}', 'location', this.value)"
                value="${getVal('location', entry.Location || entry.location)}" ${!isEditMode ? 'readonly' : ''}>
         
-        <textarea oninput="syncEdit('${id}', 'sub_area', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('sub_area', entry.sub_area)}</textarea>
-        <textarea oninput="syncEdit('${id}', 'seal_number', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('seal_number', entry.seal_number)}</textarea>
-        <textarea oninput="syncEdit('${id}', 'inspection_date', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('inspection_date', entry.inspection_date)}</textarea>
-        <textarea oninput="syncEdit('${id}', 'signoff', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('signoff', entry.signoff)}</textarea>
-        <textarea oninput="syncEdit('${id}', 'inspection_notes', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('inspection_notes', entry.inspection_notes)}</textarea>
+        <textarea data-col="subArea" oninput="syncEdit('${id}', 'sub_area', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('sub_area', entry.sub_area)}</textarea>
+        <textarea data-col="sealNumber" oninput="syncEdit('${id}', 'seal_number', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('seal_number', entry.seal_number)}</textarea>
+        <textarea data-col="inspectionDate" oninput="syncEdit('${id}', 'inspection_date', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('inspection_date', entry.inspection_date)}</textarea>
+        <textarea data-col="signoff" oninput="syncEdit('${id}', 'signoff', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('signoff', entry.signoff)}</textarea>
+        <textarea data-col="inspectionNotes" oninput="syncEdit('${id}', 'inspection_notes', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('inspection_notes', entry.inspection_notes)}</textarea>
         
-        <select class="status-dropdown" onchange="syncEdit('${id}', 'status', this.value); applyStatusColor(this)" ${!isEditMode ? 'disabled' : ''}>
+        <select class="status-dropdown" data-col="status" onchange="syncEdit('${id}', 'status', this.value); applyStatusColor(this)" ${!isEditMode ? 'disabled' : ''}>
             <option value="${getVal('status', entry.status)}">${getVal('status', entry.status) || 'Select...'}</option>
             <option value="Intact">Intact</option>
             <option value="Broken">Broken</option>
             <option value="Removed">Removed</option>
         </select>
         
-        <textarea oninput="syncEdit('${id}', 'break_date', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('break_date', entry.break_date)}</textarea>
-        <textarea oninput="syncEdit('${id}', 'responsible_party', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('responsible_party', entry.responsible_party)}</textarea>
-        <textarea oninput="syncEdit('${id}', 'break_reason', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('break_reason', entry.break_reason)}</textarea>
+        <textarea data-col="breakDate" oninput="syncEdit('${id}', 'break_date', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('break_date', entry.break_date)}</textarea>
+        <textarea data-col="responsibleParty" oninput="syncEdit('${id}', 'responsible_party', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('responsible_party', entry.responsible_party)}</textarea>
+        <textarea data-col="breakReason" oninput="syncEdit('${id}', 'break_reason', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('break_reason', entry.break_reason)}</textarea>
     `;
     applyStatusColor(row.querySelector('.status-dropdown'));
     container.appendChild(row);
