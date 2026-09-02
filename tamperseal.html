@@ -328,6 +328,9 @@
 .modal-content {
     background: white; padding: 25px; border-radius: 8px; text-align: center;
     box-shadow: 0 4px 15px rgba(0,0,0,0.2); width: 320px;
+    max-height: 90vh;
+    overflow-y: auto;
+    box-sizing: border-box;
 }
 .modal-content h3 { margin-top: 0; color: #333; font-size: 20px; }
 .modal-btns { display: flex; gap: 10px; justify-content: center; margin-top: 20px; }
@@ -868,8 +871,10 @@ function switchTsSettingsTab(tab) {
 function renderColumnSettingsList() {
     const list = document.getElementById('col-settings-list');
     list.innerHTML = '';
-    columnConfig.forEach((col) => {
-        if (col.locked) return; // the row-select checkbox column always stays put
+    const visibleCols = columnConfig.filter(c => !c.locked);
+    visibleCols.forEach((col) => {
+        const isFirst = visibleCols.indexOf(col) === 0;
+        const isLast = visibleCols.indexOf(col) === visibleCols.length - 1;
 
         const item = document.createElement('div');
         item.style.cssText = "display:flex; align-items:center; width:100%; padding:10px 12px; background:#f8f9fa; border:1px solid #ddd; border-radius:6px; cursor:grab; user-select:none; box-sizing:border-box;";
@@ -903,7 +908,11 @@ function renderColumnSettingsList() {
         });
 
         item.innerHTML = `
-            <span style="margin-right:12px; cursor:grab; color:#999; font-size:16px;" title="Drag to reorder">⣿</span>
+            <span style="margin-right:10px; cursor:grab; color:#999; font-size:16px;" title="Drag to reorder">⣿</span>
+            <div style="display:flex; flex-direction:column; margin-right:10px;">
+                <button onclick="moveColumnConfig('${col.id}', -1)" ${isFirst ? 'disabled' : ''} title="Move up" style="background:none; border:none; cursor:${isFirst ? 'default' : 'pointer'}; color:${isFirst ? '#ccc' : '#555'}; font-size:12px; line-height:1; padding:2px;">▲</button>
+                <button onclick="moveColumnConfig('${col.id}', 1)" ${isLast ? 'disabled' : ''} title="Move down" style="background:none; border:none; cursor:${isLast ? 'default' : 'pointer'}; color:${isLast ? '#ccc' : '#555'}; font-size:12px; line-height:1; padding:2px;">▼</button>
+            </div>
             <input type="checkbox" id="colcfg-${col.id}" ${col.visible ? 'checked' : ''} style="margin-right:12px; cursor:pointer; transform:scale(1.2);" onchange="columnConfig.find(c => c.id === '${col.id}').visible = this.checked;">
             <span style="font-weight:600; color:#333; font-size:14px;">${col.name}</span>
         `;
@@ -911,13 +920,26 @@ function renderColumnSettingsList() {
     });
 }
 
+function moveColumnConfig(id, direction) {
+    const index = columnConfig.findIndex(c => c.id === id);
+    const newIndex = index + direction;
+    if (newIndex < 0 || newIndex >= columnConfig.length) return;
+    if (columnConfig[newIndex].locked) return;
+    [columnConfig[index], columnConfig[newIndex]] = [columnConfig[newIndex], columnConfig[index]];
+    renderColumnSettingsList();
+}
+
 // ===== STATUS FLOW (definitions + branching progression, visualized top to
 // bottom with arrows) =====
 function renderStatusFlowEditor() {
     const container = document.getElementById('status-flow-editor');
-    container.innerHTML = statusFlow.statuses.map(s => `
+    container.innerHTML = statusFlow.statuses.map((s, i) => `
         <div style="border:1px solid #ddd; border-radius:8px; padding:10px 12px; background:#f8f9fa;">
             <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                <div style="display:flex; flex-direction:column;">
+                    <button onclick="moveFlowStatus('${s.id}', -1)" ${i === 0 ? 'disabled' : ''} title="Move up" style="background:none; border:none; cursor:${i === 0 ? 'default' : 'pointer'}; color:${i === 0 ? '#ccc' : '#555'}; font-size:12px; line-height:1; padding:2px;">▲</button>
+                    <button onclick="moveFlowStatus('${s.id}', 1)" ${i === statusFlow.statuses.length - 1 ? 'disabled' : ''} title="Move down" style="background:none; border:none; cursor:${i === statusFlow.statuses.length - 1 ? 'default' : 'pointer'}; color:${i === statusFlow.statuses.length - 1 ? '#ccc' : '#555'}; font-size:12px; line-height:1; padding:2px;">▼</button>
+                </div>
                 <input type="color" value="${s.color}" onchange="updateFlowStatusColor('${s.id}', this.value)" style="width:32px; height:32px; border:none; padding:0; cursor:pointer; flex-shrink:0;">
                 <input type="text" value="${s.name}" onchange="updateFlowStatusName('${s.id}', this.value)" style="flex:1; font-weight:600; padding:8px; border:1px solid #ddd; border-radius:4px; font-size:14px;">
                 <button onclick="removeFlowStatus('${s.id}')" title="Delete status" style="background:none; border:none; color:#d32f2f; cursor:pointer; font-size:18px; padding:0 4px; flex-shrink:0;">&times;</button>
@@ -933,6 +955,14 @@ function renderStatusFlowEditor() {
             </div>
         </div>
     `).join('');
+}
+
+function moveFlowStatus(id, direction) {
+    const index = statusFlow.statuses.findIndex(s => s.id === id);
+    const newIndex = index + direction;
+    if (newIndex < 0 || newIndex >= statusFlow.statuses.length) return;
+    [statusFlow.statuses[index], statusFlow.statuses[newIndex]] = [statusFlow.statuses[newIndex], statusFlow.statuses[index]];
+    renderStatusFlowEditor();
 }
 
 function addFlowStatus() {
