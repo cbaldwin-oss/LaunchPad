@@ -195,6 +195,13 @@
     color: #000000 !important;
     text-decoration: line-through;
 }
+.row-custom-status {
+    background-color: var(--row-status-color) !important;
+}
+.row-custom-status textarea, .row-custom-status select {
+    background-color: var(--row-status-color) !important;
+    color: #000000 !important;
+}
 .status-dropdown {
     font-size: 13px !important;    /* Increase font size */
     font-weight:  bold !important;   /* Make the text extra bold */
@@ -574,7 +581,6 @@ input:not([type="checkbox"]), textarea, select {
     <button id="cancelBtn" class="tool-btn" style="display:none; border-color:#757575; color:#757575; margin-right: 10px;" onclick="cancelEditMode()">Cancel Changes</button>
     
     <button id="deleteBtn" class="tool-btn" style="display:none; border-color:#d32f2f; color:#d32f2f; margin-right:10px;" onclick="deleteSelected()">Delete Selected</button>
-    <button id="colSettingsBtn" class="tool-btn" style="display:none; border-color:#555; color:#555; margin-right:10px;" onclick="openColumnSettingsModal()">⚙️ Settings</button>
     <button id="exportBtn" class="tool-btn" onclick="showExportOptions()">Export</button>
     <span id="saveIndicator">Synced</span>
 </div>
@@ -648,12 +654,30 @@ input:not([type="checkbox"]), textarea, select {
 </div>
 
 <div id="colSettingsModal" class="modal-overlay">
-    <div class="modal-content" style="max-width: 480px;">
-        <h3>Column Settings</h3>
-        <p style="color:#666; font-size:13px; margin-top:-8px;">Drag to reorder, uncheck to hide. Saved for everyone on this project.</p>
-        <div id="col-settings-list" style="display:flex; flex-direction:column; gap:8px; max-height:400px; overflow-y:auto; margin-bottom:16px;"></div>
+    <div class="modal-content" style="max-width: 640px;">
+        <h3>Tamper Seal Settings</h3>
+        <div style="display: flex; border-bottom: 1px solid #eee; margin-bottom: 16px;">
+            <button id="ts-tab-columns" onclick="switchTsSettingsTab('columns')" style="flex:1; padding:10px; border:none; background:#f5f5f5; cursor:pointer; font-weight:600; font-size:13px; color:#2e7d32; border-bottom:3px solid #2e7d32;">Columns</button>
+            <button id="ts-tab-statusflow" onclick="switchTsSettingsTab('statusflow')" style="flex:1; padding:10px; border:none; background:#fafafa; cursor:pointer; font-weight:600; font-size:13px; color:#888; border-bottom:3px solid transparent;">Status Flow</button>
+        </div>
+
+        <div id="ts-panel-columns">
+            <p style="color:#666; font-size:13px; margin-top:-8px;">Drag to reorder, uncheck to hide. Saved for everyone on this project.</p>
+            <div id="col-settings-list" style="display:flex; flex-direction:column; gap:8px; max-height:360px; overflow-y:auto; margin-bottom:16px;"></div>
+        </div>
+
+        <div id="ts-panel-statusflow" style="display:none;">
+            <p style="color:#666; font-size:13px; margin-top:-8px;">Define the seal statuses and how they can progress. Check a box to add an arrow from that status to another — check more than one to branch into multiple paths.</p>
+            <div id="status-flow-editor" style="max-height:280px; overflow-y:auto; margin-bottom:12px; display:flex; flex-direction:column; gap:10px;"></div>
+            <button class="btn btn-add" onclick="addFlowStatus()">+ Add Status</button>
+            <div style="margin-top:16px; border-top:1px dashed #ccc; padding-top:14px;">
+                <div style="font-size:12px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:8px;">Preview</div>
+                <div id="status-flow-preview" style="position:relative; background:#fafafa; border:1px solid #eee; border-radius:8px; padding:24px; min-height:100px; overflow:visible;"></div>
+            </div>
+        </div>
+
         <div class="modal-btns">
-            <button class="tool-btn" style="background-color:#1b5e20; color:white; border-color:#1b5e20;" onclick="saveColumnSettings()">Save</button>
+            <button class="tool-btn" style="background-color:#1b5e20; color:white; border-color:#1b5e20;" onclick="saveTsSettings()">Save</button>
             <button class="tool-btn" style="border-color:#757575; color:#757575;" onclick="closeColumnSettingsModal()">Cancel</button>
         </div>
     </div>
@@ -725,6 +749,21 @@ const defaultColumnConfig = [
 ];
 let columnConfig = defaultColumnConfig.map(c => ({ ...c }));
 
+// The seal status progression — a simple sensible default (Intact -> Broken
+// -> Removed) that admins can rename, extend, and branch via Settings.
+const defaultStatusFlow = {
+    statuses: [
+        { id: 'intact', name: 'Intact', color: '#c8e6c9' },
+        { id: 'broken', name: 'Broken', color: '#ffcdd2' },
+        { id: 'removed', name: 'Removed', color: '#e0e0e0' }
+    ],
+    transitions: [
+        { from: 'intact', to: 'broken' },
+        { from: 'broken', to: 'removed' }
+    ]
+};
+let statusFlow = { statuses: defaultStatusFlow.statuses.map(s => ({ ...s })), transitions: defaultStatusFlow.transitions.map(t => ({ ...t })) };
+
 // The project prefix, passed in via ?project=XXX by the LaunchPad shell
 // (index.html). Falls back to the prefix this file was originally built
 // for, so it still works if opened directly without a project param.
@@ -777,6 +816,9 @@ async function loadColumnConfig() {
             });
             columnConfig = merged;
         }
+        if (data && data.statusFlow && Array.isArray(data.statusFlow.statuses)) {
+            statusFlow = data.statusFlow;
+        }
     } catch (e) {
         console.warn('Could not load column settings, using defaults:', e);
     }
@@ -799,6 +841,31 @@ function applyColumnConfig() {
 }
 
 function openColumnSettingsModal() {
+    renderColumnSettingsList();
+    renderStatusFlowEditor();
+    switchTsSettingsTab('columns');
+    document.getElementById('colSettingsModal').style.display = 'flex';
+}
+
+function switchTsSettingsTab(tab) {
+    const colTab = document.getElementById('ts-tab-columns');
+    const flowTab = document.getElementById('ts-tab-statusflow');
+    const colPanel = document.getElementById('ts-panel-columns');
+    const flowPanel = document.getElementById('ts-panel-statusflow');
+    const active = 'flex:1; padding:10px; border:none; background:#f5f5f5; cursor:pointer; font-weight:600; font-size:13px; color:#2e7d32; border-bottom:3px solid #2e7d32;';
+    const inactive = 'flex:1; padding:10px; border:none; background:#fafafa; cursor:pointer; font-weight:600; font-size:13px; color:#888; border-bottom:3px solid transparent;';
+
+    if (tab === 'columns') {
+        colTab.style.cssText = active; flowTab.style.cssText = inactive;
+        colPanel.style.display = 'block'; flowPanel.style.display = 'none';
+    } else {
+        flowTab.style.cssText = active; colTab.style.cssText = inactive;
+        flowPanel.style.display = 'block'; colPanel.style.display = 'none';
+        renderStatusFlowPreview();
+    }
+}
+
+function renderColumnSettingsList() {
     const list = document.getElementById('col-settings-list');
     list.innerHTML = '';
     columnConfig.forEach((col) => {
@@ -832,7 +899,7 @@ function openColumnSettingsModal() {
             if (draggedIndex === -1 || targetIndex === -1 || draggedIndex === targetIndex) return;
             const draggedItem = columnConfig.splice(draggedIndex, 1)[0];
             columnConfig.splice(targetIndex, 0, draggedItem);
-            openColumnSettingsModal();
+            renderColumnSettingsList();
         });
 
         item.innerHTML = `
@@ -842,29 +909,134 @@ function openColumnSettingsModal() {
         `;
         list.appendChild(item);
     });
-    document.getElementById('colSettingsModal').style.display = 'flex';
+}
+
+// ===== STATUS FLOW (definitions + branching progression, visualized top to
+// bottom with arrows) =====
+function renderStatusFlowEditor() {
+    const container = document.getElementById('status-flow-editor');
+    container.innerHTML = statusFlow.statuses.map(s => `
+        <div style="border:1px solid #ddd; border-radius:8px; padding:10px 12px; background:#f8f9fa;">
+            <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                <input type="color" value="${s.color}" onchange="updateFlowStatusColor('${s.id}', this.value)" style="width:32px; height:32px; border:none; padding:0; cursor:pointer; flex-shrink:0;">
+                <input type="text" value="${s.name}" onchange="updateFlowStatusName('${s.id}', this.value)" style="flex:1; font-weight:600; padding:8px; border:1px solid #ddd; border-radius:4px; font-size:14px;">
+                <button onclick="removeFlowStatus('${s.id}')" title="Delete status" style="background:none; border:none; color:#d32f2f; cursor:pointer; font-size:18px; padding:0 4px; flex-shrink:0;">&times;</button>
+            </div>
+            <div style="font-size:11px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:6px;">Leads to:</div>
+            <div style="display:flex; flex-wrap:wrap; gap:10px;">
+                ${statusFlow.statuses.filter(other => other.id !== s.id).map(other => `
+                    <label style="display:flex; align-items:center; gap:5px; font-size:13px; cursor:pointer;">
+                        <input type="checkbox" ${statusFlow.transitions.some(t => t.from === s.id && t.to === other.id) ? 'checked' : ''} onchange="toggleFlowTransition('${s.id}', '${other.id}', this.checked)">
+                        ${other.name}
+                    </label>
+                `).join('') || '<span style="color:#bbb; font-size:12px;">Add another status first</span>'}
+            </div>
+        </div>
+    `).join('');
+}
+
+function addFlowStatus() {
+    const id = 'status_' + Date.now();
+    statusFlow.statuses.push({ id, name: 'New Status', color: '#e0e0e0' });
+    renderStatusFlowEditor();
+}
+
+function removeFlowStatus(id) {
+    if (!confirm('Delete this status? Any arrows to/from it will also be removed.')) return;
+    statusFlow.statuses = statusFlow.statuses.filter(s => s.id !== id);
+    statusFlow.transitions = statusFlow.transitions.filter(t => t.from !== id && t.to !== id);
+    renderStatusFlowEditor();
+}
+
+function updateFlowStatusName(id, name) {
+    const s = statusFlow.statuses.find(s => s.id === id);
+    if (s) s.name = name.trim() || s.name;
+}
+
+function updateFlowStatusColor(id, color) {
+    const s = statusFlow.statuses.find(s => s.id === id);
+    if (s) s.color = color;
+}
+
+function toggleFlowTransition(fromId, toId, checked) {
+    const exists = statusFlow.transitions.some(t => t.from === fromId && t.to === toId);
+    if (checked && !exists) {
+        statusFlow.transitions.push({ from: fromId, to: toId });
+    } else if (!checked && exists) {
+        statusFlow.transitions = statusFlow.transitions.filter(t => !(t.from === fromId && t.to === toId));
+    }
+}
+
+// Renders each status as a stacked box (top to bottom, in list order) with
+// an SVG overlay drawing an arrow for every defined transition — a status
+// with more than one outgoing transition naturally branches into multiple
+// visible paths, since each is just its own arrow to a different box.
+function renderStatusFlowPreview() {
+    const preview = document.getElementById('status-flow-preview');
+    const boxWidth = 160, boxHeight = 44, vGap = 50, hGap = 40;
+    const perRow = Math.max(1, Math.floor((preview.clientWidth - 40) / (boxWidth + hGap)) || 3);
+
+    let boxesHtml = '';
+    const positions = {};
+    statusFlow.statuses.forEach((s, i) => {
+        const col = i % perRow;
+        const row = Math.floor(i / perRow);
+        const x = col * (boxWidth + hGap);
+        const y = row * (boxHeight + vGap);
+        positions[s.id] = { x: x + boxWidth / 2, y: y + boxHeight / 2, top: y, bottom: y + boxHeight, left: x, right: x + boxWidth };
+        boxesHtml += `<div style="position:absolute; left:${x}px; top:${y}px; width:${boxWidth}px; height:${boxHeight}px; background:${s.color}; border:1px solid rgba(0,0,0,0.15); border-radius:6px; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:600; text-align:center; padding:4px; box-sizing:border-box; z-index:2;">${s.name}</div>`;
+    });
+
+    const rows = Math.ceil(statusFlow.statuses.length / perRow) || 1;
+    const totalWidth = Math.min(perRow, statusFlow.statuses.length || 1) * (boxWidth + hGap) - hGap;
+    const totalHeight = rows * (boxHeight + vGap) - vGap;
+
+    let arrowsHtml = '';
+    statusFlow.transitions.forEach(t => {
+        const from = positions[t.from], to = positions[t.to];
+        if (!from || !to) return;
+        // Straight line from the center of one box to the center of the
+        // other; the boxes themselves (z-index above the line) visually
+        // clip the line to look like it starts/ends at each edge.
+        arrowsHtml += `<line x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}" stroke="#2e7d32" stroke-width="2" marker-end="url(#ts-arrowhead)" />`;
+    });
+
+    preview.innerHTML = `
+        <div style="position:relative; width:${totalWidth}px; height:${totalHeight}px; margin:0 auto;">
+            <svg width="${totalWidth}" height="${totalHeight}" style="position:absolute; top:0; left:0; z-index:1; overflow:visible;">
+                <defs>
+                    <marker id="ts-arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                        <path d="M0,0 L8,4 L0,8 Z" fill="#2e7d32" />
+                    </marker>
+                </defs>
+                ${arrowsHtml}
+            </svg>
+            ${boxesHtml}
+        </div>
+        ${statusFlow.statuses.length === 0 ? '<p style="color:#999; text-align:center; font-size:13px;">Add a status above to see it here.</p>' : ''}
+    `;
 }
 
 function closeColumnSettingsModal() {
     document.getElementById('colSettingsModal').style.display = 'none';
 }
 
-async function saveColumnSettings() {
+async function saveTsSettings() {
     applyColumnConfig();
     closeColumnSettingsModal();
 
     if (!TS_SCRIPT_URL) {
-        alert('Column layout applied for this session, but no backend connection was available to save it permanently.');
+        alert('Settings applied for this session, but no backend connection was available to save them permanently.');
         return;
     }
 
     try {
         await fetch(TS_SCRIPT_URL, {
             method: 'POST',
-            body: JSON.stringify({ action: 'setTamperSealColumnConfig', columnConfig: columnConfig })
+            body: JSON.stringify({ action: 'setTamperSealColumnConfig', columnConfig: columnConfig, statusFlow: statusFlow })
         });
     } catch (e) {
-        alert('Column layout applied, but saving it to the backend failed: ' + e.message);
+        alert('Settings applied, but saving them to the backend failed: ' + e.message);
     }
 }
 
@@ -883,10 +1055,13 @@ async function initApp() {
         document.body.insertBefore(banner, document.body.firstChild);
     }
 
-    if (canManageColumns) {
-        const colBtn = document.getElementById('colSettingsBtn');
-        if (colBtn) colBtn.style.display = 'inline-block';
-    }
+    // Settings now lives in the main LaunchPad sidebar (dispatches here via
+    // postMessage) instead of a standalone button in this toolbar.
+    window.addEventListener('message', function(event) {
+        if (event.data && event.data.type === 'OPEN_SETTINGS' && canManageColumns) {
+            openColumnSettingsModal();
+        }
+    });
     await loadColumnConfig();
 
     await fetchLookupData();
@@ -1724,9 +1899,7 @@ entries.forEach(entry => {
         
         <select class="status-dropdown" data-col="status" onchange="syncEdit('${id}', 'status', this.value); applyStatusColor(this)" ${!isEditMode ? 'disabled' : ''}>
             <option value="${getVal('status', entry.status)}">${getVal('status', entry.status) || 'Select...'}</option>
-            <option value="Intact">Intact</option>
-            <option value="Broken">Broken</option>
-            <option value="Removed">Removed</option>
+            ${statusFlow.statuses.map(s => `<option value="${s.name}">${s.name}</option>`).join('')}
         </select>
         
         <textarea data-col="breakDate" oninput="syncEdit('${id}', 'break_date', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('break_date', entry.break_date)}</textarea>
@@ -1741,8 +1914,21 @@ entries.forEach(entry => {
 function applyStatusColor(el) {
     const row = el.closest('.cell-row');
     if (!row) return;
-    const val = el.value.toLowerCase();
     row.classList.remove('row-intact', 'row-broken', 'row-removed');
+    row.style.removeProperty('--row-status-color');
+
+    const rawVal = el.value || '';
+    const defined = statusFlow.statuses.find(s => s.name.toLowerCase() === rawVal.toLowerCase().trim());
+    if (defined) {
+        row.style.setProperty('--row-status-color', defined.color);
+        row.classList.add('row-custom-status');
+        return;
+    }
+
+    // Fall back to the original keyword matching for values that don't
+    // exactly match a currently-defined status (e.g. old data entered
+    // before a status was renamed).
+    const val = rawVal.toLowerCase();
     if (val.includes("intact") || val.includes("pass")) row.classList.add('row-intact');
     else if (val.includes("broken") || val.includes("fail")) row.classList.add('row-broken');
     else if (val.includes("removed") || val.includes("replaced") || val.includes("void")) row.classList.add('row-removed');

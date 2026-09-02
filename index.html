@@ -5327,6 +5327,14 @@ function openSettingsForCurrentView() {
         return;
     }
 
+    if (view === 'tamperseals') {
+        const iframe = document.getElementById('tamperseal-iframe');
+        if (iframe && iframe.contentWindow) {
+            iframe.contentWindow.postMessage({ type: 'OPEN_SETTINGS' }, '*');
+        }
+        return;
+    }
+
     alert("There are no settings for this view yet.");
 }
 
