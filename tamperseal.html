@@ -673,7 +673,10 @@ input:not([type="checkbox"]), textarea, select {
             <p style="color:#666; font-size:13px; margin-top:-8px;">Define the seal statuses and how they can progress. Check a box to add an arrow from that status to another — check more than one to branch into multiple paths.</p>
             <div id="workflow-selector-wrap" style="display:flex; gap:8px; margin-bottom:14px;"></div>
             <div id="status-flow-editor" style="max-height:280px; overflow-y:auto; margin-bottom:12px; display:flex; flex-direction:column; gap:10px;"></div>
-            <button class="btn btn-add" onclick="addFlowStatus()">+ Add Status</button>
+            <div style="position:relative; display:inline-block;">
+                <button id="add-status-menu-btn" class="btn btn-add" onclick="toggleAddStatusMenu()">+ Add Status ▾</button>
+                <div id="add-status-menu" style="display:none; position:absolute; top:100%; left:0; margin-top:4px; background:white; border:1px solid #ddd; border-radius:8px; box-shadow:0 4px 16px rgba(0,0,0,0.15); z-index:50; min-width:240px; max-height:260px; overflow-y:auto;"></div>
+            </div>
             <div style="margin-top:16px; border-top:1px dashed #ccc; padding-top:14px;">
                 <div style="font-size:12px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:8px;">Preview</div>
                 <div id="status-flow-preview" style="position:relative; background:#fafafa; border:1px solid #eee; border-radius:8px; padding:24px; min-height:100px; overflow:visible;"></div>
@@ -1048,6 +1051,68 @@ function moveFlowStatus(id, direction) {
     const newIndex = index + direction;
     if (newIndex < 0 || newIndex >= wf.statuses.length) return;
     [wf.statuses[index], wf.statuses[newIndex]] = [wf.statuses[newIndex], wf.statuses[index]];
+    renderStatusFlowEditor();
+}
+
+function toggleAddStatusMenu() {
+    const menu = document.getElementById('add-status-menu');
+    if (menu.style.display === 'block') { menu.style.display = 'none'; return; }
+    renderAddStatusMenu();
+    menu.style.display = 'block';
+
+    setTimeout(() => {
+        document.addEventListener('click', function closeMenu(e) {
+            if (!menu.contains(e.target) && e.target.id !== 'add-status-menu-btn') {
+                menu.style.display = 'none';
+                document.removeEventListener('click', closeMenu);
+            }
+        });
+    }, 0);
+}
+
+function renderAddStatusMenu() {
+    const menu = document.getElementById('add-status-menu');
+    const editingWf = getEditingWorkflow();
+
+    // Every status from every OTHER workflow, deduplicated by name, minus
+    // any name already present in the workflow currently being edited.
+    const existingNames = new Set(editingWf.statuses.map(s => s.name.toLowerCase()));
+    const seenNames = new Set();
+    const reusable = [];
+    workflows.forEach(w => {
+        if (w.id === editingWf.id) return;
+        w.statuses.forEach(s => {
+            const key = s.name.toLowerCase();
+            if (existingNames.has(key) || seenNames.has(key)) return;
+            seenNames.add(key);
+            reusable.push(s);
+        });
+    });
+
+    let html = `<div onclick="addFlowStatus(); toggleAddStatusMenu();" style="padding:10px 14px; cursor:pointer; font-weight:600; font-size:13px; color:#2e7d32; border-bottom:1px solid #eee;" onmouseover="this.style.background='#f5f5f5'" onmouseout="this.style.background='transparent'">+ Blank Status</div>`;
+
+    if (reusable.length > 0) {
+        html += `<div style="padding:8px 14px 4px; font-size:11px; font-weight:700; text-transform:uppercase; color:#999;">From other workflows</div>`;
+        reusable.forEach(s => {
+            const safeName = s.name.replace(/'/g, "\\'");
+            html += `
+                <div onclick="copyStatusIntoWorkflow('${safeName}', '${s.color}'); toggleAddStatusMenu();" style="display:flex; align-items:center; gap:8px; padding:8px 14px; cursor:pointer; font-size:13px;" onmouseover="this.style.background='#f5f5f5'" onmouseout="this.style.background='transparent'">
+                    <span style="width:16px; height:16px; border-radius:3px; background:${s.color}; border:1px solid rgba(0,0,0,0.15); flex-shrink:0;"></span>
+                    ${s.name}
+                </div>
+            `;
+        });
+    } else {
+        html += `<div style="padding:10px 14px; font-size:12px; color:#bbb;">No other statuses to reuse yet</div>`;
+    }
+
+    menu.innerHTML = html;
+}
+
+function copyStatusIntoWorkflow(name, color) {
+    const wf = getEditingWorkflow();
+    const id = 'status_' + Date.now();
+    wf.statuses.push({ id, name, color });
     renderStatusFlowEditor();
 }
 
