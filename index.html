@@ -460,6 +460,16 @@
 }
 
 /* The Large Circle */
+.iframe-loading-overlay {
+    position: absolute; inset: 0; background: white; z-index: 5;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+}
+.iframe-loading-overlay p { color: #666; font-size: 14px; margin: 0; }
+.iframe-spinner {
+    width: 36px; height: 36px; border: 4px solid #e0e0e0; border-top-color: #2e7d32;
+    border-radius: 50%; animation: iframe-spin 0.8s linear infinite;
+}
+@keyframes iframe-spin { to { transform: rotate(360deg); } }
 .ship-circle {
     width: 180px;
     height: 180px;
@@ -1552,7 +1562,11 @@ body.dark-mode .phase-row {
   window.caDashboardMounted = false;
 </script>
 </div>
-<div id="equipment-tracker-view" style="display: none; height: 100%; width: 100%;">
+<div id="equipment-tracker-view" style="display: none; height: 100%; width: 100%; position: relative;">
+    <div class="iframe-loading-overlay" id="equipment-tracker-iframe-loading">
+        <div class="iframe-spinner"></div>
+        <p>Loading Equipment Status Tracker...</p>
+    </div>
     <iframe 
         id="equipment-tracker-iframe"
         data-src-base="equipment-tracker.html"
@@ -1561,7 +1575,11 @@ body.dark-mode .phase-row {
     </iframe>
 </div>
 
-<div id="bridge-view" style="display: none; height: 100%; width: 100%;">
+<div id="bridge-view" style="display: none; height: 100%; width: 100%; position: relative;">
+    <div class="iframe-loading-overlay" id="bridge-iframe-loading">
+        <div class="iframe-spinner"></div>
+        <p>Loading The Bridge...</p>
+    </div>
     <iframe 
         id="bridge-iframe"
         data-src-base="bridge.html"
@@ -1570,7 +1588,11 @@ body.dark-mode .phase-row {
     </iframe>
 </div>
 
-<div id="tamperseals-view" style="display: none; height: 100%; width: 100%;">
+<div id="tamperseals-view" style="display: none; height: 100%; width: 100%; position: relative;">
+    <div class="iframe-loading-overlay" id="tamperseal-iframe-loading">
+        <div class="iframe-spinner"></div>
+        <p>Loading Tamper Seals...</p>
+    </div>
     <iframe 
         id="tamperseal-iframe"
         data-src-base="tamperseal.html"
@@ -1579,13 +1601,17 @@ body.dark-mode .phase-row {
     </iframe>
 </div>
 
-<div id="sealform-view" style="display: none; height: 100%; width: 100%; flex-direction: column;">
+<div id="sealform-view" style="display: none; height: 100%; width: 100%; flex-direction: column; position: relative;">
     <div style="padding: 12px 20px; background: #f1f3f4; border-bottom: 1px solid #dcdcdc; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
         <strong style="color: #2e7d32; font-size: 13px;">Seal Form Preview</strong>
         <span style="color: #888; font-size: 12px;">This is exactly what someone scanning this project's QR code would see — no LaunchPad login involved.</span>
         <button class="tool-btn" style="margin-left: auto; border-color: #1565c0; color: #1565c0;" onclick="openSealFormQrModal()">🔗 QR Code</button>
     </div>
-    <div style="flex: 1; display: flex; justify-content: center; background: #e8eaed; overflow: auto;">
+    <div style="flex: 1; display: flex; justify-content: center; background: #e8eaed; overflow: auto; position: relative;">
+        <div class="iframe-loading-overlay" id="sealform-iframe-loading">
+            <div class="iframe-spinner"></div>
+            <p>Loading Seal Form...</p>
+        </div>
         <iframe 
             id="sealform-iframe"
             data-src-base="seal-form.html"
@@ -2300,6 +2326,12 @@ function loadSealFormPreview() {
     window.sealFormAssetsLoaded = true;
     const iframe = document.getElementById('sealform-iframe');
     if (!iframe || !window.LP_CONFIG) return;
+
+    const overlay = document.getElementById('sealform-iframe-loading');
+    if (overlay) {
+        overlay.style.display = 'flex';
+        iframe.onload = () => { overlay.style.display = 'none'; };
+    }
 
     const base = iframe.getAttribute('data-src-base');
     const params = new URLSearchParams({ project: window.LP_CONFIG.projectKey });
@@ -5195,6 +5227,14 @@ async function chooseProject(projectKey) {
 function loadIframeIfNeeded(iframeId) {
     const iframe = document.getElementById(iframeId);
     if (!iframe || iframe.src) return;
+    const overlay = document.getElementById(`${iframeId}-loading`);
+    if (overlay) {
+        overlay.style.display = 'flex';
+        // The iframe's own 'load' event fires once its HTML/JS has parsed —
+        // a reasonable proxy for "no longer a blank flash", even though any
+        // async data fetching inside it may still be finishing up.
+        iframe.onload = () => { overlay.style.display = 'none'; };
+    }
     const base = iframe.getAttribute('data-src-base');
     const params = new URLSearchParams({ project: window.LP_CONFIG.projectKey });
     if (window.LP_CONFIG.googleScriptUrl) params.set('scriptUrl', window.LP_CONFIG.googleScriptUrl);
@@ -6439,7 +6479,7 @@ const contentArea = document.getElementById('main-content-area');
 // shells (each with its own click handlers) before anyone had scrolled
 // anywhere near them. Only the first batch is built on load; the rest
 // build on demand via the button at the bottom.
-const WEEKS_PER_BATCH = 12;
+const WEEKS_PER_BATCH = 26;
 let __scheduleWeeksRendered = 0;
 
 function createWeekElement(baseDate, w) {
@@ -6572,7 +6612,7 @@ const __weekLoadObserver = new IntersectionObserver((entries) => {
             renderNextWeekBatch();
         }
     });
-}, { rootMargin: '800px' }); // starts loading before the sentinel is actually on screen, so it's not visible even mid-scroll
+}, { rootMargin: '150px' }); // collapsed weeks are only ~40-50px each, so this stays a modest few-week lookahead instead of preemptively loading everything
 
 let isSignUpMode = false;
 
