@@ -39,18 +39,21 @@
         .action-work-completed { background: #ef6c00; }
         .back-link { display: inline-block; margin-bottom: 12px; color: #1b5e20; font-weight: 600; font-size: 14px; cursor: pointer; text-decoration: none; }
 
-        .seal-search-row { display: flex; gap: 8px; }
-        .seal-search-row input { flex: 1; }
-        .seal-search-row button {
-            padding: 0 16px; border: none; border-radius: 8px; background: #2e7d32; color: white; font-weight: bold; cursor: pointer; font-size: 20px;
+        .multiselect-dropdown { position: relative; margin-bottom: 4px; }
+        .multiselect-toggle {
+            width: 100%; text-align: left; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 15px;
+            background: white; cursor: pointer; box-sizing: border-box; font-family: inherit;
         }
-        .seal-chip-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-        .seal-chip {
-            display: flex; align-items: center; gap: 6px; background: #e8f5e9; color: #1b5e20; border: 1px solid #a5d6a7;
-            border-radius: 20px; padding: 6px 8px 6px 14px; font-size: 13px; font-weight: 600;
+        .multiselect-panel {
+            display: none; position: absolute; top: 100%; left: 0; right: 0; margin-top: 4px; background: white;
+            border: 1px solid #ddd; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.15); z-index: 20;
+            max-height: 260px; overflow-y: auto; padding: 6px 14px;
         }
-        .seal-chip .remove-chip { cursor: pointer; font-size: 16px; color: #d32f2f; line-height: 1; padding: 0 4px; }
-        .new-seal-box { background: #fff3e0; border: 1px dashed #ef6c00; border-radius: 8px; padding: 14px; margin-top: 12px; }
+        .multiselect-panel.open { display: block; }
+        .seal-check { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid #eee; font-size: 15px; }
+        .seal-check:last-child { border-bottom: none; }
+        .seal-check input { width: 20px; height: 20px; flex-shrink: 0; }
+        .new-seal-box { background: #fff3e0; border: 1px dashed #ef6c00; border-radius: 8px; padding: 14px; margin-top: 10px; }
         .new-seal-box p { margin: 0 0 10px; font-size: 13px; color: #e65100; font-weight: 600; }
         .new-seal-box input { margin-bottom: 8px; }
         .new-seal-box button { width: 100%; padding: 10px; background: #ef6c00; color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; }
@@ -77,7 +80,6 @@
 
         let allSeals = [];
         let scriptUrl = '';
-        let selectedSealIds = [];
         let newlyCreatedSeals = [];
 
         const sectionConfig = {
@@ -147,7 +149,6 @@
         }
 
         function selectSection(section) {
-            selectedSealIds = [];
             const cfg = sectionConfig[section];
             document.getElementById('form-title').innerText = cfg.title;
             document.getElementById('form-subtitle').innerText = cfg.subtitle;
@@ -162,58 +163,121 @@
             renderActionSelect();
         }
 
-        function renderSealPickerHtml(section) {
-            const eligible = allSeals.concat(newlyCreatedSeals).filter(sectionConfig[section].eligible);
-            const datalistOptions = eligible.map(s =>
-                `<option value="${s.seal_number}">${s.asset_name || ''}${s.location ? ' — ' + s.location : ''}</option>`
-            ).join('');
+        // ===== Reusable asset -> seal dropdown picker =====
+        // Both dropdowns are buttons that reveal a checklist panel underneath
+        // when clicked (closed by clicking elsewhere) — multi-select via
+        // checkboxes, presented as a compact dropdown rather than an
+        // always-expanded list. Picking asset(s) narrows the seal panel to
+        // only that section's eligible seals for those asset(s).
+        function renderAssetSealPickerHtml(section) {
+            const uniqueAssetNames = [...new Set(allSeals.concat(newlyCreatedSeals).map(s => s.asset_name).filter(Boolean))].sort();
 
             return `
-                <label>Seal Number</label>
-                <div class="seal-search-row">
-                    <input type="text" id="seal-search-input" list="seal-datalist" placeholder="Type or select a seal number..." onkeydown="if(event.key==='Enter'){event.preventDefault(); handleAddSeal('${section}');}">
-                    <datalist id="seal-datalist">${datalistOptions}</datalist>
-                    <button type="button" onclick="handleAddSeal('${section}')" title="Add this seal">+</button>
+                <label>Asset(s)</label>
+                <div class="multiselect-dropdown">
+                    <button type="button" class="multiselect-toggle" id="${section}-asset-toggle" onclick="toggleMultiselect(event, '${section}-asset-panel')">Select asset(s)... ▾</button>
+                    <div class="multiselect-panel" id="${section}-asset-panel">
+                        ${uniqueAssetNames.length > 0 ? uniqueAssetNames.map(name => `
+                            <label class="seal-check">
+                                <input type="checkbox" name="${section}-asset" value="${name}" onchange="updateSealDropdown('${section}')">
+                                ${name}
+                            </label>
+                        `).join('') : '<p class="empty-note">No assets with tamper seals found for this project.</p>'}
+                    </div>
                 </div>
-                <div id="new-seal-box-wrap"></div>
-                <div id="seal-chip-list" class="seal-chip-list"></div>
+
+                <label>Seal(s)</label>
+                <div class="multiselect-dropdown">
+                    <button type="button" class="multiselect-toggle" id="${section}-seal-toggle" onclick="toggleMultiselect(event, '${section}-seal-panel')">Select asset(s) first...</button>
+                    <div class="multiselect-panel" id="${section}-seal-panel">
+                        <p class="empty-note">Select an asset above to see its seals.</p>
+                    </div>
+                </div>
             `;
         }
 
-        function handleAddSeal(section) {
-            const input = document.getElementById('seal-search-input');
-            const value = input.value.trim();
-            if (!value) return;
+        function toggleMultiselect(evt, panelId) {
+            evt.stopPropagation();
+            const panel = document.getElementById(panelId);
+            const isOpen = panel.classList.contains('open');
+            document.querySelectorAll('.multiselect-panel.open').forEach(p => p.classList.remove('open'));
+            if (!isOpen) panel.classList.add('open');
+        }
 
-            const eligible = allSeals.concat(newlyCreatedSeals).filter(sectionConfig[section].eligible);
-            const match = eligible.find(s => String(s.seal_number).trim() === value);
+        document.addEventListener('click', function(e) {
+            if (!e.target.closest('.multiselect-dropdown')) {
+                document.querySelectorAll('.multiselect-panel.open').forEach(p => p.classList.remove('open'));
+            }
+        });
 
-            if (match) {
-                if (!selectedSealIds.includes(match.id)) selectedSealIds.push(match.id);
-                input.value = '';
-                document.getElementById('new-seal-box-wrap').innerHTML = '';
-                renderSealChips();
+        function updateSealDropdown(section) {
+            const checkedAssets = Array.from(document.querySelectorAll(`input[name="${section}-asset"]:checked`)).map(el => el.value);
+            const panel = document.getElementById(`${section}-seal-panel`);
+            const assetToggle = document.getElementById(`${section}-asset-toggle`);
+            const sealToggle = document.getElementById(`${section}-seal-toggle`);
+
+            assetToggle.innerText = (checkedAssets.length > 0 ? `${checkedAssets.length} asset(s) selected` : 'Select asset(s)...') + ' ▾';
+
+            if (checkedAssets.length === 0) {
+                panel.innerHTML = '<p class="empty-note">Select an asset above to see its seals.</p>';
+                sealToggle.innerText = 'Select asset(s) first... ▾';
                 return;
             }
 
-            document.getElementById('new-seal-box-wrap').innerHTML = `
+            const eligible = allSeals.concat(newlyCreatedSeals).filter(s =>
+                checkedAssets.includes(s.asset_name) && sectionConfig[section].eligible(s)
+            );
+
+            let html = eligible.map(s => `
+                <label class="seal-check">
+                    <input type="checkbox" name="${section}-seal" value="${s.id}" onchange="updateSealToggleLabel('${section}')">
+                    Seal #${s.seal_number}${s.sub_area ? ' — ' + s.sub_area : ''} — ${s.asset_name}
+                </label>
+            `).join('');
+
+            if (eligible.length === 0) {
+                html = '<p class="empty-note">No eligible seals found for the selected asset(s).</p>';
+            }
+
+            if (section === 'break-request') {
+                html += `
+                    <div id="${section}-new-seal-box-wrap"></div>
+                    <a class="back-link" style="margin-top:8px;" onclick="showNewSealBox('${section}')">+ This seal isn't listed / add a new one</a>
+                `;
+            }
+
+            panel.innerHTML = html;
+            sealToggle.innerText = 'Select seal(s)... ▾';
+        }
+
+        function updateSealToggleLabel(section) {
+            const checked = document.querySelectorAll(`input[name="${section}-seal"]:checked`).length;
+            const toggle = document.getElementById(`${section}-seal-toggle`);
+            toggle.innerText = (checked > 0 ? `${checked} seal(s) selected` : 'Select seal(s)...') + ' ▾';
+        }
+
+        function showNewSealBox(section) {
+            const wrap = document.getElementById(`${section}-new-seal-box-wrap`);
+            wrap.innerHTML = `
                 <div class="new-seal-box">
-                    <p>Seal #${value} isn't in the log yet. Add it as a new seal?</p>
-                    <input type="text" id="new-seal-asset" placeholder="Asset Name">
-                    <input type="text" id="new-seal-location" placeholder="Location">
-                    <input type="text" id="new-seal-subarea" placeholder="Sub Area (optional)">
-                    <button type="button" onclick="createNewSeal('${value.replace(/'/g, "\\'")}')">Add Seal #${value} to This Request</button>
+                    <p>Add a seal that isn't in the log yet:</p>
+                    <input type="text" id="${section}-new-seal-number" placeholder="Seal Number">
+                    <input type="text" id="${section}-new-seal-asset" placeholder="Asset Name">
+                    <input type="text" id="${section}-new-seal-location" placeholder="Location">
+                    <input type="text" id="${section}-new-seal-subarea" placeholder="Sub Area (optional)">
+                    <button type="button" onclick="createNewSeal('${section}')">Add This Seal</button>
                 </div>
             `;
         }
 
-        async function createNewSeal(sealNumber) {
-            const assetName = document.getElementById('new-seal-asset').value.trim();
-            const location = document.getElementById('new-seal-location').value.trim();
-            const subArea = document.getElementById('new-seal-subarea').value.trim();
+        async function createNewSeal(section) {
+            const sealNumber = document.getElementById(`${section}-new-seal-number`).value.trim();
+            const assetName = document.getElementById(`${section}-new-seal-asset`).value.trim();
+            const location = document.getElementById(`${section}-new-seal-location`).value.trim();
+            const subArea = document.getElementById(`${section}-new-seal-subarea`).value.trim();
 
-            if (!assetName) {
-                alert('Please enter an asset name for this seal.');
+            if (!sealNumber || !assetName) {
+                alert('Please enter at least a seal number and an asset name.');
                 return;
             }
 
@@ -229,96 +293,35 @@
 
                 if (error || !data || data.length === 0) throw error || new Error('Insert failed');
 
-                const newSeal = data[0];
-                newlyCreatedSeals.push(newSeal);
-                selectedSealIds.push(newSeal.id);
-                document.getElementById('seal-search-input').value = '';
-                document.getElementById('new-seal-box-wrap').innerHTML = '';
-                renderSealChips();
+                newlyCreatedSeals.push(data[0]);
+
+                // Re-render the asset panel so the new asset appears, then
+                // check it automatically and refresh the seal panel.
+                const assetPanel = document.getElementById(`${section}-asset-panel`);
+                if (assetPanel && ![...assetPanel.querySelectorAll(`input[name="${section}-asset"]`)].some(el => el.value === assetName)) {
+                    assetPanel.insertAdjacentHTML('beforeend', `
+                        <label class="seal-check">
+                            <input type="checkbox" name="${section}-asset" value="${assetName}" checked onchange="updateSealDropdown('${section}')">
+                            ${assetName}
+                        </label>
+                    `);
+                } else {
+                    const existingCheckbox = [...assetPanel.querySelectorAll(`input[name="${section}-asset"]`)].find(el => el.value === assetName);
+                    if (existingCheckbox) existingCheckbox.checked = true;
+                }
+                updateSealDropdown(section);
+
+                // Check the newly-added seal once the panel re-renders.
+                setTimeout(() => {
+                    const newCheckbox = document.querySelector(`input[name="${section}-seal"][value="${data[0].id}"]`);
+                    if (newCheckbox) { newCheckbox.checked = true; updateSealToggleLabel(section); }
+                }, 0);
             } catch (e) {
                 alert('Could not add this seal: ' + e.message);
             }
         }
 
-        function renderSealChips() {
-            const wrap = document.getElementById('seal-chip-list');
-            if (!wrap) return;
-            const allKnown = allSeals.concat(newlyCreatedSeals);
-            wrap.innerHTML = selectedSealIds.map(id => {
-                const s = allKnown.find(x => x.id === id);
-                if (!s) return '';
-                return `<div class="seal-chip">Seal #${s.seal_number}<span class="remove-chip" onclick="removeSelectedSeal(${id})">&times;</span></div>`;
-            }).join('');
-        }
-
-        function removeSelectedSeal(id) {
-            selectedSealIds = selectedSealIds.filter(x => x !== id);
-            renderSealChips();
-        }
-
-        function renderBreakRequestForm(content) {
-            const uniqueAssetNames = [...new Set(allSeals.concat(newlyCreatedSeals).map(s => s.asset_name).filter(Boolean))].sort();
-
-            content.innerHTML = `
-                <a class="back-link" onclick="backToActionSelect()">&larr; Back</a>
-                <div class="card">
-                    <p>Select the asset(s) with the seal(s) you're requesting to break.</p>
-                    <label>Asset(s)</label>
-                    <div id="break-request-asset-list">
-                        ${uniqueAssetNames.length > 0 ? uniqueAssetNames.map(name => `
-                            <label class="seal-check">
-                                <input type="checkbox" name="break-request-asset" value="${name}" onchange="updateBreakRequestSealList()">
-                                ${name}
-                            </label>
-                        `).join('') : '<p class="empty-note">No assets with tamper seals found for this project.</p>'}
-                    </div>
-
-                    <label>Seal(s) to Break</label>
-                    <div id="break-request-seal-list">
-                        <p class="empty-note">Select an asset above to see its intact seals.</p>
-                    </div>
-
-                    <label>Reason for Request</label>
-                    <textarea id="reason" placeholder="e.g. Scheduled testing, issue repair, settings change..."></textarea>
-                    <label>Your Name</label>
-                    <input type="text" id="reqName">
-                    <label>Your Company</label>
-                    <select id="reqCompany" onchange="handleReqCompanyChange()"><option value="">Loading companies...</option></select>
-                    <input type="text" id="reqCompanyNew" placeholder="Enter your company name" style="display:none; margin-top:8px;">
-                    <label>Your Email</label>
-                    <input type="email" id="reqEmail">
-                    <button class="submit-btn" onclick="submitBreakRequest()">Submit Break Request</button>
-                    <div id="form-error"></div>
-                </div>
-            `;
-
-            loadReqCompanyOptions();
-        }
-
-        function updateBreakRequestSealList() {
-            const checkedAssets = Array.from(document.querySelectorAll('input[name="break-request-asset"]:checked')).map(el => el.value);
-            const listEl = document.getElementById('break-request-seal-list');
-
-            if (checkedAssets.length === 0) {
-                listEl.innerHTML = '<p class="empty-note">Select an asset above to see its intact seals.</p>';
-                return;
-            }
-
-            const eligible = allSeals.concat(newlyCreatedSeals).filter(s =>
-                checkedAssets.includes(s.asset_name) && sectionConfig['break-request'].eligible(s)
-            );
-
-            listEl.innerHTML = eligible.length > 0 ? eligible.map(s => `
-                <label class="seal-check">
-                    <input type="checkbox" name="break-request-seal" value="${s.id}">
-                    Seal #${s.seal_number}${s.sub_area ? ' — ' + s.sub_area : ''} — ${s.asset_name}
-                </label>
-            `).join('') : '<p class="empty-note">No intact seals found for the selected asset(s).</p>';
-        }
-
-        // Same source the rest of LaunchPad uses for Trade Partners,
-        // paginated the same way to avoid Supabase's default row-limit
-        // silently truncating the list on large dropdownoptions tables.
+        // ===== Reusable Trade Partners company dropdown =====
         async function fetchTradePartnersForProject() {
             const companies = [];
             let page = 0;
@@ -345,8 +348,8 @@
             return companies.sort();
         }
 
-        async function loadReqCompanyOptions() {
-            const select = document.getElementById('reqCompany');
+        async function loadCompanyOptions(selectId) {
+            const select = document.getElementById(selectId);
             try {
                 const companies = await fetchTradePartnersForProject();
                 select.innerHTML = '<option value="">Select Company...</option>' +
@@ -357,9 +360,9 @@
             }
         }
 
-        function handleReqCompanyChange() {
-            const select = document.getElementById('reqCompany');
-            const newInput = document.getElementById('reqCompanyNew');
+        function handleCompanySelectChange(selectId, newInputId) {
+            const select = document.getElementById(selectId);
+            const newInput = document.getElementById(newInputId);
             if (select.value === '__add_new__') {
                 newInput.style.display = 'block';
                 newInput.focus();
@@ -368,14 +371,43 @@
             }
         }
 
+        function getCompanyValue(selectId, newInputId) {
+            const select = document.getElementById(selectId);
+            return select.value === '__add_new__' ? document.getElementById(newInputId).value.trim() : select.value;
+        }
+
+        function getCheckedSealIds(section) {
+            return Array.from(document.querySelectorAll(`input[name="${section}-seal"]:checked`)).map(el => Number(el.value));
+        }
+
+        // ===== Section 8.1: Break Request =====
+        function renderBreakRequestForm(content) {
+            content.innerHTML = `
+                <a class="back-link" onclick="backToActionSelect()">&larr; Back</a>
+                <div class="card">
+                    <p>Select the asset(s) and seal(s) you're requesting to break, and why. The Chain of Custody Manager will be notified automatically — do not break any seal before it is approved.</p>
+                    ${renderAssetSealPickerHtml('break-request')}
+                    <label>Reason for Request</label>
+                    <textarea id="reason" placeholder="e.g. Scheduled testing, issue repair, settings change..."></textarea>
+                    <label>Your Name</label>
+                    <input type="text" id="reqName">
+                    <label>Your Company</label>
+                    <select id="reqCompany" onchange="handleCompanySelectChange('reqCompany', 'reqCompanyNew')"><option value="">Loading companies...</option></select>
+                    <input type="text" id="reqCompanyNew" placeholder="Enter your company name" style="display:none; margin-top:8px;">
+                    <label>Your Email</label>
+                    <input type="email" id="reqEmail">
+                    <button class="submit-btn" onclick="submitBreakRequest()">Submit Break Request</button>
+                    <div id="form-error"></div>
+                </div>
+            `;
+            loadCompanyOptions('reqCompany');
+        }
+
         async function submitBreakRequest() {
-            const checkedSealIds = Array.from(document.querySelectorAll('input[name="break-request-seal"]:checked')).map(el => Number(el.value));
+            const checkedSealIds = getCheckedSealIds('break-request');
             const reason = document.getElementById('reason').value.trim();
             const name = document.getElementById('reqName').value.trim();
-            const companySelectValue = document.getElementById('reqCompany').value;
-            const company = companySelectValue === '__add_new__'
-                ? document.getElementById('reqCompanyNew').value.trim()
-                : companySelectValue;
+            const company = getCompanyValue('reqCompany', 'reqCompanyNew');
             const email = document.getElementById('reqEmail').value.trim();
             const errorEl = document.getElementById('form-error');
             errorEl.innerHTML = '';
@@ -421,36 +453,37 @@
             }
         }
 
+        // ===== Section 8.2: Break Seals =====
         function renderBreakSealsForm(content) {
             content.innerHTML = `
                 <a class="back-link" onclick="backToActionSelect()">&larr; Back</a>
                 <div class="card">
                     <p><strong>Only break seals the CCM has approved.</strong> Breaking a seal without an approval on file is treated as an unauthorized breach and triggers mandatory LOTO and re-inspection.</p>
-                    ${renderSealPickerHtml('break-seals')}
-                    <label>Break Date</label>
-                    <input type="date" id="breakDate" value="${new Date().toISOString().split('T')[0]}">
-                    <label>Name of Person Removing the Seal</label>
-                    <input type="text" id="removerName">
+                    ${renderAssetSealPickerHtml('break-seals')}
+                    <label>Email of Person Removing the Seal</label>
+                    <input type="email" id="removerEmail">
                     <label>Company</label>
-                    <input type="text" id="removerCompany">
+                    <select id="removerCompany" onchange="handleCompanySelectChange('removerCompany', 'removerCompanyNew')"><option value="">Loading companies...</option></select>
+                    <input type="text" id="removerCompanyNew" placeholder="Enter your company name" style="display:none; margin-top:8px;">
                     <label>Detailed Break Reason</label>
                     <textarea id="breakReason"></textarea>
                     <button class="submit-btn" onclick="submitBreakSeals()">Log Seal Break</button>
                     <div id="form-error"></div>
                 </div>
             `;
+            loadCompanyOptions('removerCompany');
         }
 
         async function submitBreakSeals() {
-            const breakDate = document.getElementById('breakDate').value;
-            const removerName = document.getElementById('removerName').value.trim();
-            const removerCompany = document.getElementById('removerCompany').value.trim();
+            const checkedSealIds = getCheckedSealIds('break-seals');
+            const removerEmail = document.getElementById('removerEmail').value.trim();
+            const removerCompany = getCompanyValue('removerCompany', 'removerCompanyNew');
             const breakReason = document.getElementById('breakReason').value.trim();
             const errorEl = document.getElementById('form-error');
             errorEl.innerHTML = '';
 
-            if (selectedSealIds.length === 0 || !removerName || !breakReason) {
-                errorEl.innerHTML = '<div class="error-box">Please add at least one seal and fill in all fields.</div>';
+            if (checkedSealIds.length === 0 || !removerEmail || !removerCompany || !breakReason) {
+                errorEl.innerHTML = '<div class="error-box">Please select at least one seal and fill in all fields.</div>';
                 return;
             }
 
@@ -458,11 +491,11 @@
                 await _supabase.from(T('Assets'))
                     .update({
                         status: 'Broken - CCM Approved',
-                        break_date: breakDate,
-                        responsible_party: `${removerName}${removerCompany ? ' (' + removerCompany + ')' : ''}`,
+                        break_date: new Date().toISOString().split('T')[0],
+                        responsible_party: `${removerEmail} (${removerCompany})`,
                         break_reason: breakReason
                     })
-                    .in('id', selectedSealIds);
+                    .in('id', checkedSealIds);
 
                 showSuccess('Seal Break Logged', 'The log has been updated. Use the Work Completed form once your work behind the seal is finished.');
             } catch (e) {
@@ -470,12 +503,13 @@
             }
         }
 
+        // ===== Section 8.3: Work Completed – Ready for Reseal =====
         function renderWorkCompletedForm(content) {
             content.innerHTML = `
                 <a class="back-link" onclick="backToActionSelect()">&larr; Back</a>
                 <div class="card">
                     <p>Let the CxA/CCM know these seals are ready to be replaced.</p>
-                    ${renderSealPickerHtml('work-completed')}
+                    ${renderAssetSealPickerHtml('work-completed')}
                     <button class="submit-btn" onclick="submitWorkCompleted()">Notify Ready for Reseal</button>
                     <div id="form-error"></div>
                 </div>
@@ -483,17 +517,18 @@
         }
 
         async function submitWorkCompleted() {
+            const checkedSealIds = getCheckedSealIds('work-completed');
             const errorEl = document.getElementById('form-error');
             errorEl.innerHTML = '';
 
-            if (selectedSealIds.length === 0) {
-                errorEl.innerHTML = '<div class="error-box">Please add at least one seal.</div>';
+            if (checkedSealIds.length === 0) {
+                errorEl.innerHTML = '<div class="error-box">Please select at least one seal.</div>';
                 return;
             }
 
             try {
                 const allKnown = allSeals.concat(newlyCreatedSeals);
-                const selectedSeals = selectedSealIds.map(id => allKnown.find(s => s.id === id)).filter(Boolean);
+                const selectedSeals = checkedSealIds.map(id => allKnown.find(s => s.id === id)).filter(Boolean);
                 const assetName = selectedSeals[0] ? selectedSeals[0].asset_name : '';
 
                 await _supabase.from(T('Assets'))
@@ -501,7 +536,7 @@
                         status: 'Ready for Reseal',
                         ready_for_reseal_date: new Date().toISOString().split('T')[0]
                     })
-                    .in('id', selectedSealIds);
+                    .in('id', checkedSealIds);
 
                 if (scriptUrl) {
                     try {
