@@ -6495,11 +6495,11 @@ function createWeekElement(baseDate, w) {
     weekHeader.className = 'week-header';
     weekHeader.innerHTML = `
         <span>Week of ${weekStart.toLocaleDateString([], {month:'short', day:'numeric'})} - ${weekEnd.toLocaleDateString([], {month:'short', day:'numeric'})}</span>
-        <span class="week-arrow">▼</span>
+        <span class="week-arrow">▶</span>
     `;
 
     const weekContent = document.createElement('div');
-    weekContent.className = 'week-content';
+    weekContent.className = 'week-content hidden';
 
     weekHeader.onclick = () => {
         const isHidden = weekContent.classList.toggle('hidden');
@@ -6517,10 +6517,10 @@ function createWeekElement(baseDate, w) {
 
         const header = document.createElement('div');
         header.className = 'date-header';
-        header.innerHTML = `<span>${dateString}</span> <span class="arrow">▼</span>`;
+        header.innerHTML = `<span>${dateString}</span> <span class="arrow">▶</span>`;
         
         const rowsDiv = document.createElement('div');
-        rowsDiv.className = 'rows-container';
+        rowsDiv.className = 'rows-container hidden';
         rowsDiv.id = `rows-${dateId}`;
 
         header.onclick = (e) => {
@@ -6569,7 +6569,45 @@ function createSections() {
 
     contentArea.innerHTML = '';
     __scheduleWeeksRendered = 0;
-    renderNextWeekBatch();
+
+    if (currentView === 'view2' || currentView === 'view3') {
+        renderLookAheadWeeks(currentView);
+    } else {
+        renderNextWeekBatch();
+    }
+}
+
+// Look Ahead views only ever need a small window of weeks around today —
+// rendering the full batch sequence from START_DATE (which could be
+// months away from today in either direction) and hoping scroll-based
+// batching eventually reaches the right week was fragile and, worse,
+// meant any week created after the one-time startup collapse never got
+// collapsed at all. This computes the exact weeks needed and renders only
+// those, directly.
+function renderLookAheadWeeks(viewId) {
+    const contentArea = document.getElementById('main-content-area');
+    if (!contentArea) return;
+    const baseDate = new Date(START_DATE + "T00:00:00");
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    // Matches applyViewFilter()'s own offsets: view2 = 1 Week Look Ahead
+    // (today+6), view3 = 3 Week Look Ahead (today+20).
+    const lookAheadDays = viewId === 'view2' ? 6 : 20;
+    const endDate = new Date(today);
+    endDate.setDate(today.getDate() + lookAheadDays);
+
+    const msPerDay = 24 * 60 * 60 * 1000;
+    const startWeekOffset = Math.max(0, Math.floor((today - baseDate) / msPerDay / 7));
+    const endWeekOffset = Math.min(WEEKS_TO_SHOW - 1, Math.ceil((endDate - baseDate) / msPerDay / 7));
+
+    for (let w = startWeekOffset; w <= endWeekOffset; w++) {
+        contentArea.appendChild(createWeekElement(baseDate, w));
+    }
+
+    if (__lastScheduleData) applyScheduleDataToDom(__lastScheduleData);
+    applyViewFilter(viewId);
 }
 
 function renderNextWeekBatch() {
@@ -7252,11 +7290,11 @@ function applyViewFilter(viewId) {
     let targetDate = null;
 
     if (viewId === 'view2') {
-        // 3 Day Look Ahead (Today + 2)
+        // 1 Week Look Ahead (today + 6 days)
         targetDate = new Date(today);
         targetDate.setDate(today.getDate() + 6);
     } else if (viewId === 'view3') {
-        // 1 Week Look Ahead (Today + 6)
+        // 3 Week Look Ahead (today + 20 days)
         targetDate = new Date(today);
         targetDate.setDate(today.getDate() + 20);
     }
@@ -7279,19 +7317,17 @@ function applyViewFilter(viewId) {
             }
         });
 
-        // 4. Clean up the Week Accordions
+        // 4. Clean up the Week Accordions — hide weeks with nothing visible
+        // in range, but leave everything collapsed either way. Auto-
+        // expanding here used to fight with collapseEverything() in a way
+        // that depended on exactly when each was called, sometimes leaving
+        // weeks expanded when they shouldn't be.
         weekContainers.forEach(week => {
             const visibleDays = Array.from(week.querySelectorAll('.section-container'))
                                      .filter(s => s.style.display !== 'none');
             
             if (visibleDays.length === 0) {
                 week.style.display = 'none';
-            } else {
-                // Auto-expand the week so the user sees the filtered days immediately
-                const content = week.querySelector('.week-content');
-                const arrow = week.querySelector('.week-arrow');
-                if (content) content.classList.remove('hidden');
-                if (arrow) arrow.innerText = '▼';
             }
         });
     } else {
@@ -7309,8 +7345,11 @@ async function switchView(viewId, buttonElement) {
     document.querySelectorAll('.view-btn').forEach(btn => btn.classList.remove('active'));
     buttonElement.classList.add('active');
 
-    // 2. Apply Visibility Filter
-    applyViewFilter(viewId);
+    // 2. Rebuild the schedule for this view — Look Ahead views need a
+    // narrow, specific window of weeks that Overall Schedule's full
+    // batch-from-START_DATE rendering doesn't produce (and vice versa),
+    // so this can't just show/hide whatever's already in the DOM.
+    createSections();
 
     // 3. Optional: Sync data to ensure current view is fresh
     await loadData();
