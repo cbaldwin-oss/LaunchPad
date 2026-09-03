@@ -1349,6 +1349,11 @@ body.dark-mode .phase-row {
         <span class="nav-text">Tamper Seals</span>
     </div>
 
+        <div id="nav-sealform" class="nav-item" style="display: none;" onclick="switchMainView('sealform', this)">
+        <span class="nav-icon">📋</span>
+        <span class="nav-text">Seal Form</span>
+    </div>
+
     <div class="nav-item" onclick="switchMainView('attributes', this)">
         <span class="nav-icon">🏷️</span>
         <span class="nav-text">Asset Attributes</span>
@@ -1571,6 +1576,29 @@ body.dark-mode .phase-row {
         style="width: 100%; height: 100%; border: none; margin: 0; padding: 0; display: block;"
         title="Tamper Seals">
     </iframe>
+</div>
+
+<div id="sealform-view" style="display: none; height: 100%; width: 100%; flex-direction: column;">
+    <div style="padding: 12px 20px; background: #f1f3f4; border-bottom: 1px solid #dcdcdc; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+        <strong style="color: #2e7d32; font-size: 13px;">Preview as:</strong>
+        <select id="sealform-asset-select" onchange="updateSealFormPreview()" style="padding: 6px 10px; border-radius: 6px; border: 1px solid #ccc; font-size: 13px;">
+            <option value="">Loading assets...</option>
+        </select>
+        <select id="sealform-section-select" onchange="updateSealFormPreview()" style="padding: 6px 10px; border-radius: 6px; border: 1px solid #ccc; font-size: 13px;">
+            <option value="break-request">Break Request</option>
+            <option value="break-seals">Break Seals</option>
+            <option value="work-completed">Work Completed</option>
+        </select>
+        <span style="color: #888; font-size: 12px;">This is exactly what someone scanning that asset's QR code would see — no LaunchPad login involved.</span>
+    </div>
+    <div style="flex: 1; display: flex; justify-content: center; background: #e8eaed; overflow: auto;">
+        <iframe 
+            id="sealform-iframe"
+            data-src-base="seal-form.html"
+            style="width: 480px; max-width: 100%; height: 100%; border: none; margin: 0; background: white; box-shadow: 0 0 20px rgba(0,0,0,0.1);"
+            title="Seal Form Preview">
+        </iframe>
+    </div>
 </div>
 
 <div id="attributes-view" style="display: none; height: 100%; width: 100%; background: #f8f9fa;">
@@ -2255,6 +2283,74 @@ document.addEventListener('click', (e) => {
     }
 });
 
+// ===== SEAL FORM PREVIEW (Settings/testing view — not for field use) =====
+// Lets an admin see exactly what someone scanning a real QR code would see,
+// without needing to physically print/scan anything. Loads the SAME
+// standalone seal-form.html field workers use, just embedded in an iframe
+// here with the project/asset/section wired up from the dropdowns above it.
+async function loadSealFormAssetOptions() {
+    window.sealFormAssetsLoaded = true;
+    const select = document.getElementById('sealform-asset-select');
+    if (!select || !window.LP_CONFIG || !window.LP_CONFIG.tablePrefix) return;
+
+    try {
+        const { data, error } = await _supabase
+            .from(`${window.LP_CONFIG.tablePrefix}Assets`)
+            .select('asset_name, location');
+
+        if (error || !data) {
+            select.innerHTML = '<option value="">Could not load assets</option>';
+            return;
+        }
+
+        const seen = new Set();
+        const uniqueAssets = [];
+        data.forEach(r => {
+            const key = `${r.asset_name}|||${r.location || ''}`;
+            if (r.asset_name && !seen.has(key)) {
+                seen.add(key);
+                uniqueAssets.push({ name: r.asset_name, location: r.location || '' });
+            }
+        });
+        uniqueAssets.sort((a, b) => a.name.localeCompare(b.name));
+
+        if (uniqueAssets.length === 0) {
+            select.innerHTML = '<option value="">No assets found for this project yet</option>';
+            return;
+        }
+
+        select.innerHTML = uniqueAssets.map(a =>
+            `<option value="${a.name}" data-location="${a.location}">${a.name}${a.location ? ' — ' + a.location : ''}</option>`
+        ).join('');
+
+        updateSealFormPreview();
+    } catch (e) {
+        console.error('Failed to load asset list for Seal Form preview:', e);
+        select.innerHTML = '<option value="">Error loading assets</option>';
+    }
+}
+
+function updateSealFormPreview() {
+    const assetSelect = document.getElementById('sealform-asset-select');
+    const sectionSelect = document.getElementById('sealform-section-select');
+    const iframe = document.getElementById('sealform-iframe');
+    if (!assetSelect || !sectionSelect || !iframe || !window.LP_CONFIG) return;
+
+    const assetName = assetSelect.value;
+    const location = assetSelect.selectedOptions[0] ? assetSelect.selectedOptions[0].dataset.location : '';
+    const section = sectionSelect.value;
+    if (!assetName) return;
+
+    const base = iframe.getAttribute('data-src-base');
+    const params = new URLSearchParams({
+        project: window.LP_CONFIG.projectKey,
+        assetId: assetName,
+        location: location || '',
+        section: section
+    });
+    iframe.src = `${base}?${params.toString()}`;
+}
+
 function switchMainView(viewType, btn) {
     window.__currentView = viewType;
 
@@ -2264,6 +2360,7 @@ function switchMainView(viewType, btn) {
     const equipmentView = document.getElementById('equipment-tracker-view'); 
     const bridgeView = document.getElementById('bridge-view');
     const tamperSealsView = document.getElementById('tamperseals-view');
+    const sealFormView = document.getElementById('sealform-view');
     const sett = document.getElementById('settings-view'); 
     const attrView = document.getElementById('attributes-view'); // <-- ADDED THIS
     
@@ -2289,6 +2386,7 @@ function switchMainView(viewType, btn) {
     if (equipmentView) equipmentView.style.display = 'none';
     if (bridgeView) bridgeView.style.display = 'none';
     if (tamperSealsView) tamperSealsView.style.display = 'none';
+    if (sealFormView) sealFormView.style.display = 'none';
     if (attrView) attrView.style.display = 'none'; // <-- ADDED THIS
     
     // By default, hide schedule-specific tools and show the alternate image
@@ -2323,6 +2421,10 @@ function switchMainView(viewType, btn) {
     } else if (viewType === 'tamperseals') { 
         if (tamperSealsView) tamperSealsView.style.display = 'block'; 
         if (appBody) appBody.style.width = 'calc(100% - 36px)'; 
+    } else if (viewType === 'sealform') {
+        if (sealFormView) sealFormView.style.display = 'flex';
+        if (appBody) appBody.style.width = 'calc(100% - 36px)';
+        if (!window.sealFormAssetsLoaded) loadSealFormAssetOptions();
     } else if (viewType === 'attributes') {
         if (attrView) {
             attrView.style.display = 'flex'; // Use flex for the side-by-side layout
@@ -5176,6 +5278,8 @@ async function continueStartAppAfterProject(user) {
              document.getElementById('admin-share-btn').style.display = 'flex';
              const navSettings = document.getElementById('nav-settings');
              if (navSettings) navSettings.style.display = 'flex'; 
+             const navSealForm = document.getElementById('nav-sealform');
+             if (navSealForm) navSealForm.style.display = 'flex';
          }
         
         const scheduleDataPromise = _supabase.from(T('BackEndData')).select('*');
