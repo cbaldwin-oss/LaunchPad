@@ -2358,7 +2358,13 @@ function switchMainView(viewType, btn) {
         if (oldIframeId) {
             const oldIframe = document.getElementById(oldIframeId);
             if (oldIframe && oldIframe.src) {
-                oldIframe.src = '';
+                // removeAttribute, not src='' — setting .src directly gets
+                // normalized by the browser to a resolved (truthy) URL like
+                // "about:blank", which made loadIframeIfNeeded()'s "already
+                // loaded" check think the iframe still had real content and
+                // skip rebuilding it — that's what caused the blank screen
+                // on returning to a tab.
+                oldIframe.removeAttribute('src');
                 if (window.__currentView === 'sealform') window.sealFormAssetsLoaded = false;
             }
         }
@@ -6531,8 +6537,8 @@ function renderNextWeekBatch() {
     if (!contentArea) return;
     const baseDate = new Date(START_DATE + "T00:00:00");
 
-    const existingBtn = document.getElementById('load-more-weeks-btn');
-    if (existingBtn) existingBtn.remove();
+    const existingSentinel = document.getElementById('week-load-sentinel');
+    if (existingSentinel) existingSentinel.remove();
 
     const end = Math.min(__scheduleWeeksRendered + WEEKS_PER_BATCH, WEEKS_TO_SHOW);
     for (let w = __scheduleWeeksRendered; w < end; w++) {
@@ -6547,16 +6553,26 @@ function renderNextWeekBatch() {
     if (__lastScheduleData) applyScheduleDataToDom(__lastScheduleData);
 
     if (__scheduleWeeksRendered < WEEKS_TO_SHOW) {
-        const remaining = WEEKS_TO_SHOW - __scheduleWeeksRendered;
-        const loadMoreBtn = document.createElement('button');
-        loadMoreBtn.id = 'load-more-weeks-btn';
-        loadMoreBtn.className = 'add-rows-btn';
-        loadMoreBtn.style.cssText = 'width: 100%; margin: 20px 0; padding: 14px; font-size: 15px; box-sizing: border-box;';
-        loadMoreBtn.innerText = `Load Next ${Math.min(WEEKS_PER_BATCH, remaining)} Weeks (${remaining} remaining)`;
-        loadMoreBtn.onclick = renderNextWeekBatch;
-        contentArea.appendChild(loadMoreBtn);
+        // Invisible marker at the bottom of what's rendered so far — an
+        // IntersectionObserver loads the next batch automatically once the
+        // user scrolls near it, so nothing ever shows on screen asking
+        // them to click anything.
+        const sentinel = document.createElement('div');
+        sentinel.id = 'week-load-sentinel';
+        sentinel.style.cssText = 'height: 1px;';
+        contentArea.appendChild(sentinel);
+        __weekLoadObserver.observe(sentinel);
     }
 }
+
+const __weekLoadObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+        if (entry.isIntersecting) {
+            __weekLoadObserver.unobserve(entry.target);
+            renderNextWeekBatch();
+        }
+    });
+}, { rootMargin: '800px' }); // starts loading before the sentinel is actually on screen, so it's not visible even mid-scroll
 
 let isSignUpMode = false;
 
