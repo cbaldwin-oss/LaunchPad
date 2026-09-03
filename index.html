@@ -2393,9 +2393,11 @@ function switchMainView(viewType, btn) {
     } else if (viewType === 'equipment') { 
         if (equipmentView) equipmentView.style.display = 'block'; 
         if (appBody) appBody.style.width = 'calc(100% - 36px)'; 
+        loadIframeIfNeeded('equipment-tracker-iframe');
     } else if (viewType === 'bridge') { 
         if (bridgeView) bridgeView.style.display = 'block'; 
         if (appBody) appBody.style.width = 'calc(100% - 36px)'; 
+        loadIframeIfNeeded('bridge-iframe');
         // PERF/BUGFIX: the iframe renders its initial layout while still
         // display:none (measurements are all 0 at that point), so its
         // dependency connector lines never draw until something re-triggers
@@ -2408,6 +2410,7 @@ function switchMainView(viewType, btn) {
     } else if (viewType === 'tamperseals') { 
         if (tamperSealsView) tamperSealsView.style.display = 'block'; 
         if (appBody) appBody.style.width = 'calc(100% - 36px)'; 
+        loadIframeIfNeeded('tamperseal-iframe');
     } else if (viewType === 'sealform') {
         if (sealFormView) sealFormView.style.display = 'flex';
         if (appBody) appBody.style.width = 'calc(100% - 36px)';
@@ -5152,17 +5155,22 @@ async function chooseProject(projectKey) {
 // Now that LP_CONFIG is populated, point every iframe-based module at this
 // project. Setting .src here (instead of a static src="..." in the HTML) is
 // what stops them from loading before we know which project's data to show.
-function setIframeProjectSources(userEmail) {
-    ['equipment-tracker-iframe', 'bridge-iframe', 'tamperseal-iframe'].forEach(id => {
-        const iframe = document.getElementById(id);
-        if (!iframe || iframe.src) return;
-        const base = iframe.getAttribute('data-src-base');
-        const params = new URLSearchParams({ project: window.LP_CONFIG.projectKey });
-        if (window.LP_CONFIG.googleScriptUrl) params.set('scriptUrl', window.LP_CONFIG.googleScriptUrl);
-        if (window.userRole) params.set('role', window.userRole);
-        if (userEmail) params.set('email', userEmail);
-        iframe.src = `${base}?${params.toString()}`;
-    });
+// Loads ONE iframe's src on demand, the first time its tab is actually
+// opened — not eagerly for all of them at login. Each of these iframes is
+// a full separate app (its own Supabase client, DOM, JS) — loading all
+// three (or four, with Seal Form) up front regardless of which tab the
+// person actually uses was the single biggest driver of this app's memory
+// footprint. window.__currentUserEmail is stashed once at login so this
+// can build the same params later without needing it re-passed in.
+function loadIframeIfNeeded(iframeId) {
+    const iframe = document.getElementById(iframeId);
+    if (!iframe || iframe.src) return;
+    const base = iframe.getAttribute('data-src-base');
+    const params = new URLSearchParams({ project: window.LP_CONFIG.projectKey });
+    if (window.LP_CONFIG.googleScriptUrl) params.set('scriptUrl', window.LP_CONFIG.googleScriptUrl);
+    if (window.userRole) params.set('role', window.userRole);
+    if (window.__currentUserEmail) params.set('email', window.__currentUserEmail);
+    iframe.src = `${base}?${params.toString()}`;
 }
 
 async function startApp() {
@@ -5244,16 +5252,17 @@ async function continueStartAppAfterProject(user) {
 
         // Only NOW does window.userRole actually hold a real value — this
         // has to happen after verifyPermission() resolves, both for the
-        // gate check below AND for setIframeProjectSources() further down,
-        // which reads window.userRole to build the iframe URLs. Calling it
-        // any earlier meant every iframe (Bridge, Tamper Seals, Equipment
-        // Tracker) always got role=undefined and silently fell back to
-        // 'editor' regardless of the real role.
+        // gate check below AND for loadIframeIfNeeded() (called lazily per
+        // tab, further down / in switchMainView), which reads window.userRole
+        // to build each iframe's URL. Calling it any earlier meant every
+        // iframe (Bridge, Tamper Seals, Equipment Tracker) always got
+        // role=undefined and silently fell back to 'editor' regardless of
+        // the real role.
         if (window.userRole === 'viewer') {
             document.body.classList.add('viewer-mode');
             enableViewerGate();
         }
-        setIframeProjectSources(user.email);
+        window.__currentUserEmail = user.email;
         
         if (window.isAdmin) {
             console.log("🧹 Admin detected: Cleaning up old history records...");
