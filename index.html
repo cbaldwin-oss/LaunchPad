@@ -1457,6 +1457,7 @@ body.dark-mode .phase-row {
                 <label style="display:flex; align-items:center; cursor:pointer;"><input type="checkbox" id="cfg-nav-dashboard" style="margin-right:8px; transform:scale(1.2);"> Dashboard</label>
                 <label style="display:flex; align-items:center; cursor:pointer;"><input type="checkbox" id="cfg-nav-bridge" style="margin-right:8px; transform:scale(1.2);"> The Bridge</label>
                 <label style="display:flex; align-items:center; cursor:pointer;"><input type="checkbox" id="cfg-nav-tamperseals" style="margin-right:8px; transform:scale(1.2);"> Tamper Seals</label>
+                <label style="display:flex; align-items:center; cursor:pointer;"><input type="checkbox" id="cfg-nav-sealform" style="margin-right:8px; transform:scale(1.2);"> Seal Form</label>
             </div>
         </div>
 
@@ -1582,6 +1583,7 @@ body.dark-mode .phase-row {
     <div style="padding: 12px 20px; background: #f1f3f4; border-bottom: 1px solid #dcdcdc; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
         <strong style="color: #2e7d32; font-size: 13px;">Seal Form Preview</strong>
         <span style="color: #888; font-size: 12px;">This is exactly what someone scanning this project's QR code would see — no LaunchPad login involved.</span>
+        <button class="tool-btn" style="margin-left: auto; border-color: #1565c0; color: #1565c0;" onclick="openSealFormQrModal()">🔗 QR Code</button>
     </div>
     <div style="flex: 1; display: flex; justify-content: center; background: #e8eaed; overflow: auto;">
         <iframe 
@@ -1590,6 +1592,18 @@ body.dark-mode .phase-row {
             style="width: 480px; max-width: 100%; height: 100%; border: none; margin: 0; background: white; box-shadow: 0 0 20px rgba(0,0,0,0.1);"
             title="Seal Form Preview">
         </iframe>
+    </div>
+</div>
+
+<div id="sealFormQrModal" class="modal-overlay" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 3000; align-items: center; justify-content: center;">
+    <div style="background: white; border-radius: 10px; padding: 25px; text-align: center; box-shadow: 0 4px 15px rgba(0,0,0,0.2); width: 340px; max-height: 90vh; overflow-y: auto; box-sizing: border-box;">
+        <h3 style="margin-top: 0; color: #333;">Tamper Seal Log QR Code</h3>
+        <label style="display:block; text-align:left; font-size:12px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:4px;">Form Base URL</label>
+        <input type="text" id="sealform-qr-base-url" oninput="renderSealFormQrCode()" style="width:100%; padding:10px; border:1px solid #ddd; border-radius:6px; font-size:13px; margin-bottom:16px; box-sizing:border-box;">
+        <div id="sealform-qr-code-display"></div>
+        <div style="display: flex; gap: 10px; justify-content: center; margin-top: 20px;">
+            <button class="tool-btn" style="border-color:#757575; color:#757575;" onclick="document.getElementById('sealFormQrModal').style.display='none'">Close</button>
+        </div>
     </div>
 </div>
 
@@ -1870,7 +1884,7 @@ function saveScheduleConfig() {
 }
 
 let appConfig = {
-    sidebar: { schedule: true, equipment: true, attributes: true, dashboard: true, bridge: true, tamperSeals: true }
+    sidebar: { schedule: true, equipment: true, attributes: true, dashboard: true, bridge: true, tamperSeals: true, sealForm: false }
 };
 
 function applySidebarConfig() {
@@ -1880,6 +1894,7 @@ function applySidebarConfig() {
     const navDashboard = document.querySelector('.nav-item[onclick*="dashboard"]');
     const navBridge = document.querySelector('.nav-item[onclick*="bridge"]');
     const navTamperSeals = document.querySelector('.nav-item[onclick*="tamperseals"]');
+    const navSealForm = document.getElementById('nav-sealform');
 
     if (navSchedule) navSchedule.style.display = appConfig.sidebar.schedule ? 'flex' : 'none';
     if (navEquipment) navEquipment.style.display = appConfig.sidebar.equipment ? 'flex' : 'none';
@@ -1887,6 +1902,7 @@ function applySidebarConfig() {
     if (navDashboard) navDashboard.style.display = appConfig.sidebar.dashboard ? 'flex' : 'none';
     if (navBridge) navBridge.style.display = appConfig.sidebar.bridge ? 'flex' : 'none';
     if (navTamperSeals) navTamperSeals.style.display = appConfig.sidebar.tamperSeals ? 'flex' : 'none';
+    if (navSealForm) navSealForm.style.display = appConfig.sidebar.sealForm ? 'flex' : 'none';
     
     // If the default Schedule view is hidden by the admin, auto-route the user to the first available module
     if (!appConfig.sidebar.schedule) {
@@ -2288,6 +2304,38 @@ function loadSealFormPreview() {
     const base = iframe.getAttribute('data-src-base');
     const params = new URLSearchParams({ project: window.LP_CONFIG.projectKey });
     iframe.src = `${base}?${params.toString()}`;
+}
+
+// ===== QR CODE GENERATION =====
+// One QR code per project — the field-facing form itself now handles
+// picking an action and searching for seals, so there's no need for
+// separate per-asset or per-section codes. The base URL is editable and
+// remembered per-browser, since where seal-form.html actually ends up
+// hosted isn't something this app can know on its own.
+function openSealFormQrModal() {
+    if (!window.LP_CONFIG) return;
+    const savedBase = localStorage.getItem('sealFormBaseUrl') || (window.location.origin + '/seal-form.html');
+    document.getElementById('sealform-qr-base-url').value = savedBase;
+    renderSealFormQrCode();
+    document.getElementById('sealFormQrModal').style.display = 'flex';
+}
+
+function renderSealFormQrCode() {
+    const baseUrl = document.getElementById('sealform-qr-base-url').value.trim();
+    localStorage.setItem('sealFormBaseUrl', baseUrl);
+
+    const projectKey = window.LP_CONFIG.projectKey;
+    const url = `${baseUrl}?project=${encodeURIComponent(projectKey)}`;
+    const qrImgSrc = `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(url)}`;
+
+    document.getElementById('sealform-qr-code-display').innerHTML = `
+        <img src="${qrImgSrc}" alt="QR code for this project's Tamper Seal Log" style="width:200px; height:200px;">
+        <div style="margin-top:10px; font-size:12px; color:#888; word-break:break-all;">${url}</div>
+        <div style="margin-top:12px; display:flex; gap:8px; justify-content:center;">
+            <a href="${qrImgSrc}" download="${projectKey}-tamper-seal-form.png" class="tool-btn" style="text-decoration:none; padding:6px 12px; font-size:12px;">Download</a>
+            <button class="tool-btn" style="padding:6px 12px; font-size:12px;" onclick="navigator.clipboard.writeText('${url.replace(/'/g, "\\'")}'); this.innerText='Copied!'; setTimeout(() => this.innerText='Copy Link', 1500);">Copy Link</button>
+        </div>
+    `;
 }
 
 function switchMainView(viewType, btn) {
@@ -5217,8 +5265,6 @@ async function continueStartAppAfterProject(user) {
              document.getElementById('admin-share-btn').style.display = 'flex';
              const navSettings = document.getElementById('nav-settings');
              if (navSettings) navSettings.style.display = 'flex'; 
-             const navSealForm = document.getElementById('nav-sealform');
-             if (navSealForm) navSealForm.style.display = 'flex';
          }
         
         const scheduleDataPromise = _supabase.from(T('BackEndData')).select('*');
@@ -5460,6 +5506,7 @@ function openScheduleConfigModal() {
     document.getElementById('cfg-nav-dashboard').checked = appConfig.sidebar.dashboard;
     document.getElementById('cfg-nav-bridge').checked = appConfig.sidebar.bridge;
     document.getElementById('cfg-nav-tamperseals').checked = appConfig.sidebar.tamperSeals;
+    document.getElementById('cfg-nav-sealform').checked = appConfig.sidebar.sealForm;
 }
 
 // Helper to swap array items
@@ -5486,6 +5533,7 @@ async function saveAllSettings(btn) {
     appConfig.sidebar.dashboard = document.getElementById('cfg-nav-dashboard').checked;
     appConfig.sidebar.bridge = document.getElementById('cfg-nav-bridge').checked;
     appConfig.sidebar.tamperSeals = document.getElementById('cfg-nav-tamperseals').checked;
+    appConfig.sidebar.sealForm = document.getElementById('cfg-nav-sealform').checked;
 
     // 2. Gather Schedule Config
     scheduleColConfig.forEach(col => {

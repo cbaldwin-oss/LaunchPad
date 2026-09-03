@@ -584,7 +584,6 @@ input:not([type="checkbox"]), textarea, select {
     <button id="cancelBtn" class="tool-btn" style="display:none; border-color:#757575; color:#757575; margin-right: 10px;" onclick="cancelEditMode()">Cancel Changes</button>
     
     <button id="deleteBtn" class="tool-btn" style="display:none; border-color:#d32f2f; color:#d32f2f; margin-right:10px;" onclick="deleteSelected()">Delete Selected</button>
-    <button id="qrCodeBtn" class="tool-btn" style="display:none; border-color:#1565c0; color:#1565c0; margin-right:10px;" onclick="openQrModal()">🔗 QR Code</button>
     <button id="exportBtn" class="tool-btn" onclick="showExportOptions()">Export</button>
     <span id="saveIndicator">Synced</span>
 </div>
@@ -653,18 +652,6 @@ input:not([type="checkbox"]), textarea, select {
             <button class="tool-btn" onclick="runExport('csv')">CSV (Excel)</button>
             <button class="tool-btn" style="border-color:#1976d2; color:#1976d2;" onclick="runExport('pdf')">PDF Report</button>
             <button class="tool-btn" style="border-color:#757575; color:#757575;" onclick="closeExportModal()">Cancel</button>
-        </div>
-    </div>
-</div>
-
-<div id="qrModal" class="modal-overlay">
-    <div class="modal-content" style="max-width: 420px;">
-        <h3>Tamper Seal Log QR Code</h3>
-        <label style="display:block; text-align:left; font-size:12px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:4px;">Form Base URL</label>
-        <input type="text" id="qr-base-url" oninput="renderQrCodes()" style="width:100%; padding:10px; border:1px solid #ddd; border-radius:6px; font-size:13px; margin-bottom:16px; box-sizing:border-box;">
-        <div id="qr-codes-list" style="display:flex; flex-direction:column; gap:20px; max-height:400px; overflow-y:auto;"></div>
-        <div class="modal-btns">
-            <button class="tool-btn" style="border-color:#757575; color:#757575;" onclick="document.getElementById('qrModal').style.display='none'">Close</button>
         </div>
     </div>
 </div>
@@ -854,31 +841,10 @@ let isPreviewMode = false;
 // codes). Rendered via a free QR image API, no client-side library needed.
 // The base URL is editable and remembered per-browser, since seal-form.html's
 // actual hosted location isn't something this file can know on its own.
-function openQrModal() {
-    const savedBase = localStorage.getItem('sealFormBaseUrl') || (window.location.origin + '/seal-form.html');
-    document.getElementById('qr-base-url').value = savedBase;
-    renderQrCodes();
-    document.getElementById('qrModal').style.display = 'flex';
-}
-
-function renderQrCodes() {
-    const baseUrl = document.getElementById('qr-base-url').value.trim();
-    localStorage.setItem('sealFormBaseUrl', baseUrl);
-
-    const url = `${baseUrl}?project=${encodeURIComponent(PROJECT_KEY)}`;
-    const qrImgSrc = `https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=${encodeURIComponent(url)}`;
-
-    document.getElementById('qr-codes-list').innerHTML = `
-        <div style="text-align:center; border:1px solid #eee; border-radius:8px; padding:16px;">
-            <img src="${qrImgSrc}" alt="QR code for this project's Tamper Seal Log" style="width:220px; height:220px;">
-            <div style="margin-top:12px; font-size:12px; color:#888; word-break:break-all;">${url}</div>
-            <div style="margin-top:12px; display:flex; gap:8px; justify-content:center;">
-                <a href="${qrImgSrc}" download="${PROJECT_KEY}-tamper-seal-form.png" class="tool-btn" style="text-decoration:none; padding:6px 12px; font-size:12px;">Download</a>
-                <button class="tool-btn" style="padding:6px 12px; font-size:12px;" onclick="navigator.clipboard.writeText('${url.replace(/'/g, "\\'")}'); this.innerText='Copied!'; setTimeout(() => this.innerText='Copy Link', 1500);">Copy Link</button>
-            </div>
-        </div>
-    `;
-}
+// ===== QR CODE GENERATION =====
+// Now lives in the main LaunchPad app's "Seal Form" tab instead of here —
+// keeps the field-facing form's own generation logic in one place, next
+// to the in-app preview of that same form.
 
 async function loadColumnConfig() {
     if (!TS_SCRIPT_URL) { applyColumnConfig(); return; }
@@ -1323,10 +1289,6 @@ async function initApp() {
             openColumnSettingsModal();
         }
     });
-    if (canManageColumns) {
-        const qrBtn = document.getElementById('qrCodeBtn');
-        if (qrBtn) qrBtn.style.display = 'inline-block';
-    }
     await loadColumnConfig();
 
     await fetchLookupData();
