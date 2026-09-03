@@ -18,9 +18,6 @@
             width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 16px; box-sizing: border-box; font-family: inherit;
         }
         textarea { min-height: 80px; resize: vertical; }
-        .seal-check { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid #eee; font-size: 15px; }
-        .seal-check:last-child { border-bottom: none; }
-        .seal-check input { width: 20px; height: 20px; flex-shrink: 0; }
         button.submit-btn {
             width: 100%; padding: 16px; background: #1b5e20; color: white; border: none; border-radius: 8px;
             font-size: 16px; font-weight: bold; margin-top: 20px; cursor: pointer;
@@ -31,6 +28,32 @@
         .error-box { background: #ffebee; color: #c62828; padding: 12px; border-radius: 8px; margin-top: 12px; font-size: 14px; }
         .loading { text-align: center; padding: 60px 20px; color: #999; }
         .empty-note { color: #999; text-align: center; padding: 10px 0; font-size: 14px; }
+
+        .action-btn {
+            display: block; width: 100%; padding: 20px; margin-bottom: 12px; border-radius: 10px; border: none;
+            font-size: 17px; font-weight: bold; color: white; cursor: pointer; text-align: left;
+        }
+        .action-btn .sub { display: block; font-weight: normal; font-size: 12.5px; opacity: 0.9; margin-top: 3px; }
+        .action-break-request { background: #1976d2; }
+        .action-break-seals { background: #c62828; }
+        .action-work-completed { background: #ef6c00; }
+        .back-link { display: inline-block; margin-bottom: 12px; color: #1b5e20; font-weight: 600; font-size: 14px; cursor: pointer; text-decoration: none; }
+
+        .seal-search-row { display: flex; gap: 8px; }
+        .seal-search-row input { flex: 1; }
+        .seal-search-row button {
+            padding: 0 16px; border: none; border-radius: 8px; background: #2e7d32; color: white; font-weight: bold; cursor: pointer; font-size: 20px;
+        }
+        .seal-chip-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+        .seal-chip {
+            display: flex; align-items: center; gap: 6px; background: #e8f5e9; color: #1b5e20; border: 1px solid #a5d6a7;
+            border-radius: 20px; padding: 6px 8px 6px 14px; font-size: 13px; font-weight: 600;
+        }
+        .seal-chip .remove-chip { cursor: pointer; font-size: 16px; color: #d32f2f; line-height: 1; padding: 0 4px; }
+        .new-seal-box { background: #fff3e0; border: 1px dashed #ef6c00; border-radius: 8px; padding: 14px; margin-top: 12px; }
+        .new-seal-box p { margin: 0 0 10px; font-size: 13px; color: #e65100; font-weight: 600; }
+        .new-seal-box input { margin-bottom: 8px; }
+        .new-seal-box button { width: 100%; padding: 10px; background: #ef6c00; color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; }
     </style>
 </head>
 <body>
@@ -39,28 +62,24 @@
         <p id="form-subtitle">Loading...</p>
     </div>
     <div class="container">
-        <div id="app-content" class="loading">Loading asset details...</div>
+        <div id="app-content" class="loading">Loading...</div>
     </div>
 
     <script>
-        // Same shared Supabase project every other part of LaunchPad uses.
         const SUPABASE_URL = 'https://rcnxetcomdrlxvlarqoc.supabase.co';
         const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJjbnhldGNvbWRybHh2bGFycW9jIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY0NDIyMjksImV4cCI6MjA5MjAxODIyOX0.gP37sT5OrCOVRZXekMrBZHm5mtfnr6JrC2YGflWsDQU';
         const _supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
         const params = new URLSearchParams(window.location.search);
         const PROJECT_KEY = params.get('project') || '';
-        const ASSET_NAME = params.get('assetId') || '';
-        const LOCATION = params.get('location') || '';
-        const SECTION = params.get('section') || 'break-request';
 
         function T(table) { return `${PROJECT_KEY}${table}`; }
 
-        // NOTE: eligibility filtering below matches against the SOP's
-        // default status names (see tamperseal.html's makeDefaultWorkflow).
-        // If a project renames these statuses in its Status Flow settings,
-        // this matching needs to be revisited — it isn't (yet) driven by
-        // the same dynamic workflow config the main log uses.
+        let allSeals = [];
+        let scriptUrl = '';
+        let selectedSealIds = [];
+        let newlyCreatedSeals = [];
+
         const sectionConfig = {
             'break-request': {
                 title: 'Break Request',
@@ -82,17 +101,13 @@
         async function init() {
             const content = document.getElementById('app-content');
 
-            if (!PROJECT_KEY || !ASSET_NAME) {
+            if (!PROJECT_KEY) {
                 content.innerHTML = '<div class="card"><div class="error-box">This link is missing required information. Please contact your site admin.</div></div>';
                 return;
             }
 
-            const cfg = sectionConfig[SECTION] || sectionConfig['break-request'];
-            document.getElementById('form-title').innerText = cfg.title;
-            document.getElementById('form-subtitle').innerText = `${ASSET_NAME}${LOCATION ? ' — ' + LOCATION : ''}`;
+            document.getElementById('form-subtitle').innerText = 'What would you like to do?';
 
-            // This project's own Apps Script, for the CCM notification.
-            let scriptUrl = '';
             try {
                 const { data: project } = await _supabase
                     .from('launchpad_projects')
@@ -102,41 +117,151 @@
                 scriptUrl = (project && project.google_script_url) || '';
             } catch (e) { console.warn('Could not load project config:', e); }
 
-            let query = _supabase.from(T('Assets')).select('*').eq('asset_name', ASSET_NAME);
-            if (LOCATION) query = query.eq('location', LOCATION);
-            const { data: seals, error } = await query;
+            const { data: seals, error } = await _supabase.from(T('Assets')).select('*');
+            if (error) {
+                content.innerHTML = '<div class="card"><div class="error-box">Could not load the seal log for this project. Please contact your site admin.</div></div>';
+                return;
+            }
+            allSeals = seals || [];
 
-            if (error || !seals) {
-                content.innerHTML = '<div class="card"><div class="error-box">Could not load this asset\'s seal records. Please contact your site admin.</div></div>';
+            renderActionSelect();
+        }
+
+        function renderActionSelect() {
+            document.getElementById('form-title').innerText = 'Tamper Seal Log';
+            document.getElementById('form-subtitle').innerText = 'What would you like to do?';
+            document.getElementById('app-content').innerHTML = `
+                <button class="action-btn action-break-request" onclick="selectSection('break-request')">
+                    🔒 Break Request
+                    <span class="sub">Request approval before breaking a seal</span>
+                </button>
+                <button class="action-btn action-break-seals" onclick="selectSection('break-seals')">
+                    ✂️ Break Seals
+                    <span class="sub">Log a seal you've broken after approval</span>
+                </button>
+                <button class="action-btn action-work-completed" onclick="selectSection('work-completed')">
+                    ✅ Work Completed
+                    <span class="sub">Mark work done and ready for reseal</span>
+                </button>
+            `;
+        }
+
+        function selectSection(section) {
+            selectedSealIds = [];
+            const cfg = sectionConfig[section];
+            document.getElementById('form-title').innerText = cfg.title;
+            document.getElementById('form-subtitle').innerText = cfg.subtitle;
+
+            const content = document.getElementById('app-content');
+            if (section === 'break-request') renderBreakRequestForm(content);
+            else if (section === 'break-seals') renderBreakSealsForm(content);
+            else if (section === 'work-completed') renderWorkCompletedForm(content);
+        }
+
+        function backToActionSelect() {
+            renderActionSelect();
+        }
+
+        function renderSealPickerHtml(section) {
+            const eligible = allSeals.concat(newlyCreatedSeals).filter(sectionConfig[section].eligible);
+            const datalistOptions = eligible.map(s =>
+                `<option value="${s.seal_number}">${s.asset_name || ''}${s.location ? ' — ' + s.location : ''}</option>`
+            ).join('');
+
+            return `
+                <label>Seal Number</label>
+                <div class="seal-search-row">
+                    <input type="text" id="seal-search-input" list="seal-datalist" placeholder="Type or select a seal number..." onkeydown="if(event.key==='Enter'){event.preventDefault(); handleAddSeal('${section}');}">
+                    <datalist id="seal-datalist">${datalistOptions}</datalist>
+                    <button type="button" onclick="handleAddSeal('${section}')" title="Add this seal">+</button>
+                </div>
+                <div id="new-seal-box-wrap"></div>
+                <div id="seal-chip-list" class="seal-chip-list"></div>
+            `;
+        }
+
+        function handleAddSeal(section) {
+            const input = document.getElementById('seal-search-input');
+            const value = input.value.trim();
+            if (!value) return;
+
+            const eligible = allSeals.concat(newlyCreatedSeals).filter(sectionConfig[section].eligible);
+            const match = eligible.find(s => String(s.seal_number).trim() === value);
+
+            if (match) {
+                if (!selectedSealIds.includes(match.id)) selectedSealIds.push(match.id);
+                input.value = '';
+                document.getElementById('new-seal-box-wrap').innerHTML = '';
+                renderSealChips();
                 return;
             }
 
-            const eligible = seals.filter(cfg.eligible);
-
-            if (SECTION === 'break-request') renderBreakRequestForm(content, eligible, scriptUrl);
-            else if (SECTION === 'break-seals') renderBreakSealsForm(content, eligible);
-            else if (SECTION === 'work-completed') renderWorkCompletedForm(content, eligible, scriptUrl);
+            document.getElementById('new-seal-box-wrap').innerHTML = `
+                <div class="new-seal-box">
+                    <p>Seal #${value} isn't in the log yet. Add it as a new seal?</p>
+                    <input type="text" id="new-seal-asset" placeholder="Asset Name">
+                    <input type="text" id="new-seal-location" placeholder="Location">
+                    <input type="text" id="new-seal-subarea" placeholder="Sub Area (optional)">
+                    <button type="button" onclick="createNewSeal('${value.replace(/'/g, "\\'")}')">Add Seal #${value} to This Request</button>
+                </div>
+            `;
         }
 
-        function sealCheckboxList(seals) {
-            if (seals.length === 0) {
-                return '<p class="empty-note">No matching seals found for this asset right now.</p>';
+        async function createNewSeal(sealNumber) {
+            const assetName = document.getElementById('new-seal-asset').value.trim();
+            const location = document.getElementById('new-seal-location').value.trim();
+            const subArea = document.getElementById('new-seal-subarea').value.trim();
+
+            if (!assetName) {
+                alert('Please enter an asset name for this seal.');
+                return;
             }
-            return seals.map(s => `
-                <label class="seal-check">
-                    <input type="checkbox" name="seal" value="${s.id}">
-                    Seal #${s.seal_number || '(unknown)'}${s.sub_area ? ' — ' + s.sub_area : ''}
-                </label>
-            `).join('');
+
+            try {
+                const { data, error } = await _supabase.from(T('Assets')).insert([{
+                    asset_name: assetName,
+                    location: location,
+                    sub_area: subArea,
+                    seal_number: sealNumber,
+                    status: 'Intact',
+                    inspection_date: new Date().toISOString().split('T')[0]
+                }]).select();
+
+                if (error || !data || data.length === 0) throw error || new Error('Insert failed');
+
+                const newSeal = data[0];
+                newlyCreatedSeals.push(newSeal);
+                selectedSealIds.push(newSeal.id);
+                document.getElementById('seal-search-input').value = '';
+                document.getElementById('new-seal-box-wrap').innerHTML = '';
+                renderSealChips();
+            } catch (e) {
+                alert('Could not add this seal: ' + e.message);
+            }
         }
 
-        // ===== Section 8.1: Break Request =====
-        function renderBreakRequestForm(content, eligible, scriptUrl) {
+        function renderSealChips() {
+            const wrap = document.getElementById('seal-chip-list');
+            if (!wrap) return;
+            const allKnown = allSeals.concat(newlyCreatedSeals);
+            wrap.innerHTML = selectedSealIds.map(id => {
+                const s = allKnown.find(x => x.id === id);
+                if (!s) return '';
+                return `<div class="seal-chip">Seal #${s.seal_number}<span class="remove-chip" onclick="removeSelectedSeal(${id})">&times;</span></div>`;
+            }).join('');
+        }
+
+        function removeSelectedSeal(id) {
+            selectedSealIds = selectedSealIds.filter(x => x !== id);
+            renderSealChips();
+        }
+
+        function renderBreakRequestForm(content) {
             content.innerHTML = `
+                <a class="back-link" onclick="backToActionSelect()">&larr; Back</a>
                 <div class="card">
-                    <p>Select the seal(s) you're requesting to break, and why. The Chain of Custody Manager will be notified automatically — do not break any seal before it is approved.</p>
-                    <label>Seal(s) to Break</label>
-                    ${sealCheckboxList(eligible)}
+                    <p>Search for the seal(s) you're requesting to break, and why. The Chain of Custody Manager will be notified automatically — do not break any seal before it is approved.</p>
+                    ${renderSealPickerHtml('break-request')}
                     <label>Reason for Request</label>
                     <textarea id="reason" placeholder="e.g. Scheduled testing, issue repair, settings change..."></textarea>
                     <label>Your Name</label>
@@ -145,14 +270,13 @@
                     <input type="text" id="reqCompany">
                     <label>Your Email</label>
                     <input type="email" id="reqEmail">
-                    <button class="submit-btn" onclick="submitBreakRequest('${scriptUrl}')">Submit Break Request</button>
+                    <button class="submit-btn" onclick="submitBreakRequest()">Submit Break Request</button>
                     <div id="form-error"></div>
                 </div>
             `;
         }
 
-        async function submitBreakRequest(scriptUrl) {
-            const checked = Array.from(document.querySelectorAll('input[name="seal"]:checked')).map(el => Number(el.value));
+        async function submitBreakRequest() {
             const reason = document.getElementById('reason').value.trim();
             const name = document.getElementById('reqName').value.trim();
             const company = document.getElementById('reqCompany').value.trim();
@@ -160,14 +284,17 @@
             const errorEl = document.getElementById('form-error');
             errorEl.innerHTML = '';
 
-            if (checked.length === 0 || !reason || !name || !email) {
-                errorEl.innerHTML = '<div class="error-box">Please select at least one seal and fill in all fields.</div>';
+            if (selectedSealIds.length === 0 || !reason || !name || !email) {
+                errorEl.innerHTML = '<div class="error-box">Please add at least one seal and fill in all fields.</div>';
                 return;
             }
 
             try {
-                const { data: sealRows } = await _supabase.from(T('Assets')).select('seal_number').in('id', checked);
-                const sealNumbers = (sealRows || []).map(s => s.seal_number).join(', ');
+                const allKnown = allSeals.concat(newlyCreatedSeals);
+                const selectedSeals = selectedSealIds.map(id => allKnown.find(s => s.id === id)).filter(Boolean);
+                const sealNumbers = selectedSeals.map(s => s.seal_number).join(', ');
+                const assetName = selectedSeals[0] ? selectedSeals[0].asset_name : '';
+                const location = selectedSeals[0] ? selectedSeals[0].location : '';
 
                 await _supabase.from(T('Assets'))
                     .update({
@@ -177,20 +304,18 @@
                         requestor_company: company,
                         requestor_email: email
                     })
-                    .in('id', checked);
+                    .in('id', selectedSealIds);
 
                 await _supabase.from(T('BreakRequests')).insert([{
-                    asset_name: ASSET_NAME, location: LOCATION,
+                    asset_name: assetName, location: location,
                     requested_seal_numbers: sealNumbers,
                     reason, requestor_name: name, requestor_company: company, requestor_email: email,
                     ccm_decision: 'Pending'
                 }]);
 
-                // Best-effort notification — the request itself is already
-                // saved above, so a failure here shouldn't read as an error.
                 if (scriptUrl) {
                     try {
-                        await fetch(`${scriptUrl}?action=notifyCCM&project=${encodeURIComponent(PROJECT_KEY)}&asset=${encodeURIComponent(ASSET_NAME)}&seals=${encodeURIComponent(sealNumbers)}&requestor=${encodeURIComponent(name)}&requestorEmail=${encodeURIComponent(email)}`);
+                        await fetch(`${scriptUrl}?action=notifyCCM&project=${encodeURIComponent(PROJECT_KEY)}&asset=${encodeURIComponent(assetName)}&seals=${encodeURIComponent(sealNumbers)}&requestor=${encodeURIComponent(name)}&requestorEmail=${encodeURIComponent(email)}`);
                     } catch (e) { console.warn('CCM notification failed:', e); }
                 }
 
@@ -200,13 +325,12 @@
             }
         }
 
-        // ===== Section 8.2: Break Seals =====
-        function renderBreakSealsForm(content, eligible) {
+        function renderBreakSealsForm(content) {
             content.innerHTML = `
+                <a class="back-link" onclick="backToActionSelect()">&larr; Back</a>
                 <div class="card">
                     <p><strong>Only break seals the CCM has approved.</strong> Breaking a seal without an approval on file is treated as an unauthorized breach and triggers mandatory LOTO and re-inspection.</p>
-                    <label>Approved Seal(s) You Are Breaking</label>
-                    ${sealCheckboxList(eligible)}
+                    ${renderSealPickerHtml('break-seals')}
                     <label>Break Date</label>
                     <input type="date" id="breakDate" value="${new Date().toISOString().split('T')[0]}">
                     <label>Name of Person Removing the Seal</label>
@@ -222,7 +346,6 @@
         }
 
         async function submitBreakSeals() {
-            const checked = Array.from(document.querySelectorAll('input[name="seal"]:checked')).map(el => Number(el.value));
             const breakDate = document.getElementById('breakDate').value;
             const removerName = document.getElementById('removerName').value.trim();
             const removerCompany = document.getElementById('removerCompany').value.trim();
@@ -230,8 +353,8 @@
             const errorEl = document.getElementById('form-error');
             errorEl.innerHTML = '';
 
-            if (checked.length === 0 || !removerName || !breakReason) {
-                errorEl.innerHTML = '<div class="error-box">Please select at least one seal and fill in all fields.</div>';
+            if (selectedSealIds.length === 0 || !removerName || !breakReason) {
+                errorEl.innerHTML = '<div class="error-box">Please add at least one seal and fill in all fields.</div>';
                 return;
             }
 
@@ -243,7 +366,7 @@
                         responsible_party: `${removerName}${removerCompany ? ' (' + removerCompany + ')' : ''}`,
                         break_reason: breakReason
                     })
-                    .in('id', checked);
+                    .in('id', selectedSealIds);
 
                 showSuccess('Seal Break Logged', 'The log has been updated. Use the Work Completed form once your work behind the seal is finished.');
             } catch (e) {
@@ -251,40 +374,42 @@
             }
         }
 
-        // ===== Section 8.3: Work Completed – Ready for Reseal =====
-        function renderWorkCompletedForm(content, eligible, scriptUrl) {
+        function renderWorkCompletedForm(content) {
             content.innerHTML = `
+                <a class="back-link" onclick="backToActionSelect()">&larr; Back</a>
                 <div class="card">
                     <p>Let the CxA/CCM know these seals are ready to be replaced.</p>
-                    <label>Seal(s) Ready for Reseal</label>
-                    ${sealCheckboxList(eligible)}
-                    <button class="submit-btn" onclick="submitWorkCompleted('${scriptUrl}')">Notify Ready for Reseal</button>
+                    ${renderSealPickerHtml('work-completed')}
+                    <button class="submit-btn" onclick="submitWorkCompleted()">Notify Ready for Reseal</button>
                     <div id="form-error"></div>
                 </div>
             `;
         }
 
-        async function submitWorkCompleted(scriptUrl) {
-            const checked = Array.from(document.querySelectorAll('input[name="seal"]:checked')).map(el => Number(el.value));
+        async function submitWorkCompleted() {
             const errorEl = document.getElementById('form-error');
             errorEl.innerHTML = '';
 
-            if (checked.length === 0) {
-                errorEl.innerHTML = '<div class="error-box">Please select at least one seal.</div>';
+            if (selectedSealIds.length === 0) {
+                errorEl.innerHTML = '<div class="error-box">Please add at least one seal.</div>';
                 return;
             }
 
             try {
+                const allKnown = allSeals.concat(newlyCreatedSeals);
+                const selectedSeals = selectedSealIds.map(id => allKnown.find(s => s.id === id)).filter(Boolean);
+                const assetName = selectedSeals[0] ? selectedSeals[0].asset_name : '';
+
                 await _supabase.from(T('Assets'))
                     .update({
                         status: 'Ready for Reseal',
                         ready_for_reseal_date: new Date().toISOString().split('T')[0]
                     })
-                    .in('id', checked);
+                    .in('id', selectedSealIds);
 
                 if (scriptUrl) {
                     try {
-                        await fetch(`${scriptUrl}?action=notifyCCM&project=${encodeURIComponent(PROJECT_KEY)}&asset=${encodeURIComponent(ASSET_NAME)}&event=ready_for_reseal`);
+                        await fetch(`${scriptUrl}?action=notifyCCM&project=${encodeURIComponent(PROJECT_KEY)}&asset=${encodeURIComponent(assetName)}&event=ready_for_reseal`);
                     } catch (e) { console.warn('Notification failed:', e); }
                 }
 
@@ -301,6 +426,7 @@
                     <h2 style="margin:10px 0 6px;">${title}</h2>
                     <p>${message}</p>
                 </div>
+                <a class="back-link" onclick="renderActionSelect()">&larr; Start another request</a>
             `;
         }
 

@@ -584,6 +584,7 @@ input:not([type="checkbox"]), textarea, select {
     <button id="cancelBtn" class="tool-btn" style="display:none; border-color:#757575; color:#757575; margin-right: 10px;" onclick="cancelEditMode()">Cancel Changes</button>
     
     <button id="deleteBtn" class="tool-btn" style="display:none; border-color:#d32f2f; color:#d32f2f; margin-right:10px;" onclick="deleteSelected()">Delete Selected</button>
+    <button id="qrCodeBtn" class="tool-btn" style="display:none; border-color:#1565c0; color:#1565c0; margin-right:10px;" onclick="openQrModal()">🔗 QR Code</button>
     <button id="exportBtn" class="tool-btn" onclick="showExportOptions()">Export</button>
     <span id="saveIndicator">Synced</span>
 </div>
@@ -658,7 +659,7 @@ input:not([type="checkbox"]), textarea, select {
 
 <div id="qrModal" class="modal-overlay">
     <div class="modal-content" style="max-width: 420px;">
-        <h3 id="qr-modal-title">QR Codes</h3>
+        <h3>Tamper Seal Log QR Code</h3>
         <label style="display:block; text-align:left; font-size:12px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:4px;">Form Base URL</label>
         <input type="text" id="qr-base-url" oninput="renderQrCodes()" style="width:100%; padding:10px; border:1px solid #ddd; border-radius:6px; font-size:13px; margin-bottom:16px; box-sizing:border-box;">
         <div id="qr-codes-list" style="display:flex; flex-direction:column; gap:20px; max-height:400px; overflow-y:auto;"></div>
@@ -847,21 +848,15 @@ let isPreviewMode = false;
 // the header and every row, so CSS `order` reorders columns uniformly
 // across all of them at once without touching the row-rendering logic.
 // ===== QR CODE GENERATION =====
-// Builds the three field-facing form links for a given asset (Break
-// Request / Break Seals / Work Completed) and renders each as a QR image
-// via a free QR image API — no client-side QR library needed. The base
-// URL is editable and remembered per-browser, since seal-form.html's
+// Builds the single field-facing form link for this project (the form
+// itself now handles picking an action and searching for seals, so one
+// QR code per site is all that's needed — no per-asset or per-section
+// codes). Rendered via a free QR image API, no client-side library needed.
+// The base URL is editable and remembered per-browser, since seal-form.html's
 // actual hosted location isn't something this file can know on its own.
-let qrCurrentAsset = '', qrCurrentLocation = '';
-
-function openQrModal(assetName, location) {
-    qrCurrentAsset = assetName;
-    qrCurrentLocation = location;
-    document.getElementById('qr-modal-title').innerText = `QR Codes — ${assetName}`;
-
+function openQrModal() {
     const savedBase = localStorage.getItem('sealFormBaseUrl') || (window.location.origin + '/seal-form.html');
     document.getElementById('qr-base-url').value = savedBase;
-
     renderQrCodes();
     document.getElementById('qrModal').style.display = 'flex';
 }
@@ -870,27 +865,19 @@ function renderQrCodes() {
     const baseUrl = document.getElementById('qr-base-url').value.trim();
     localStorage.setItem('sealFormBaseUrl', baseUrl);
 
-    const sections = [
-        { key: 'break-request', label: 'Break Request' },
-        { key: 'break-seals', label: 'Break Seals' },
-        { key: 'work-completed', label: 'Work Completed' }
-    ];
+    const url = `${baseUrl}?project=${encodeURIComponent(PROJECT_KEY)}`;
+    const qrImgSrc = `https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=${encodeURIComponent(url)}`;
 
-    const list = document.getElementById('qr-codes-list');
-    list.innerHTML = sections.map(sec => {
-        const url = `${baseUrl}?project=${encodeURIComponent(PROJECT_KEY)}&assetId=${encodeURIComponent(qrCurrentAsset)}&location=${encodeURIComponent(qrCurrentLocation)}&section=${sec.key}`;
-        const qrImgSrc = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(url)}`;
-        return `
-            <div style="text-align:center; border:1px solid #eee; border-radius:8px; padding:14px;">
-                <div style="font-weight:700; font-size:14px; margin-bottom:10px;">${sec.label}</div>
-                <img src="${qrImgSrc}" alt="QR code for ${sec.label}" style="width:180px; height:180px;">
-                <div style="margin-top:10px; display:flex; gap:8px; justify-content:center;">
-                    <a href="${qrImgSrc}" download="${qrCurrentAsset}-${sec.key}.png" class="tool-btn" style="text-decoration:none; padding:6px 12px; font-size:12px;">Download</a>
-                    <button class="tool-btn" style="padding:6px 12px; font-size:12px;" onclick="navigator.clipboard.writeText('${url.replace(/'/g, "\\'")}'); this.innerText='Copied!'; setTimeout(() => this.innerText='Copy Link', 1500);">Copy Link</button>
-                </div>
+    document.getElementById('qr-codes-list').innerHTML = `
+        <div style="text-align:center; border:1px solid #eee; border-radius:8px; padding:16px;">
+            <img src="${qrImgSrc}" alt="QR code for this project's Tamper Seal Log" style="width:220px; height:220px;">
+            <div style="margin-top:12px; font-size:12px; color:#888; word-break:break-all;">${url}</div>
+            <div style="margin-top:12px; display:flex; gap:8px; justify-content:center;">
+                <a href="${qrImgSrc}" download="${PROJECT_KEY}-tamper-seal-form.png" class="tool-btn" style="text-decoration:none; padding:6px 12px; font-size:12px;">Download</a>
+                <button class="tool-btn" style="padding:6px 12px; font-size:12px;" onclick="navigator.clipboard.writeText('${url.replace(/'/g, "\\'")}'); this.innerText='Copied!'; setTimeout(() => this.innerText='Copy Link', 1500);">Copy Link</button>
             </div>
-        `;
-    }).join('');
+        </div>
+    `;
 }
 
 async function loadColumnConfig() {
@@ -1336,6 +1323,10 @@ async function initApp() {
             openColumnSettingsModal();
         }
     });
+    if (canManageColumns) {
+        const qrBtn = document.getElementById('qrCodeBtn');
+        if (qrBtn) qrBtn.style.display = 'inline-block';
+    }
     await loadColumnConfig();
 
     await fetchLookupData();
@@ -1973,11 +1964,7 @@ function prevMatch() {
 
             assetDiv.innerHTML = `
                 <div class="asset-header" onclick="toggleAsset(this, '${assetName}')">
-                    <span>Asset: ${assetName}</span>
-                    <span style="display:flex; align-items:center; gap:10px;">
-                        ${canManageColumns ? `<span onclick="event.stopPropagation(); openQrModal('${assetName.replace(/'/g, "\\'")}', '${areaName.replace(/'/g, "\\'")}')" title="Generate QR codes for this asset" style="font-size:14px; cursor:pointer; opacity:0.8;">🔗 QR</span>` : ''}
-                        <span class="arrow">${arrow}</span>
-                    </span>
+                    <span>Asset: ${assetName}</span><span class="arrow">${arrow}</span>
                 </div>
                 <div class="rows-container ${isRowsHidden}" data-loaded="false" data-asset-name="${assetName}"></div>`;
             

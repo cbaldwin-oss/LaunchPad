@@ -1580,16 +1580,8 @@ body.dark-mode .phase-row {
 
 <div id="sealform-view" style="display: none; height: 100%; width: 100%; flex-direction: column;">
     <div style="padding: 12px 20px; background: #f1f3f4; border-bottom: 1px solid #dcdcdc; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
-        <strong style="color: #2e7d32; font-size: 13px;">Preview as:</strong>
-        <select id="sealform-asset-select" onchange="updateSealFormPreview()" style="padding: 6px 10px; border-radius: 6px; border: 1px solid #ccc; font-size: 13px;">
-            <option value="">Loading assets...</option>
-        </select>
-        <select id="sealform-section-select" onchange="updateSealFormPreview()" style="padding: 6px 10px; border-radius: 6px; border: 1px solid #ccc; font-size: 13px;">
-            <option value="break-request">Break Request</option>
-            <option value="break-seals">Break Seals</option>
-            <option value="work-completed">Work Completed</option>
-        </select>
-        <span style="color: #888; font-size: 12px;">This is exactly what someone scanning that asset's QR code would see — no LaunchPad login involved.</span>
+        <strong style="color: #2e7d32; font-size: 13px;">Seal Form Preview</strong>
+        <span style="color: #888; font-size: 12px;">This is exactly what someone scanning this project's QR code would see — no LaunchPad login involved.</span>
     </div>
     <div style="flex: 1; display: flex; justify-content: center; background: #e8eaed; overflow: auto;">
         <iframe 
@@ -2288,66 +2280,13 @@ document.addEventListener('click', (e) => {
 // without needing to physically print/scan anything. Loads the SAME
 // standalone seal-form.html field workers use, just embedded in an iframe
 // here with the project/asset/section wired up from the dropdowns above it.
-async function loadSealFormAssetOptions() {
+function loadSealFormPreview() {
     window.sealFormAssetsLoaded = true;
-    const select = document.getElementById('sealform-asset-select');
-    if (!select || !window.LP_CONFIG || !window.LP_CONFIG.tablePrefix) return;
-
-    try {
-        const { data, error } = await _supabase
-            .from(`${window.LP_CONFIG.tablePrefix}Assets`)
-            .select('asset_name, location');
-
-        if (error || !data) {
-            select.innerHTML = '<option value="">Could not load assets</option>';
-            return;
-        }
-
-        const seen = new Set();
-        const uniqueAssets = [];
-        data.forEach(r => {
-            const key = `${r.asset_name}|||${r.location || ''}`;
-            if (r.asset_name && !seen.has(key)) {
-                seen.add(key);
-                uniqueAssets.push({ name: r.asset_name, location: r.location || '' });
-            }
-        });
-        uniqueAssets.sort((a, b) => a.name.localeCompare(b.name));
-
-        if (uniqueAssets.length === 0) {
-            select.innerHTML = '<option value="">No assets found for this project yet</option>';
-            return;
-        }
-
-        select.innerHTML = uniqueAssets.map(a =>
-            `<option value="${a.name}" data-location="${a.location}">${a.name}${a.location ? ' — ' + a.location : ''}</option>`
-        ).join('');
-
-        updateSealFormPreview();
-    } catch (e) {
-        console.error('Failed to load asset list for Seal Form preview:', e);
-        select.innerHTML = '<option value="">Error loading assets</option>';
-    }
-}
-
-function updateSealFormPreview() {
-    const assetSelect = document.getElementById('sealform-asset-select');
-    const sectionSelect = document.getElementById('sealform-section-select');
     const iframe = document.getElementById('sealform-iframe');
-    if (!assetSelect || !sectionSelect || !iframe || !window.LP_CONFIG) return;
-
-    const assetName = assetSelect.value;
-    const location = assetSelect.selectedOptions[0] ? assetSelect.selectedOptions[0].dataset.location : '';
-    const section = sectionSelect.value;
-    if (!assetName) return;
+    if (!iframe || !window.LP_CONFIG) return;
 
     const base = iframe.getAttribute('data-src-base');
-    const params = new URLSearchParams({
-        project: window.LP_CONFIG.projectKey,
-        assetId: assetName,
-        location: location || '',
-        section: section
-    });
+    const params = new URLSearchParams({ project: window.LP_CONFIG.projectKey });
     iframe.src = `${base}?${params.toString()}`;
 }
 
@@ -2424,7 +2363,7 @@ function switchMainView(viewType, btn) {
     } else if (viewType === 'sealform') {
         if (sealFormView) sealFormView.style.display = 'flex';
         if (appBody) appBody.style.width = 'calc(100% - 36px)';
-        if (!window.sealFormAssetsLoaded) loadSealFormAssetOptions();
+        if (!window.sealFormAssetsLoaded) loadSealFormPreview();
     } else if (viewType === 'attributes') {
         if (attrView) {
             attrView.style.display = 'flex'; // Use flex for the side-by-side layout
