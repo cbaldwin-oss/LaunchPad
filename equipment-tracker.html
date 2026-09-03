@@ -562,6 +562,7 @@ body.dark-mode .frozen-group-bar .frozen-combined {
         
         <div class="subheader-right">
             <div style="font-size: 13px; color: #2e7d32; font-weight: bold; margin-right: 5px; white-space: nowrap;" id="sync-status">Connecting Backend...</div>
+            <button onclick="fetchTrackerData(false)" class="tool-btn" style="border-color:#2e7d32; color:#2e7d32; margin-right: 5px;" title="Reload the latest data from the backend">🔄 Refresh Data</button>
             <button id="setup-config-btn" class="setup-btn" style="display: none;" onclick="openSettingsModal()">⚙️ Setup Config</button>
             <button onclick="clearAllFilters()" class="clear-filters-btn">
                 <span style="font-size: 14px;">🧹</span> Remove Filters
@@ -736,7 +737,7 @@ body.dark-mode .frozen-group-bar .frozen-combined {
                         <div id="cl-closed-list"></div>
                         <button class="btn btn-add" onclick="addStatusRow('cl-closed-list', '#c8e6c9')">+ Add Status</button>
                     </div>
-                    <div class="status-group" id="cl-cxcomplete-group" style="display: none; border-top: 2px dashed #4caf50; padding-top: 15px;">
+                    <div class="status-group" id="cl-cxcomplete-group">
                         <h4>Cx Complete</h4>
                         <div id="cl-cxcomplete-list"></div>
                         <button class="btn btn-add" onclick="addStatusRow('cl-cxcomplete-list', '#81c784')">+ Add Status</button>
@@ -1365,7 +1366,7 @@ async function fetchTrackerData(isSilent = false) {
             const fingerprint = JSON.stringify({ rows, config: payload.config || null });
             if (isSilent && window.__lastTrackerFingerprint === fingerprint) {
                 if (document.getElementById('global-search-input').value.trim() === '') {
-                    document.getElementById('sync-status').innerText = 'Live Sync Active 🟢';
+                    document.getElementById('sync-status').innerText = 'Up to date ✓';
                 }
                 return;
             }
@@ -1550,7 +1551,7 @@ async function fetchTrackerData(isSilent = false) {
             
             // Only update this label if the user hasn't typed in the search bar
             if (document.getElementById('global-search-input').value.trim() === '') {
-                document.getElementById('sync-status').innerText = 'Live Sync Active 🟢';
+                document.getElementById('sync-status').innerText = 'Up to date ✓';
             }
             
             if (!isSilent) {
@@ -1574,19 +1575,8 @@ window.onload = function() {
         // 1. Boot up the tracker data grid normally
         fetchTrackerData(false); 
         
-        // 2. NEW: Silently pull the latest equipment data every 60 seconds!
-        // PERF FIX: skip the tick entirely while the tab is hidden/backgrounded
-        // (Page Visibility API) — no point polling and re-rendering a view
-        // nobody's looking at. Catch up with one fresh pull as soon as the
-        // tab becomes visible again so data isn't stale.
-        setInterval(() => {
-            if (document.hidden) return;
-            console.log("♻️ Background Poll: Fetching latest equipment matrix...");
-            fetchTrackerData(true);
-        }, 60000);
-        document.addEventListener('visibilitychange', () => {
-            if (!document.hidden) fetchTrackerData(true);
-        });
+        // Automatic background polling removed — data now refreshes only
+        // on initial load or when the user clicks "Refresh Data" above.
         
         // 3. Ask the parent window for admin status using a secure message
         if (window.parent) {
@@ -1634,15 +1624,6 @@ window.onload = function() {
             document.getElementById('cust-iss-status').value = globalConfig.customHeaders.issStatus;
         }
         document.getElementById('show-l2-gate').checked = globalConfig.showL2Gate !== false;
-
-        // Cx Complete only makes sense when L2 has no Gate checklist to rely
-        // on for granular tracking — show/hide the section to match, both on
-        // open and live as the admin toggles the checkbox.
-        const cxGroup = document.getElementById('cl-cxcomplete-group');
-        cxGroup.style.display = (globalConfig.showL2Gate === false) ? 'block' : 'none';
-        document.getElementById('show-l2-gate').addEventListener('change', function() {
-            cxGroup.style.display = this.checked ? 'none' : 'block';
-        });
 
         document.getElementById('show-l3-gate').checked = globalConfig.showL3Gate !== false;
         document.getElementById('show-l4-gate').checked = globalConfig.showL4Gate !== false;
