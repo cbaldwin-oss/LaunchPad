@@ -2338,7 +2338,31 @@ function renderSealFormQrCode() {
     `;
 }
 
+const IFRAME_VIEW_MAP = {
+    equipment: 'equipment-tracker-iframe',
+    bridge: 'bridge-iframe',
+    tamperseals: 'tamperseal-iframe',
+    sealform: 'sealform-iframe'
+};
+
 function switchMainView(viewType, btn) {
+    // Tear down whichever iframe-based tab is being LEFT (not the one being
+    // entered) — resetting its src to '' fully destroys that iframe's JS
+    // context, closing its own Supabase client, any polling intervals, and
+    // realtime subscriptions, rather than letting it keep running invisibly
+    // in the background for the rest of the session. loadIframeIfNeeded()
+    // already re-checks iframe.src truthiness, so an emptied src correctly
+    // triggers a full rebuild next time that tab is opened.
+    if (window.__currentView && window.__currentView !== viewType) {
+        const oldIframeId = IFRAME_VIEW_MAP[window.__currentView];
+        if (oldIframeId) {
+            const oldIframe = document.getElementById(oldIframeId);
+            if (oldIframe && oldIframe.src) {
+                oldIframe.src = '';
+                if (window.__currentView === 'sealform') window.sealFormAssetsLoaded = false;
+            }
+        }
+    }
     window.__currentView = viewType;
 
     // 1. Target the main view containers
@@ -6404,93 +6428,133 @@ function saveCell(cell, value, colIndex, isImmediate = false) {
 
 const contentArea = document.getElementById('main-content-area');
 
+// Renders in batches instead of all WEEKS_TO_SHOW at once — a project
+// configured for a year-plus duration was building hundreds of week/day
+// shells (each with its own click handlers) before anyone had scrolled
+// anywhere near them. Only the first batch is built on load; the rest
+// build on demand via the button at the bottom.
+const WEEKS_PER_BATCH = 12;
+let __scheduleWeeksRendered = 0;
+
+function createWeekElement(baseDate, w) {
+    const weekDiv = document.createElement('div');
+    weekDiv.className = 'week-container';
+
+    const weekStart = new Date(baseDate);
+    weekStart.setDate(baseDate.getDate() + (w * 7));
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekStart.getDate() + 6);
+
+    const weekHeader = document.createElement('div');
+    weekHeader.className = 'week-header';
+    weekHeader.innerHTML = `
+        <span>Week of ${weekStart.toLocaleDateString([], {month:'short', day:'numeric'})} - ${weekEnd.toLocaleDateString([], {month:'short', day:'numeric'})}</span>
+        <span class="week-arrow">▼</span>
+    `;
+
+    const weekContent = document.createElement('div');
+    weekContent.className = 'week-content';
+
+    weekHeader.onclick = () => {
+        const isHidden = weekContent.classList.toggle('hidden');
+        weekHeader.querySelector('.week-arrow').innerText = isHidden ? '▶' : '▼';
+    };
+
+    for (let d = 0; d < 7; d++) {
+        const sectionDate = new Date(weekStart);
+        sectionDate.setDate(weekStart.getDate() + d);
+        const dateId = sectionDate.toISOString().split('T')[0];
+        const dateString = sectionDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+
+        const section = document.createElement('div');
+        section.className = 'section-container';
+
+        const header = document.createElement('div');
+        header.className = 'date-header';
+        header.innerHTML = `<span>${dateString}</span> <span class="arrow">▼</span>`;
+        
+        const rowsDiv = document.createElement('div');
+        rowsDiv.className = 'rows-container';
+        rowsDiv.id = `rows-${dateId}`;
+
+        header.onclick = (e) => {
+            e.stopPropagation();
+            
+            // NEW: If rows don't exist yet, build them now
+            if (rowsDiv.innerHTML === '') {
+                const addBtn = createAddRowsButton(rowsDiv, dateId);
+                addRowsToContainer(rowsDiv, dateId, addBtn);
+            }
+
+            const isHidden = rowsDiv.classList.toggle('hidden');
+            header.querySelector('.arrow').innerText = isHidden ? '▶' : '▼';
+        };
+
+        const addBtn = document.createElement('button');
+        addBtn.className = 'add-rows-btn';
+        addBtn.innerText = "+ Add 5 Rows";
+
+        addBtn.onclick = (e) => {
+            e.stopPropagation();
+            // Reveal rows in numerical order (0-19)
+            const hiddenRows = Array.from(rowsDiv.querySelectorAll('.cell-row'))
+                                    .filter(r => r.style.display === 'none');
+            
+            for (let i = 0; i < 5 && i < hiddenRows.length; i++) {
+                hiddenRows[i].style.display = 'flex';
+            }
+
+            if (hiddenRows.length <= 5) addBtn.style.display = 'none';
+        };
+
+        section.appendChild(header);
+        section.appendChild(rowsDiv);
+        weekContent.appendChild(section);
+    }
+
+    weekDiv.appendChild(weekHeader);
+    weekDiv.appendChild(weekContent);
+    return weekDiv;
+}
+
 function createSections() {
     const contentArea = document.getElementById('main-content-area');
     if (!contentArea) return;
-    
-    contentArea.innerHTML = ''; 
+
+    contentArea.innerHTML = '';
+    __scheduleWeeksRendered = 0;
+    renderNextWeekBatch();
+}
+
+function renderNextWeekBatch() {
+    const contentArea = document.getElementById('main-content-area');
+    if (!contentArea) return;
     const baseDate = new Date(START_DATE + "T00:00:00");
 
-    for (let w = 0; w < WEEKS_TO_SHOW; w++) {
-        const weekDiv = document.createElement('div');
-        weekDiv.className = 'week-container';
+    const existingBtn = document.getElementById('load-more-weeks-btn');
+    if (existingBtn) existingBtn.remove();
 
-        const weekStart = new Date(baseDate);
-        weekStart.setDate(baseDate.getDate() + (w * 7));
-        const weekEnd = new Date(weekStart);
-        weekEnd.setDate(weekStart.getDate() + 6);
-
-        const weekHeader = document.createElement('div');
-        weekHeader.className = 'week-header';
-        weekHeader.innerHTML = `
-            <span>Week of ${weekStart.toLocaleDateString([], {month:'short', day:'numeric'})} - ${weekEnd.toLocaleDateString([], {month:'short', day:'numeric'})}</span>
-            <span class="week-arrow">▼</span>
-        `;
-
-        const weekContent = document.createElement('div');
-        weekContent.className = 'week-content';
-
-        weekHeader.onclick = () => {
-            const isHidden = weekContent.classList.toggle('hidden');
-            weekHeader.querySelector('.week-arrow').innerText = isHidden ? '▶' : '▼';
-        };
-
-        for (let d = 0; d < 7; d++) {
-            const sectionDate = new Date(weekStart);
-            sectionDate.setDate(weekStart.getDate() + d);
-            const dateId = sectionDate.toISOString().split('T')[0];
-            const dateString = sectionDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
-
-            const section = document.createElement('div');
-            section.className = 'section-container';
-
-            const header = document.createElement('div');
-            header.className = 'date-header';
-            header.innerHTML = `<span>${dateString}</span> <span class="arrow">▼</span>`;
-            
-            const rowsDiv = document.createElement('div');
-            rowsDiv.className = 'rows-container';
-            rowsDiv.id = `rows-${dateId}`;
-
-            header.onclick = (e) => {
-                e.stopPropagation();
-                
-                // NEW: If rows don't exist yet, build them now
-                if (rowsDiv.innerHTML === '') {
-                    const addBtn = createAddRowsButton(rowsDiv, dateId);
-                    addRowsToContainer(rowsDiv, dateId, addBtn);
-                }
-
-                const isHidden = rowsDiv.classList.toggle('hidden');
-                header.querySelector('.arrow').innerText = isHidden ? '▶' : '▼';
-            };
-
-// ... inside createSections() loop ...
-const addBtn = document.createElement('button');
-addBtn.className = 'add-rows-btn';
-addBtn.innerText = "+ Add 5 Rows";
-
-addBtn.onclick = (e) => {
-    e.stopPropagation();
-    // Reveal rows in numerical order (0-19)
-    const hiddenRows = Array.from(rowsDiv.querySelectorAll('.cell-row'))
-                            .filter(r => r.style.display === 'none');
-    
-    for (let i = 0; i < 5 && i < hiddenRows.length; i++) {
-        hiddenRows[i].style.display = 'flex';
+    const end = Math.min(__scheduleWeeksRendered + WEEKS_PER_BATCH, WEEKS_TO_SHOW);
+    for (let w = __scheduleWeeksRendered; w < end; w++) {
+        contentArea.appendChild(createWeekElement(baseDate, w));
     }
+    __scheduleWeeksRendered = end;
 
-    if (hiddenRows.length <= 5) addBtn.style.display = 'none';
-};
+    // The newly-created day containers above are empty shells — apply
+    // whatever schedule data is already cached from the last load so they
+    // populate immediately instead of staying blank until some other
+    // refresh happens to run again.
+    if (__lastScheduleData) applyScheduleDataToDom(__lastScheduleData);
 
-            section.appendChild(header);
-            section.appendChild(rowsDiv);
-            weekContent.appendChild(section);
-        }
-
-        weekDiv.appendChild(weekHeader);
-        weekDiv.appendChild(weekContent);
-        contentArea.appendChild(weekDiv);
+    if (__scheduleWeeksRendered < WEEKS_TO_SHOW) {
+        const remaining = WEEKS_TO_SHOW - __scheduleWeeksRendered;
+        const loadMoreBtn = document.createElement('button');
+        loadMoreBtn.id = 'load-more-weeks-btn';
+        loadMoreBtn.className = 'add-rows-btn';
+        loadMoreBtn.style.cssText = 'width: 100%; margin: 20px 0; padding: 14px; font-size: 15px; box-sizing: border-box;';
+        loadMoreBtn.innerText = `Load Next ${Math.min(WEEKS_PER_BATCH, remaining)} Weeks (${remaining} remaining)`;
+        loadMoreBtn.onclick = renderNextWeekBatch;
+        contentArea.appendChild(loadMoreBtn);
     }
 }
 
@@ -7588,6 +7652,61 @@ function getTimestamp() {
     return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+// Cached from the last successful loadData() call, so renderNextWeekBatch()
+// can retroactively populate newly-created (still-empty) day containers
+// without triggering another Supabase fetch of the whole dataset.
+let __lastScheduleData = null;
+
+function applyScheduleDataToDom(data) {
+    if (!data) return;
+    data.forEach(row => {
+        if (deletingRows.has(row.id)) return;
+
+        const rowsDiv = document.getElementById(`rows-${row.day_label}`);
+        if (rowsDiv && rowsDiv.innerHTML === '') {
+            const addBtn = createAddRowsButton(rowsDiv, row.day_label);
+            addRowsToContainer(rowsDiv, row.day_label, addBtn); 
+        }
+
+        const wrapper = document.getElementById(`row-wrapper-${row.id}`);
+        if (wrapper) {
+            wrapper.setAttribute('data-occupied', 'true');
+        }
+
+        // THE FIX: Activity is now 2, Place is now 3
+        const dbCols = { 1: 'time', 2: 'place', 3: 'activity', 4: 'asset', 5: 'status', 6: 'trade_partners', 7: 'result', 8: 'notes', 9: 'duration', 10: 'loto' };
+
+        for (let col = 1; col <= 10; col++) {
+            const cellId = `${row.day_label}-r${row.id}-c${col}`;
+            const el = document.getElementById(cellId);
+            if (el && el !== document.activeElement) {
+                const content = row[dbCols[col]] || ""; 
+
+                if (col === 6) {
+                    el.setAttribute('data-selected', content);
+                    if (el.options && el.options[0]) {
+                        el.options[0].text = content ? `Selected: ${content}` : "+ Add Multi";
+                    }
+                } else if (col === 5) {
+                    if (el.innerHTML.trim() !== content.trim()) {
+                        el.innerHTML = content;
+                    }
+                } else {
+                    if (el.tagName === 'SELECT' && content !== "") {
+                        const exists = Array.from(el.options).some(opt => opt.value === content);
+                        if (!exists) {
+                            const newOpt = new Option(content, content);
+                            el.add(newOpt);
+                        }
+                    }
+                    el.value = content; 
+                }
+                applyCellColor(el, content);
+            }
+        }
+    });
+}
+
 async function loadData(isSilent = false, preFetchedPromise = null) {
     try {
         let data, error;
@@ -7606,52 +7725,8 @@ async function loadData(isSilent = false, preFetchedPromise = null) {
         if (error) throw error;
 
         if (data) {
-            data.forEach(row => {
-                if (deletingRows.has(row.id)) return;
-
-                const rowsDiv = document.getElementById(`rows-${row.day_label}`);
-                if (rowsDiv && rowsDiv.innerHTML === '') {
-                    const addBtn = createAddRowsButton(rowsDiv, row.day_label);
-                    addRowsToContainer(rowsDiv, row.day_label, addBtn); 
-                }
-
-                const wrapper = document.getElementById(`row-wrapper-${row.id}`);
-                if (wrapper) {
-                    wrapper.setAttribute('data-occupied', 'true');
-                }
-
-                // THE FIX: Activity is now 2, Place is now 3
-                const dbCols = { 1: 'time', 2: 'place', 3: 'activity', 4: 'asset', 5: 'status', 6: 'trade_partners', 7: 'result', 8: 'notes', 9: 'duration', 10: 'loto' };
-
-                for (let col = 1; col <= 10; col++) {
-                    const cellId = `${row.day_label}-r${row.id}-c${col}`;
-                    const el = document.getElementById(cellId);
-                    if (el && el !== document.activeElement) {
-                        const content = row[dbCols[col]] || ""; 
-
-                        if (col === 6) {
-                            el.setAttribute('data-selected', content);
-                            if (el.options && el.options[0]) {
-                                el.options[0].text = content ? `Selected: ${content}` : "+ Add Multi";
-                            }
-                        } else if (col === 5) {
-                            if (el.innerHTML.trim() !== content.trim()) {
-                                el.innerHTML = content;
-                            }
-                        } else {
-                            if (el.tagName === 'SELECT' && content !== "") {
-                                const exists = Array.from(el.options).some(opt => opt.value === content);
-                                if (!exists) {
-                                    const newOpt = new Option(content, content);
-                                    el.add(newOpt);
-                                }
-                            }
-                            el.value = content; 
-                        }
-                        applyCellColor(el, content);
-                    }
-                }
-            });
+            __lastScheduleData = data;
+            applyScheduleDataToDom(data);
             // 🟢 FILTER FIX: rebuild the sidebar filter option lists from the
             // exact same rows we just rendered, so filters always match live data.
             rebuildFilterOptionsFromBackendData(data);
