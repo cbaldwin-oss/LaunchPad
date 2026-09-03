@@ -257,41 +257,137 @@
         }
 
         function renderBreakRequestForm(content) {
+            const uniqueAssetNames = [...new Set(allSeals.concat(newlyCreatedSeals).map(s => s.asset_name).filter(Boolean))].sort();
+
             content.innerHTML = `
                 <a class="back-link" onclick="backToActionSelect()">&larr; Back</a>
                 <div class="card">
-                    <p>Search for the seal(s) you're requesting to break, and why. The Chain of Custody Manager will be notified automatically — do not break any seal before it is approved.</p>
-                    ${renderSealPickerHtml('break-request')}
+                    <p>Select the asset(s) with the seal(s) you're requesting to break.</p>
+                    <label>Asset(s)</label>
+                    <div id="break-request-asset-list">
+                        ${uniqueAssetNames.length > 0 ? uniqueAssetNames.map(name => `
+                            <label class="seal-check">
+                                <input type="checkbox" name="break-request-asset" value="${name}" onchange="updateBreakRequestSealList()">
+                                ${name}
+                            </label>
+                        `).join('') : '<p class="empty-note">No assets with tamper seals found for this project.</p>'}
+                    </div>
+
+                    <label>Seal(s) to Break</label>
+                    <div id="break-request-seal-list">
+                        <p class="empty-note">Select an asset above to see its intact seals.</p>
+                    </div>
+
                     <label>Reason for Request</label>
                     <textarea id="reason" placeholder="e.g. Scheduled testing, issue repair, settings change..."></textarea>
                     <label>Your Name</label>
                     <input type="text" id="reqName">
                     <label>Your Company</label>
-                    <input type="text" id="reqCompany">
+                    <select id="reqCompany" onchange="handleReqCompanyChange()"><option value="">Loading companies...</option></select>
+                    <input type="text" id="reqCompanyNew" placeholder="Enter your company name" style="display:none; margin-top:8px;">
                     <label>Your Email</label>
                     <input type="email" id="reqEmail">
                     <button class="submit-btn" onclick="submitBreakRequest()">Submit Break Request</button>
                     <div id="form-error"></div>
                 </div>
             `;
+
+            loadReqCompanyOptions();
+        }
+
+        function updateBreakRequestSealList() {
+            const checkedAssets = Array.from(document.querySelectorAll('input[name="break-request-asset"]:checked')).map(el => el.value);
+            const listEl = document.getElementById('break-request-seal-list');
+
+            if (checkedAssets.length === 0) {
+                listEl.innerHTML = '<p class="empty-note">Select an asset above to see its intact seals.</p>';
+                return;
+            }
+
+            const eligible = allSeals.concat(newlyCreatedSeals).filter(s =>
+                checkedAssets.includes(s.asset_name) && sectionConfig['break-request'].eligible(s)
+            );
+
+            listEl.innerHTML = eligible.length > 0 ? eligible.map(s => `
+                <label class="seal-check">
+                    <input type="checkbox" name="break-request-seal" value="${s.id}">
+                    Seal #${s.seal_number}${s.sub_area ? ' — ' + s.sub_area : ''} — ${s.asset_name}
+                </label>
+            `).join('') : '<p class="empty-note">No intact seals found for the selected asset(s).</p>';
+        }
+
+        // Same source the rest of LaunchPad uses for Trade Partners,
+        // paginated the same way to avoid Supabase's default row-limit
+        // silently truncating the list on large dropdownoptions tables.
+        async function fetchTradePartnersForProject() {
+            const companies = [];
+            let page = 0;
+            const pageSize = 1000;
+            let hasMore = true;
+
+            while (hasMore) {
+                const { data, error } = await _supabase
+                    .from(T('dropdownoptions'))
+                    .select('Trade_Partners')
+                    .range(page * pageSize, (page + 1) * pageSize - 1);
+
+                if (error || !data || data.length === 0) { hasMore = false; break; }
+
+                data.forEach(row => {
+                    const trade = row.Trade_Partners?.toString().trim();
+                    if (trade && !companies.includes(trade)) companies.push(trade);
+                });
+
+                if (data.length < pageSize) hasMore = false;
+                page++;
+            }
+
+            return companies.sort();
+        }
+
+        async function loadReqCompanyOptions() {
+            const select = document.getElementById('reqCompany');
+            try {
+                const companies = await fetchTradePartnersForProject();
+                select.innerHTML = '<option value="">Select Company...</option>' +
+                    companies.map(c => `<option value="${c}">${c}</option>`).join('') +
+                    '<option value="__add_new__">+ Add New Company</option>';
+            } catch (e) {
+                select.innerHTML = '<option value="">Select Company...</option><option value="__add_new__">+ Add New Company</option>';
+            }
+        }
+
+        function handleReqCompanyChange() {
+            const select = document.getElementById('reqCompany');
+            const newInput = document.getElementById('reqCompanyNew');
+            if (select.value === '__add_new__') {
+                newInput.style.display = 'block';
+                newInput.focus();
+            } else {
+                newInput.style.display = 'none';
+            }
         }
 
         async function submitBreakRequest() {
+            const checkedSealIds = Array.from(document.querySelectorAll('input[name="break-request-seal"]:checked')).map(el => Number(el.value));
             const reason = document.getElementById('reason').value.trim();
             const name = document.getElementById('reqName').value.trim();
-            const company = document.getElementById('reqCompany').value.trim();
+            const companySelectValue = document.getElementById('reqCompany').value;
+            const company = companySelectValue === '__add_new__'
+                ? document.getElementById('reqCompanyNew').value.trim()
+                : companySelectValue;
             const email = document.getElementById('reqEmail').value.trim();
             const errorEl = document.getElementById('form-error');
             errorEl.innerHTML = '';
 
-            if (selectedSealIds.length === 0 || !reason || !name || !email) {
-                errorEl.innerHTML = '<div class="error-box">Please add at least one seal and fill in all fields.</div>';
+            if (checkedSealIds.length === 0 || !reason || !name || !company || !email) {
+                errorEl.innerHTML = '<div class="error-box">Please select at least one seal and fill in all fields.</div>';
                 return;
             }
 
             try {
                 const allKnown = allSeals.concat(newlyCreatedSeals);
-                const selectedSeals = selectedSealIds.map(id => allKnown.find(s => s.id === id)).filter(Boolean);
+                const selectedSeals = checkedSealIds.map(id => allKnown.find(s => s.id === id)).filter(Boolean);
                 const sealNumbers = selectedSeals.map(s => s.seal_number).join(', ');
                 const assetName = selectedSeals[0] ? selectedSeals[0].asset_name : '';
                 const location = selectedSeals[0] ? selectedSeals[0].location : '';
@@ -304,7 +400,7 @@
                         requestor_company: company,
                         requestor_email: email
                     })
-                    .in('id', selectedSealIds);
+                    .in('id', checkedSealIds);
 
                 await _supabase.from(T('BreakRequests')).insert([{
                     asset_name: assetName, location: location,

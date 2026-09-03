@@ -793,8 +793,31 @@ function makeDefaultWorkflow() {
 let workflows = [makeDefaultWorkflow()];
 let currentEditingWorkflowId = workflows[0].id;
 
+function getActiveWorkflows() {
+    const active = workflows.filter(w => w.active);
+    return active.length > 0 ? active : [workflows[0]];
+}
+// Aggregated, deduplicated-by-name statuses across every active workflow —
+// this is what actually drives the real per-row status dropdown and the
+// status filter bar, now that more than one workflow can be active at once.
+function getActiveStatuses() {
+    const seen = new Set();
+    const result = [];
+    getActiveWorkflows().forEach(w => {
+        w.statuses.forEach(s => {
+            const key = s.name.toLowerCase();
+            if (!seen.has(key)) {
+                seen.add(key);
+                result.push(s);
+            }
+        });
+    });
+    return result;
+}
+// Singular — used only for UI defaulting (which workflow the Settings
+// editor opens to first), not for anything that determines real behavior.
 function getActiveWorkflow() {
-    return workflows.find(w => w.active) || workflows[0];
+    return getActiveWorkflows()[0];
 }
 function getEditingWorkflow() {
     return workflows.find(w => w.id === currentEditingWorkflowId) || workflows[0];
@@ -996,11 +1019,11 @@ function renderWorkflowSelector() {
     const wf = getEditingWorkflow();
     wrap.innerHTML = `
         <select id="workflow-select" onchange="currentEditingWorkflowId = this.value; renderStatusFlowEditor(); renderStatusFlowPreview();" style="padding:8px 10px; border:1px solid #ddd; border-radius:6px; font-weight:600; font-size:14px; flex:1;">
-            ${workflows.map(w => `<option value="${w.id}" ${w.id === wf.id ? 'selected' : ''}>${w.name}${w.active ? ' (Active)' : ''}</option>`).join('')}
+            ${workflows.map(w => `<option value="${w.id}" ${w.id === wf.id ? 'selected' : ''}>${w.name}${w.active ? ' ✓ Active' : ''}</option>`).join('')}
         </select>
         <button class="tool-btn" style="padding:8px 12px; font-size:13px;" onclick="addWorkflow()">+ New</button>
         <button class="tool-btn" style="padding:8px 12px; font-size:13px;" onclick="renameWorkflow()">Rename</button>
-        <button class="tool-btn" style="padding:8px 12px; font-size:13px; ${wf.active ? 'opacity:0.5; cursor:default;' : 'border-color:#1b5e20; color:#1b5e20;'}" ${wf.active ? 'disabled' : ''} onclick="setActiveWorkflow()">Set Active</button>
+        <button class="tool-btn" style="padding:8px 12px; font-size:13px; ${wf.active ? 'background-color:#1b5e20; color:white; border-color:#1b5e20;' : 'border-color:#1b5e20; color:#1b5e20;'}" onclick="setActiveWorkflow()">${wf.active ? '✓ Active' : 'Set Active'}</button>
         <button class="tool-btn" style="padding:8px 12px; font-size:13px; border-color:#d32f2f; color:#d32f2f; ${workflows.length <= 1 ? 'opacity:0.5; cursor:default;' : ''}" ${workflows.length <= 1 ? 'disabled' : ''} onclick="deleteWorkflow()">Delete</button>
     `;
 }
@@ -1026,7 +1049,12 @@ function renameWorkflow() {
 
 function setActiveWorkflow() {
     const wf = getEditingWorkflow();
-    workflows.forEach(w => w.active = (w.id === wf.id));
+    const activeCount = workflows.filter(w => w.active).length;
+    if (wf.active && activeCount <= 1) {
+        alert('At least one workflow must stay active — activate another one first if you want to turn this one off.');
+        return;
+    }
+    wf.active = !wf.active;
     renderWorkflowSelector();
 }
 
@@ -1255,7 +1283,7 @@ async function saveTsSettings() {
 // in any row that was already on screen — its dropdown's <option> list was
 // only ever built once, at the moment that row was originally rendered.
 function refreshAllStatusDropdowns() {
-    const activeStatuses = getActiveWorkflow().statuses;
+    const activeStatuses = getActiveStatuses();
     document.querySelectorAll('.status-dropdown').forEach(select => {
         const currentValue = select.value;
         const stillDefined = activeStatuses.some(s => s.name === currentValue);
@@ -1787,7 +1815,7 @@ function createFilterButtons() {
     });
 
     // 2. Status Filters
-    const statuses = ['All', 'Intact', 'Broken', 'Replaced'];
+    const statuses = ['All', ...getActiveStatuses().map(s => s.name)];
     const statGroup = document.createElement('div');
     statGroup.className = 'filter-group';
     statGroup.innerHTML = '<span class="filter-label">Statuses:</span>';
@@ -2126,7 +2154,7 @@ entries.forEach(entry => {
         
         <select class="status-dropdown" data-col="status" onchange="syncEdit('${id}', 'status', this.value); applyStatusColor(this)" ${!isEditMode ? 'disabled' : ''}>
             <option value="${getVal('status', entry.status)}">${getVal('status', entry.status) || 'Select...'}</option>
-            ${getActiveWorkflow().statuses.map(s => `<option value="${s.name}">${s.name}</option>`).join('')}
+            ${getActiveStatuses().map(s => `<option value="${s.name}">${s.name}</option>`).join('')}
         </select>
         
         <textarea data-col="breakDate" oninput="syncEdit('${id}', 'break_date', this.value)" ${!isEditMode ? 'readonly' : ''}>${getVal('break_date', entry.break_date)}</textarea>
@@ -2145,7 +2173,7 @@ function applyStatusColor(el) {
     row.style.removeProperty('--row-status-color');
 
     const rawVal = el.value || '';
-    const defined = getActiveWorkflow().statuses.find(s => s.name.toLowerCase() === rawVal.toLowerCase().trim());
+    const defined = getActiveStatuses().find(s => s.name.toLowerCase() === rawVal.toLowerCase().trim());
     if (defined) {
         row.style.setProperty('--row-status-color', defined.color);
         row.classList.add('row-custom-status');
