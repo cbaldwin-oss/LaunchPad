@@ -172,14 +172,25 @@
             return first ? first.name : '';
         }
 
+        // Reinspection is a broader "catch anything broken" concept per the
+        // SOP (any unauthorized breach, regardless of the exact wording of
+        // the status text) — so it matches by substring containment rather
+        // than requiring an exact status match like the other sections do.
+        function statusMatchesTransitionFrom(currentStatus, fromName, section) {
+            if (section === 'reinspection') {
+                return currentStatus.includes(fromName) || fromName.includes(currentStatus);
+            }
+            return currentStatus === fromName;
+        }
+
         function isEligibleForSection(seal, section) {
             const current = effectiveStatusName(seal).toLowerCase();
-            return getActiveTransitions().some(t => t.fromName.toLowerCase() === current && t.formTrigger === section);
+            return getActiveTransitions().some(t => statusMatchesTransitionFrom(current, t.fromName.toLowerCase(), section) && t.formTrigger === section);
         }
 
         function getNextStatus(seal, section) {
             const current = effectiveStatusName(seal).toLowerCase();
-            const match = getActiveTransitions().find(t => t.fromName.toLowerCase() === current && t.formTrigger === section);
+            const match = getActiveTransitions().find(t => statusMatchesTransitionFrom(current, t.fromName.toLowerCase(), section) && t.formTrigger === section);
             return match ? match.toName : null;
         }
 

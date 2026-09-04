@@ -662,6 +662,7 @@ input:not([type="checkbox"]), textarea, select {
         <div style="display: flex; border-bottom: 1px solid #eee; margin-bottom: 16px;">
             <button id="ts-tab-columns" onclick="switchTsSettingsTab('columns')" style="flex:1; padding:10px; border:none; background:#f5f5f5; cursor:pointer; font-weight:600; font-size:13px; color:#2e7d32; border-bottom:3px solid #2e7d32;">Columns</button>
             <button id="ts-tab-statusflow" onclick="switchTsSettingsTab('statusflow')" style="flex:1; padding:10px; border:none; background:#fafafa; cursor:pointer; font-weight:600; font-size:13px; color:#888; border-bottom:3px solid transparent;">Status Flow</button>
+            <button id="ts-tab-statusorder" onclick="switchTsSettingsTab('statusorder')" style="flex:1; padding:10px; border:none; background:#fafafa; cursor:pointer; font-weight:600; font-size:13px; color:#888; border-bottom:3px solid transparent;">Status Order</button>
         </div>
 
         <div id="ts-panel-columns">
@@ -689,6 +690,11 @@ input:not([type="checkbox"]), textarea, select {
                 <div style="font-size:12px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:8px;">Preview</div>
                 <div id="status-flow-preview" style="position:relative; background:#fafafa; border:1px solid #eee; border-radius:8px; padding:24px; min-height:100px; overflow:visible;"></div>
             </div>
+        </div>
+
+        <div id="ts-panel-statusorder" style="display:none;">
+            <p style="color:#666; font-size:13px; margin-top:-8px;">Drag to reorder — this controls the order statuses appear everywhere: the status filter bar, dropdown menus, and trigger checklists.</p>
+            <div id="status-order-list" style="display:flex; flex-direction:column; gap:8px; max-height:400px; overflow-y:auto;"></div>
         </div>
 
         <div class="modal-btns">
@@ -956,19 +962,84 @@ function openColumnSettingsModal() {
 function switchTsSettingsTab(tab) {
     const colTab = document.getElementById('ts-tab-columns');
     const flowTab = document.getElementById('ts-tab-statusflow');
+    const orderTab = document.getElementById('ts-tab-statusorder');
     const colPanel = document.getElementById('ts-panel-columns');
     const flowPanel = document.getElementById('ts-panel-statusflow');
+    const orderPanel = document.getElementById('ts-panel-statusorder');
     const active = 'flex:1; padding:10px; border:none; background:#f5f5f5; cursor:pointer; font-weight:600; font-size:13px; color:#2e7d32; border-bottom:3px solid #2e7d32;';
     const inactive = 'flex:1; padding:10px; border:none; background:#fafafa; cursor:pointer; font-weight:600; font-size:13px; color:#888; border-bottom:3px solid transparent;';
 
+    [colTab, flowTab, orderTab].forEach(t => t.style.cssText = inactive);
+    [colPanel, flowPanel, orderPanel].forEach(p => p.style.display = 'none');
+
     if (tab === 'columns') {
-        colTab.style.cssText = active; flowTab.style.cssText = inactive;
-        colPanel.style.display = 'block'; flowPanel.style.display = 'none';
+        colTab.style.cssText = active;
+        colPanel.style.display = 'block';
+    } else if (tab === 'statusorder') {
+        orderTab.style.cssText = active;
+        orderPanel.style.display = 'block';
+        renderStatusOrderList();
     } else {
-        flowTab.style.cssText = active; colTab.style.cssText = inactive;
-        flowPanel.style.display = 'block'; colPanel.style.display = 'none';
+        flowTab.style.cssText = active;
+        flowPanel.style.display = 'block';
         renderStatusFlowPreview();
     }
+}
+
+// Same drag-and-drop reorder pattern as the Columns tab, just applied to
+// the currently-edited workflow's statuses instead — a dedicated, more
+// discoverable place to reorder them than the small ▲/▼ buttons buried in
+// each status card over on the Status Flow tab.
+function renderStatusOrderList() {
+    const wf = getEditingWorkflow();
+    const list = document.getElementById('status-order-list');
+    list.innerHTML = '';
+    wf.statuses.forEach((s) => {
+        const isFirst = wf.statuses.indexOf(s) === 0;
+        const isLast = wf.statuses.indexOf(s) === wf.statuses.length - 1;
+
+        const item = document.createElement('div');
+        item.style.cssText = "display:flex; align-items:center; width:100%; padding:10px 12px; background:#f8f9fa; border:1px solid #ddd; border-radius:6px; cursor:grab; user-select:none; box-sizing:border-box;";
+        item.draggable = true;
+        item.dataset.statusId = s.id;
+
+        item.addEventListener('dragstart', (e) => {
+            e.dataTransfer.setData('text/plain', s.id);
+            item.style.opacity = '0.5';
+        });
+        item.addEventListener('dragend', () => {
+            item.style.opacity = '1';
+            document.querySelectorAll('#status-order-list > div').forEach(el => el.style.border = '1px solid #ddd');
+        });
+        item.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            item.style.border = '2px dashed #2e7d32';
+        });
+        item.addEventListener('dragleave', () => {
+            item.style.border = '1px solid #ddd';
+        });
+        item.addEventListener('drop', (e) => {
+            e.preventDefault();
+            const draggedId = e.dataTransfer.getData('text/plain');
+            const draggedIndex = wf.statuses.findIndex(x => x.id === draggedId);
+            const targetIndex = wf.statuses.findIndex(x => x.id === s.id);
+            if (draggedIndex === -1 || targetIndex === -1 || draggedIndex === targetIndex) return;
+            const draggedItem = wf.statuses.splice(draggedIndex, 1)[0];
+            wf.statuses.splice(targetIndex, 0, draggedItem);
+            renderStatusOrderList();
+        });
+
+        item.innerHTML = `
+            <span style="margin-right:10px; cursor:grab; color:#999; font-size:16px;" title="Drag to reorder">⣿</span>
+            <div style="display:flex; flex-direction:column; margin-right:10px;">
+                <button onclick="moveFlowStatus('${s.id}', -1); renderStatusOrderList();" ${isFirst ? 'disabled' : ''} title="Move up" style="background:none; border:none; cursor:${isFirst ? 'default' : 'pointer'}; color:${isFirst ? '#ccc' : '#555'}; font-size:12px; line-height:1; padding:2px;">▲</button>
+                <button onclick="moveFlowStatus('${s.id}', 1); renderStatusOrderList();" ${isLast ? 'disabled' : ''} title="Move down" style="background:none; border:none; cursor:${isLast ? 'default' : 'pointer'}; color:${isLast ? '#ccc' : '#555'}; font-size:12px; line-height:1; padding:2px;">▼</button>
+            </div>
+            <span style="width:16px; height:16px; border-radius:3px; background:${s.color}; border:1px solid rgba(0,0,0,0.15); margin-right:10px; flex-shrink:0;"></span>
+            <span style="font-weight:600; color:#333; font-size:14px;">${s.name}</span>
+        `;
+        list.appendChild(item);
+    });
 }
 
 function renderColumnSettingsList() {
