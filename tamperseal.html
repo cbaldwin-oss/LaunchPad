@@ -794,7 +794,7 @@ function makeDefaultWorkflow() {
             { id: 't4', from: ['broken_approved'], to: 'ready_for_reseal', formTrigger: 'work-completed' },
             { id: 't5', from: ['ready_for_reseal'], to: 'replaced_approved', formTrigger: '' },
             { id: 't6', from: ['intact'], to: 'non_approved_break', formTrigger: '' },
-            { id: 't7', from: ['non_approved_break'], to: 'replaced_non_approved', formTrigger: '' }
+            { id: 't7', from: ['non_approved_break'], to: 'replaced_non_approved', formTrigger: 'reinspection' }
         ]
     };
 }
@@ -1156,6 +1156,7 @@ function renderTriggersList() {
                                 <option value="break-request" ${t.formTrigger === 'break-request' ? 'selected' : ''}>Break Request</option>
                                 <option value="break-seals" ${t.formTrigger === 'break-seals' ? 'selected' : ''}>Break Seals</option>
                                 <option value="work-completed" ${t.formTrigger === 'work-completed' ? 'selected' : ''}>Work Completed</option>
+                                <option value="reinspection" ${t.formTrigger === 'reinspection' ? 'selected' : ''}>Reinspection</option>
                             </select>
                         </div>
                     </div>
@@ -1323,7 +1324,7 @@ function renderStatusFlowPreview() {
 
     let arrowsHtml = '';
     let labelsHtml = '';
-    const formLabels = { 'break-request': 'Break Request', 'break-seals': 'Break Seals', 'work-completed': 'Work Completed' };
+    const formLabels = { 'break-request': 'Break Request', 'break-seals': 'Break Seals', 'work-completed': 'Work Completed', 'reinspection': 'Reinspection' };
     wf.transitions.forEach(t => {
         const to = positions[t.to];
         if (!to) return;

@@ -45,6 +45,7 @@
         .action-break-request { background: #1976d2; }
         .action-break-seals { background: #c62828; }
         .action-work-completed { background: #ef6c00; }
+        .action-reinspection { background: #6a1b9a; }
         .back-link { display: inline-block; margin-bottom: 12px; color: #1b5e20; font-weight: 600; font-size: 14px; cursor: pointer; text-decoration: none; }
 
         .multiselect-dropdown { position: relative; margin-bottom: 4px; }
@@ -58,6 +59,11 @@
             max-height: 260px; overflow-y: auto; padding: 6px 14px;
         }
         .multiselect-panel.open { display: block; }
+        .multiselect-search {
+            width: 100%; padding: 8px 10px; margin: 6px 0 8px; border: 1px solid #ddd; border-radius: 6px;
+            font-size: 14px; box-sizing: border-box; position: sticky; top: 0; background: white; z-index: 2;
+        }
+        .multiselect-options { display: flex; flex-direction: column; }
         .seal-check { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid #eee; font-size: 15px; }
         .seal-check:last-child { border-bottom: none; }
         .seal-check input { width: 20px; height: 20px; flex-shrink: 0; }
@@ -103,12 +109,15 @@
                     { id: 'break_approved', name: 'Break Approved by CCM', color: '#e1bee7' },
                     { id: 'broken_approved', name: 'Broken - CCM Approved', color: '#fff9c4' },
                     { id: 'ready_for_reseal', name: 'Ready for Reseal', color: '#ffe0b2' },
-                    { id: 'replaced_approved', name: 'Replaced (Approved)', color: '#e0e0e0' }
+                    { id: 'replaced_approved', name: 'Replaced (Approved)', color: '#e0e0e0' },
+                    { id: 'non_approved_break', name: 'Non-Approved Break', color: '#ffcdd2' },
+                    { id: 'replaced_non_approved', name: 'Replaced (Non-Approved)', color: '#e0e0e0' }
                 ],
                 transitions: [
                     { id: 't1', from: ['intact'], to: 'break_requested', formTrigger: 'break-request' },
                     { id: 't2', from: ['break_approved'], to: 'broken_approved', formTrigger: 'break-seals' },
-                    { id: 't3', from: ['broken_approved'], to: 'ready_for_reseal', formTrigger: 'work-completed' }
+                    { id: 't3', from: ['broken_approved'], to: 'ready_for_reseal', formTrigger: 'work-completed' },
+                    { id: 't4', from: ['non_approved_break'], to: 'replaced_non_approved', formTrigger: 'reinspection' }
                 ]
             }];
         }
@@ -186,6 +195,10 @@
             'work-completed': {
                 title: 'Work Completed',
                 subtitle: 'Mark seals ready for reseal'
+            },
+            'reinspection': {
+                title: 'Reinspection',
+                subtitle: 'Log a re-inspection following an unauthorized breach'
             }
         };
 
@@ -254,6 +267,10 @@
                     ✅ Work Completed
                     <span class="sub">Mark work done and ready for reseal</span>
                 </button>
+                <button class="action-btn action-reinspection" onclick="selectSection('reinspection')">
+                    🔍 Reinspection
+                    <span class="sub">Log a re-inspection following an unauthorized breach</span>
+                </button>
             `;
         }
 
@@ -266,6 +283,7 @@
             if (section === 'break-request') renderBreakRequestForm(content);
             else if (section === 'break-seals') renderBreakSealsForm(content);
             else if (section === 'work-completed') renderWorkCompletedForm(content);
+            else if (section === 'reinspection') renderReinspectionForm(content);
         }
 
         function backToActionSelect() {
@@ -286,12 +304,15 @@
                 <div class="multiselect-dropdown">
                     <button type="button" class="multiselect-toggle" id="${section}-asset-toggle" onclick="toggleMultiselect(event, '${section}-asset-panel')">Select asset(s)... ▾</button>
                     <div class="multiselect-panel" id="${section}-asset-panel">
-                        ${uniqueAssetNames.length > 0 ? uniqueAssetNames.map(name => `
-                            <label class="seal-check">
-                                <input type="checkbox" name="${section}-asset" value="${name}" onchange="updateSealDropdown('${section}')">
-                                ${name}
-                            </label>
-                        `).join('') : '<p class="empty-note">No assets with tamper seals found for this project.</p>'}
+                        <input type="text" class="multiselect-search" placeholder="Type to filter..." oninput="filterMultiselectOptions(this)" onclick="event.stopPropagation()">
+                        <div class="multiselect-options">
+                            ${uniqueAssetNames.length > 0 ? uniqueAssetNames.map(name => `
+                                <label class="seal-check">
+                                    <input type="checkbox" name="${section}-asset" value="${name}" onchange="updateSealDropdown('${section}')">
+                                    ${name}
+                                </label>
+                            `).join('') : '<p class="empty-note">No assets with tamper seals found for this project.</p>'}
+                        </div>
                     </div>
                 </div>
 
@@ -303,6 +324,19 @@
                     </div>
                 </div>
             `;
+        }
+
+        // Filters the checkbox labels within the same panel as the search
+        // input, by simple case-insensitive substring match against each
+        // label's text.
+        function filterMultiselectOptions(input) {
+            const query = input.value.trim().toLowerCase();
+            const panel = input.closest('.multiselect-panel');
+            const options = panel.querySelectorAll('.multiselect-options .seal-check');
+            options.forEach(el => {
+                const text = el.textContent.toLowerCase();
+                el.style.display = text.includes(query) ? 'flex' : 'none';
+            });
         }
 
         function toggleMultiselect(evt, panelId) {
@@ -337,23 +371,23 @@
                 checkedAssets.includes(s.asset_name) && isEligibleForSection(s, section)
             );
 
-            let html = eligible.map(s => `
+            let optionsHtml = eligible.map(s => `
                 <label class="seal-check">
                     <input type="checkbox" name="${section}-seal" value="${s.id}" onchange="updateSealToggleLabel('${section}')">
-                    Seal #${s.seal_number}${s.sub_area ? ' — ' + s.sub_area : ''} — ${s.asset_name}
+                    ${s.seal_number}${s.sub_area ? ' — ' + s.sub_area : ''} — ${s.asset_name}
                 </label>
             `).join('');
 
             if (eligible.length === 0) {
-                html = '<p class="empty-note">No eligible seals found for the selected asset(s).</p>';
+                optionsHtml = '<p class="empty-note">No eligible seals found for the selected asset(s).</p>';
             }
 
-            html += `
+            panel.innerHTML = `
+                <input type="text" class="multiselect-search" placeholder="Type to filter..." oninput="filterMultiselectOptions(this)" onclick="event.stopPropagation()">
+                <div class="multiselect-options">${optionsHtml}</div>
                 <div id="${section}-new-seal-box-wrap"></div>
                 <a class="back-link" style="margin-top:8px;" onclick="showNewSealBox('${section}')">+ This seal isn't listed / add a new one</a>
             `;
-
-            panel.innerHTML = html;
             sealToggle.innerText = 'Select seal(s)... ▾';
         }
 
@@ -789,6 +823,59 @@
 
                 const result = buildResultMessage(transitionResult, 'The CxA will coordinate re-sealing with the GC.');
                 showSuccess((transitionResult.skipped.length + transitionResult.blocked.length) === 0 ? 'Marked Ready for Reseal' : result.title, result.message);
+            } catch (e) {
+                errorEl.innerHTML = `<div class="error-box">Something went wrong: ${e.message}</div>`;
+            }
+        }
+
+        // ===== Reinspection (SOP Section 7 — following an unauthorized breach) =====
+        function renderReinspectionForm(content) {
+            content.innerHTML = `
+                <a class="back-link" onclick="backToActionSelect()">&larr; Back</a>
+                <div class="form-explainer"><strong>Use this when:</strong> a seal was found broken with no approved Break Request on file. Log the required full re-inspection here before the asset can be re-sealed and returned to service.</div>
+                <div class="card">
+                    <p>Select the seal(s) that were re-inspected following an unauthorized breach.</p>
+                    ${renderAssetSealPickerHtml('reinspection')}
+                    <label>Inspector Email</label>
+                    <input type="email" id="reinspectorEmail">
+                    <label>Inspector Company</label>
+                    <select id="reinspectorCompany" onchange="handleCompanySelectChange('reinspectorCompany', 'reinspectorCompanyNew')"><option value="">Loading companies...</option></select>
+                    <input type="text" id="reinspectorCompanyNew" placeholder="Enter your company name" style="display:none; margin-top:8px;">
+                    <label>Re-Inspection Findings</label>
+                    <textarea id="reinspectionNotes" placeholder="Describe what was found and confirmed during the re-inspection..."></textarea>
+                    <button class="submit-btn" onclick="submitReinspection()">Log Reinspection</button>
+                    <div id="form-error"></div>
+                </div>
+            `;
+            loadCompanyOptions('reinspectorCompany');
+        }
+
+        async function submitReinspection() {
+            const checkedSealIds = getCheckedSealIds('reinspection');
+            const inspectorEmail = document.getElementById('reinspectorEmail').value.trim();
+            const inspectorCompany = getCompanyValue('reinspectorCompany', 'reinspectorCompanyNew');
+            const notes = document.getElementById('reinspectionNotes').value.trim();
+            const errorEl = document.getElementById('form-error');
+            errorEl.innerHTML = '';
+
+            if (checkedSealIds.length === 0 || !inspectorEmail || !inspectorCompany || !notes) {
+                errorEl.innerHTML = '<div class="error-box">Please select at least one seal and fill in all fields.</div>';
+                return;
+            }
+
+            try {
+                const transitionResult = await applyStatusTransitions(checkedSealIds, 'reinspection', {
+                    inspection_notes: notes
+                });
+
+                if (!transitionResult.anyUpdated) {
+                    const { message } = buildResultMessage(transitionResult, '');
+                    errorEl.innerHTML = `<div class="error-box">${message}</div>`;
+                    return;
+                }
+
+                const result = buildResultMessage(transitionResult, 'The re-inspection has been logged and the log updated.');
+                showSuccess((transitionResult.skipped.length + transitionResult.blocked.length) === 0 ? 'Reinspection Logged' : result.title, result.message);
             } catch (e) {
                 errorEl.innerHTML = `<div class="error-box">Something went wrong: ${e.message}</div>`;
             }
