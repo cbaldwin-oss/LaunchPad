@@ -81,22 +81,95 @@
         let allSeals = [];
         let scriptUrl = '';
         let newlyCreatedSeals = [];
+        let workflows = [];
+
+        // Same sensible default as tamperseal.html's own makeDefaultWorkflow,
+        // used only if no config has ever been saved for this project yet.
+        function getDefaultWorkflows() {
+            return [{
+                id: 'default', name: 'Default Workflow', active: true,
+                statuses: [
+                    { id: 'intact', name: 'Intact', color: '#c8e6c9' },
+                    { id: 'break_requested', name: 'Break Requested (Pending Approval)', color: '#bbdefb' },
+                    { id: 'break_approved', name: 'Break Approved by CCM', color: '#e1bee7' },
+                    { id: 'broken_approved', name: 'Broken - CCM Approved', color: '#fff9c4' },
+                    { id: 'ready_for_reseal', name: 'Ready for Reseal', color: '#ffe0b2' },
+                    { id: 'replaced_approved', name: 'Replaced (Approved)', color: '#e0e0e0' }
+                ],
+                transitions: [
+                    { from: 'intact', to: 'break_requested', formTrigger: 'break-request' },
+                    { from: 'break_approved', to: 'broken_approved', formTrigger: 'break-seals' },
+                    { from: 'broken_approved', to: 'ready_for_reseal', formTrigger: 'work-completed' }
+                ]
+            }];
+        }
+
+        function getActiveWorkflows() {
+            const active = workflows.filter(w => w.active);
+            return active.length > 0 ? active : (workflows[0] ? [workflows[0]] : []);
+        }
+
+        function getActiveStatuses() {
+            const seen = new Set();
+            const result = [];
+            getActiveWorkflows().forEach(w => {
+                w.statuses.forEach(s => {
+                    const key = s.name.toLowerCase();
+                    if (!seen.has(key)) { seen.add(key); result.push(s); }
+                });
+            });
+            return result;
+        }
+
+        // Resolves each transition's internal status ids to their actual
+        // NAMES — a seal's current status is stored/matched by name, and a
+        // status id is only meaningful within the one workflow it belongs to.
+        function getActiveTransitions() {
+            const result = [];
+            getActiveWorkflows().forEach(w => {
+                w.transitions.forEach(t => {
+                    const fromStatus = w.statuses.find(s => s.id === t.from);
+                    const toStatus = w.statuses.find(s => s.id === t.to);
+                    if (fromStatus && toStatus) {
+                        result.push({ fromName: fromStatus.name, toName: toStatus.name, formTrigger: t.formTrigger || '' });
+                    }
+                });
+            });
+            return result;
+        }
+
+        // A seal with no status yet is treated as sitting at the workflow's
+        // first defined status (its natural starting point).
+        function effectiveStatusName(seal) {
+            const raw = (seal.status || '').trim();
+            if (raw) return raw;
+            const first = getActiveStatuses()[0];
+            return first ? first.name : '';
+        }
+
+        function isEligibleForSection(seal, section) {
+            const current = effectiveStatusName(seal).toLowerCase();
+            return getActiveTransitions().some(t => t.fromName.toLowerCase() === current && t.formTrigger === section);
+        }
+
+        function getNextStatus(seal, section) {
+            const current = effectiveStatusName(seal).toLowerCase();
+            const match = getActiveTransitions().find(t => t.fromName.toLowerCase() === current && t.formTrigger === section);
+            return match ? match.toName : null;
+        }
 
         const sectionConfig = {
             'break-request': {
                 title: 'Break Request',
-                subtitle: 'Request approval to break a seal',
-                eligible: s => !s.status || s.status.toLowerCase() === 'intact'
+                subtitle: 'Request approval to break a seal'
             },
             'break-seals': {
                 title: 'Break Seals',
-                subtitle: 'Log an approved seal break',
-                eligible: s => (s.status || '').toLowerCase() === 'break approved by ccm'
+                subtitle: 'Log an approved seal break'
             },
             'work-completed': {
                 title: 'Work Completed',
-                subtitle: 'Mark seals ready for reseal',
-                eligible: s => (s.status || '').toLowerCase().includes('broken')
+                subtitle: 'Mark seals ready for reseal'
             }
         };
 
@@ -118,6 +191,26 @@
                     .maybeSingle();
                 scriptUrl = (project && project.google_script_url) || '';
             } catch (e) { console.warn('Could not load project config:', e); }
+
+            workflows = getDefaultWorkflows();
+            if (scriptUrl) {
+                try {
+                    const response = await fetch(`${scriptUrl}?action=getTamperSealColumnConfig`);
+                    const data = await response.json();
+                    if (data && Array.isArray(data.workflows) && data.workflows.length > 0) {
+                        workflows = data.workflows;
+                        if (!workflows.some(w => w.active)) workflows[0].active = true;
+                    } else if (data && data.statusFlow && Array.isArray(data.statusFlow.statuses)) {
+                        // Migrate an older single-workflow save into the
+                        // current structure, same as tamperseal.html does.
+                        workflows = [{
+                            id: 'default', name: 'Default Workflow', active: true,
+                            statuses: data.statusFlow.statuses,
+                            transitions: data.statusFlow.transitions || []
+                        }];
+                    }
+                } catch (e) { console.warn('Could not load workflow config, using default:', e); }
+            }
 
             const { data: seals, error } = await _supabase.from(T('Assets')).select('*');
             if (error) {
@@ -225,7 +318,7 @@
             }
 
             const eligible = allSeals.concat(newlyCreatedSeals).filter(s =>
-                checkedAssets.includes(s.asset_name) && sectionConfig[section].eligible(s)
+                checkedAssets.includes(s.asset_name) && isEligibleForSection(s, section)
             );
 
             let html = eligible.map(s => `
@@ -287,7 +380,7 @@
                     location: location,
                     sub_area: subArea,
                     seal_number: sealNumber,
-                    status: 'Intact',
+                    status: (getActiveStatuses()[0] && getActiveStatuses()[0].name) || 'Intact',
                     inspection_date: new Date().toISOString().split('T')[0]
                 }]).select();
 
@@ -403,6 +496,38 @@
             loadCompanyOptions('reqCompany');
         }
 
+        // Different selected seals can legitimately have different current
+        // statuses (as long as each one has SOME transition into this
+        // section), so their next status has to be computed per-seal, not
+        // assumed to be the same for the whole batch. Groups by resulting
+        // status to keep this to one update call per distinct outcome.
+        async function applyStatusTransitions(checkedSealIds, section, extraFields) {
+            const allKnown = allSeals.concat(newlyCreatedSeals);
+            const groups = {};
+            const skipped = [];
+
+            checkedSealIds.forEach(id => {
+                const seal = allKnown.find(s => s.id === id);
+                if (!seal) return;
+                const nextStatus = getNextStatus(seal, section);
+                if (!nextStatus) { skipped.push(seal.seal_number); return; }
+                if (!groups[nextStatus]) groups[nextStatus] = [];
+                groups[nextStatus].push(id);
+            });
+
+            for (const [status, ids] of Object.entries(groups)) {
+                await _supabase.from(T('Assets'))
+                    .update({ status, ...extraFields })
+                    .in('id', ids);
+            }
+
+            if (skipped.length > 0) {
+                console.warn('No matching transition found for seal(s), status left unchanged:', skipped.join(', '));
+            }
+
+            return Object.keys(groups).length > 0;
+        }
+
         async function submitBreakRequest() {
             const checkedSealIds = getCheckedSealIds('break-request');
             const reason = document.getElementById('reason').value.trim();
@@ -424,15 +549,17 @@
                 const assetName = selectedSeals[0] ? selectedSeals[0].asset_name : '';
                 const location = selectedSeals[0] ? selectedSeals[0].location : '';
 
-                await _supabase.from(T('Assets'))
-                    .update({
-                        status: 'Break Requested (Pending Approval)',
-                        break_request_date: new Date().toISOString().split('T')[0],
-                        requestor_name: name,
-                        requestor_company: company,
-                        requestor_email: email
-                    })
-                    .in('id', checkedSealIds);
+                const applied = await applyStatusTransitions(checkedSealIds, 'break-request', {
+                    break_request_date: new Date().toISOString().split('T')[0],
+                    requestor_name: name,
+                    requestor_company: company,
+                    requestor_email: email
+                });
+
+                if (!applied) {
+                    errorEl.innerHTML = '<div class="error-box">No valid next status is configured for this action — contact your site admin.</div>';
+                    return;
+                }
 
                 await _supabase.from(T('BreakRequests')).insert([{
                     asset_name: assetName, location: location,
@@ -488,14 +615,16 @@
             }
 
             try {
-                await _supabase.from(T('Assets'))
-                    .update({
-                        status: 'Broken - CCM Approved',
-                        break_date: new Date().toISOString().split('T')[0],
-                        responsible_party: `${removerEmail} (${removerCompany})`,
-                        break_reason: breakReason
-                    })
-                    .in('id', checkedSealIds);
+                const applied = await applyStatusTransitions(checkedSealIds, 'break-seals', {
+                    break_date: new Date().toISOString().split('T')[0],
+                    responsible_party: `${removerEmail} (${removerCompany})`,
+                    break_reason: breakReason
+                });
+
+                if (!applied) {
+                    errorEl.innerHTML = '<div class="error-box">No valid next status is configured for this action — contact your site admin.</div>';
+                    return;
+                }
 
                 showSuccess('Seal Break Logged', 'The log has been updated. Use the Work Completed form once your work behind the seal is finished.');
             } catch (e) {
@@ -531,12 +660,14 @@
                 const selectedSeals = checkedSealIds.map(id => allKnown.find(s => s.id === id)).filter(Boolean);
                 const assetName = selectedSeals[0] ? selectedSeals[0].asset_name : '';
 
-                await _supabase.from(T('Assets'))
-                    .update({
-                        status: 'Ready for Reseal',
-                        ready_for_reseal_date: new Date().toISOString().split('T')[0]
-                    })
-                    .in('id', checkedSealIds);
+                const applied = await applyStatusTransitions(checkedSealIds, 'work-completed', {
+                    ready_for_reseal_date: new Date().toISOString().split('T')[0]
+                });
+
+                if (!applied) {
+                    errorEl.innerHTML = '<div class="error-box">No valid next status is configured for this action — contact your site admin.</div>';
+                    return;
+                }
 
                 if (scriptUrl) {
                     try {
