@@ -535,6 +535,7 @@
             const allKnown = allSeals.concat(newlyCreatedSeals);
             const groups = {};
             const skipped = [];
+            const blocked = [];
 
             checkedSealIds.forEach(id => {
                 const seal = allKnown.find(s => s.id === id);
@@ -542,22 +543,39 @@
                 const nextStatus = getNextStatus(seal, section);
                 if (!nextStatus) { skipped.push(seal.seal_number); return; }
                 if (!groups[nextStatus]) groups[nextStatus] = [];
-                groups[nextStatus].push(id);
+                groups[nextStatus].push({ id, sealNumber: seal.seal_number });
             });
 
-            for (const [status, ids] of Object.entries(groups)) {
-                await _supabase.from(T('Assets'))
+            let updatedCount = 0;
+            for (const [status, entries] of Object.entries(groups)) {
+                const ids = entries.map(e => e.id);
+                // Chaining .select() is what makes this verifiable — a
+                // plain .update() call doesn't error when RLS silently
+                // filters it down to zero affected rows, it just "succeeds"
+                // having changed nothing. Checking the returned rows is the
+                // only way to tell the difference between an actual write
+                // and a write RLS quietly blocked.
+                const { data: updatedRows, error } = await _supabase.from(T('Assets'))
                     .update({ status, ...extraFields })
-                    .in('id', ids);
-            }
+                    .in('id', ids)
+                    .select();
 
-            const updatedCount = Object.values(groups).reduce((sum, ids) => sum + ids.length, 0);
+                if (error) {
+                    console.error('Status update failed for seal(s):', entries.map(e => e.sealNumber).join(', '), error);
+                    blocked.push(...entries.map(e => e.sealNumber));
+                } else if (!updatedRows || updatedRows.length === 0) {
+                    console.error('Status update affected zero rows (likely a missing RLS policy on this table) for seal(s):', entries.map(e => e.sealNumber).join(', '));
+                    blocked.push(...entries.map(e => e.sealNumber));
+                } else {
+                    updatedCount += updatedRows.length;
+                }
+            }
 
             if (skipped.length > 0) {
                 console.warn('No matching transition found for seal(s), status left unchanged:', skipped.join(', '));
             }
 
-            return { anyUpdated: updatedCount > 0, updatedCount, skipped };
+            return { anyUpdated: updatedCount > 0, updatedCount, skipped, blocked };
         }
 
         // Builds a message that's honest about partial failures — if some
@@ -565,16 +583,23 @@
         // current status, that needs to be visible, not just a clean
         // "Success!" that quietly hides it.
         function buildResultMessage(result, successMessage) {
-            if (result.skipped.length === 0) return { title: 'Success', message: successMessage };
+            const totalProblems = result.skipped.length + result.blocked.length;
+            if (totalProblems === 0) return { title: 'Success', message: successMessage };
+
+            const parts = [];
+            if (result.skipped.length > 0) {
+                parts.push(`No configured transition exists for their current status via this form: ${result.skipped.join(', ')}. Ask your site admin to check the Status Flow settings.`);
+            }
+            if (result.blocked.length > 0) {
+                parts.push(`The database rejected the update for: ${result.blocked.join(', ')}. This usually means a permissions (RLS) policy is missing on this project's Assets table — ask your site admin to check that.`);
+            }
+
             if (!result.anyUpdated) {
-                return {
-                    title: 'Nothing Updated',
-                    message: `None of the selected seal(s) have a configured transition for this action: ${result.skipped.join(', ')}. Ask your site admin to check the Status Flow settings for these seals' current status.`
-                };
+                return { title: 'Nothing Updated', message: parts.join(' ') };
             }
             return {
                 title: 'Partially Completed',
-                message: `${result.updatedCount} seal(s) updated. ${result.skipped.length} seal(s) were skipped — no configured transition exists for their current status via this form: ${result.skipped.join(', ')}. Ask your site admin to check the Status Flow settings.`
+                message: `${result.updatedCount} seal(s) updated successfully. ${parts.join(' ')}`
             };
         }
 
@@ -645,7 +670,7 @@
                 }
 
                 const result = buildResultMessage(transitionResult, 'The Chain of Custody Manager has been notified and will review your request. You\'ll be notified by email once a decision has been made.');
-                showSuccess(transitionResult.skipped.length === 0 ? 'Break Request Submitted' : result.title, result.message);
+                showSuccess((transitionResult.skipped.length + transitionResult.blocked.length) === 0 ? 'Break Request Submitted' : result.title, result.message);
             } catch (e) {
                 errorEl.innerHTML = `<div class="error-box">Something went wrong: ${e.message}</div>`;
             }
@@ -718,7 +743,7 @@
                 } catch (e) { console.warn('BrokenSeals log insert failed (break itself was still saved):', e); }
 
                 const result = buildResultMessage(transitionResult, 'The log has been updated. Use the Work Completed form once your work behind the seal is finished.');
-                showSuccess(transitionResult.skipped.length === 0 ? 'Seal Break Logged' : result.title, result.message);
+                showSuccess((transitionResult.skipped.length + transitionResult.blocked.length) === 0 ? 'Seal Break Logged' : result.title, result.message);
             } catch (e) {
                 errorEl.innerHTML = `<div class="error-box">Something went wrong: ${e.message}</div>`;
             }
@@ -770,7 +795,7 @@
                 }
 
                 const result = buildResultMessage(transitionResult, 'The CxA will coordinate re-sealing with the GC.');
-                showSuccess(transitionResult.skipped.length === 0 ? 'Marked Ready for Reseal' : result.title, result.message);
+                showSuccess((transitionResult.skipped.length + transitionResult.blocked.length) === 0 ? 'Marked Ready for Reseal' : result.title, result.message);
             } catch (e) {
                 errorEl.innerHTML = `<div class="error-box">Something went wrong: ${e.message}</div>`;
             }
