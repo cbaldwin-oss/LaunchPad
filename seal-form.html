@@ -562,10 +562,10 @@
 
                 if (error) {
                     console.error('Status update failed for seal(s):', entries.map(e => e.sealNumber).join(', '), error);
-                    blocked.push(...entries.map(e => e.sealNumber));
+                    blocked.push(...entries.map(e => `${e.sealNumber} (${error.message || error.code || 'unknown database error'})`));
                 } else if (!updatedRows || updatedRows.length === 0) {
-                    console.error('Status update affected zero rows (likely a missing RLS policy on this table) for seal(s):', entries.map(e => e.sealNumber).join(', '));
-                    blocked.push(...entries.map(e => e.sealNumber));
+                    console.error('Status update affected zero rows (no error returned — likely an RLS policy issue) for seal(s):', entries.map(e => e.sealNumber).join(', '));
+                    blocked.push(...entries.map(e => `${e.sealNumber} (write silently blocked, no rows changed)`));
                 } else {
                     updatedCount += updatedRows.length;
                 }
@@ -624,12 +624,7 @@
                 const assetName = selectedSeals[0] ? selectedSeals[0].asset_name : '';
                 const location = selectedSeals[0] ? selectedSeals[0].location : '';
 
-                const transitionResult = await applyStatusTransitions(checkedSealIds, 'break-request', {
-                    break_request_date: new Date().toISOString().split('T')[0],
-                    requestor_name: name,
-                    requestor_company: company,
-                    requestor_email: email
-                });
+                const transitionResult = await applyStatusTransitions(checkedSealIds, 'break-request', {});
 
                 if (!transitionResult.anyUpdated) {
                     const { message } = buildResultMessage(transitionResult, '');
@@ -778,9 +773,7 @@
                 const selectedSeals = checkedSealIds.map(id => allKnown.find(s => s.id === id)).filter(Boolean);
                 const assetName = selectedSeals[0] ? selectedSeals[0].asset_name : '';
 
-                const transitionResult = await applyStatusTransitions(checkedSealIds, 'work-completed', {
-                    ready_for_reseal_date: new Date().toISOString().split('T')[0]
-                });
+                const transitionResult = await applyStatusTransitions(checkedSealIds, 'work-completed', {});
 
                 if (!transitionResult.anyUpdated) {
                     const { message } = buildResultMessage(transitionResult, '');
