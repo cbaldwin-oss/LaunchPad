@@ -28,6 +28,14 @@
         .error-box { background: #ffebee; color: #c62828; padding: 12px; border-radius: 8px; margin-top: 12px; font-size: 14px; }
         .loading { text-align: center; padding: 60px 20px; color: #999; }
         .empty-note { color: #999; text-align: center; padding: 10px 0; font-size: 14px; }
+        .ccm-banner {
+            background: #fff3e0; border: 1px solid #ffb74d; color: #e65100; border-radius: 8px;
+            padding: 12px 14px; font-size: 13px; font-weight: 600; margin-bottom: 16px; line-height: 1.4;
+        }
+        .form-explainer {
+            background: #f1f8f4; border-left: 3px solid #2e7d32; padding: 10px 12px; border-radius: 4px;
+            font-size: 13px; color: #33513a; margin-bottom: 16px; line-height: 1.4;
+        }
 
         .action-btn {
             display: block; width: 100%; padding: 20px; margin-bottom: 12px; border-radius: 10px; border: none;
@@ -65,6 +73,7 @@
         <p id="form-subtitle">Loading...</p>
     </div>
     <div class="container">
+        <div class="ccm-banner">⚠️ Contact the Chain of Custody Manager (CCM) before breaking any seal. Do not break a seal without an approved Break Request on file.</div>
         <div id="app-content" class="loading">Loading...</div>
     </div>
 
@@ -339,12 +348,10 @@
                 html = '<p class="empty-note">No eligible seals found for the selected asset(s).</p>';
             }
 
-            if (section === 'break-request') {
-                html += `
-                    <div id="${section}-new-seal-box-wrap"></div>
-                    <a class="back-link" style="margin-top:8px;" onclick="showNewSealBox('${section}')">+ This seal isn't listed / add a new one</a>
-                `;
-            }
+            html += `
+                <div id="${section}-new-seal-box-wrap"></div>
+                <a class="back-link" style="margin-top:8px;" onclick="showNewSealBox('${section}')">+ This seal isn't listed / add a new one</a>
+            `;
 
             panel.innerHTML = html;
             sealToggle.innerText = 'Select seal(s)... ▾';
@@ -370,6 +377,21 @@
             `;
         }
 
+        // A brand-new seal created from Break Seals or Work Completed needs
+        // to start at a status that's actually eligible for THAT section's
+        // trigger — otherwise it'd be created and then immediately absent
+        // from the very list it was just added to. Break Request keeps
+        // using the workflow's own starting status, since that's what a
+        // genuinely new/never-logged seal should be.
+        function getStartingStatusForSection(section) {
+            if (section !== 'break-request') {
+                const match = getActiveTransitions().find(t => t.formTrigger === section);
+                if (match) return match.fromName;
+            }
+            const first = getActiveStatuses()[0];
+            return first ? first.name : 'Intact';
+        }
+
         async function createNewSeal(section) {
             const sealNumber = document.getElementById(`${section}-new-seal-number`).value.trim();
             const assetName = document.getElementById(`${section}-new-seal-asset`).value.trim();
@@ -387,7 +409,7 @@
                     location: location,
                     sub_area: subArea,
                     seal_number: sealNumber,
-                    status: (getActiveStatuses()[0] && getActiveStatuses()[0].name) || 'Intact',
+                    status: getStartingStatusForSection(section),
                     inspection_date: new Date().toISOString().split('T')[0]
                 }]).select();
 
@@ -484,8 +506,9 @@
         function renderBreakRequestForm(content) {
             content.innerHTML = `
                 <a class="back-link" onclick="backToActionSelect()">&larr; Back</a>
+                <div class="form-explainer"><strong>Use this when:</strong> you need to break a seal for scheduled testing, an issue repair, a settings change, or any other authorized work — but haven't been approved yet. Submitting this notifies the CCM to review your request.</div>
                 <div class="card">
-                    <p>Select the asset(s) and seal(s) you're requesting to break, and why. The Chain of Custody Manager will be notified automatically — do not break any seal before it is approved.</p>
+                    <p>Select the asset(s) and seal(s) you're requesting to break, and why.</p>
                     ${renderAssetSealPickerHtml('break-request')}
                     <label>Reason for Request</label>
                     <textarea id="reason" placeholder="e.g. Scheduled testing, issue repair, settings change..."></textarea>
@@ -575,6 +598,23 @@
                     ccm_decision: 'Pending'
                 }]);
 
+                // One row per seal, with every field this form collects.
+                // Best-effort — this table may not exist for every project.
+                try {
+                    await _supabase.from(T('RequestedSeals')).insert(
+                        selectedSeals.map(s => ({
+                            seal_number: s.seal_number,
+                            asset_name: s.asset_name,
+                            location: s.location,
+                            reason,
+                            requestor_name: name,
+                            requestor_company: company,
+                            requestor_email: email,
+                            request_date: new Date().toISOString().split('T')[0]
+                        }))
+                    );
+                } catch (e) { console.warn('RequestedSeals log insert failed (request itself was still saved):', e); }
+
                 if (scriptUrl) {
                     try {
                         await fetch(`${scriptUrl}?action=notifyCCM&project=${encodeURIComponent(PROJECT_KEY)}&asset=${encodeURIComponent(assetName)}&seals=${encodeURIComponent(sealNumbers)}&requestor=${encodeURIComponent(name)}&requestorEmail=${encodeURIComponent(email)}`);
@@ -591,6 +631,7 @@
         function renderBreakSealsForm(content) {
             content.innerHTML = `
                 <a class="back-link" onclick="backToActionSelect()">&larr; Back</a>
+                <div class="form-explainer"><strong>Use this when:</strong> the CCM has already approved your Break Request and you're now physically removing the seal. This logs who broke it, when, and why.</div>
                 <div class="card">
                     <p><strong>Only break seals the CCM has approved.</strong> Breaking a seal without an approval on file is treated as an unauthorized breach and triggers mandatory LOTO and re-inspection.</p>
                     ${renderAssetSealPickerHtml('break-seals')}
@@ -622,8 +663,12 @@
             }
 
             try {
+                const allKnown = allSeals.concat(newlyCreatedSeals);
+                const selectedSeals = checkedSealIds.map(id => allKnown.find(s => s.id === id)).filter(Boolean);
+                const breakDate = new Date().toISOString().split('T')[0];
+
                 const applied = await applyStatusTransitions(checkedSealIds, 'break-seals', {
-                    break_date: new Date().toISOString().split('T')[0],
+                    break_date: breakDate,
                     responsible_party: `${removerEmail} (${removerCompany})`,
                     break_reason: breakReason
                 });
@@ -632,6 +677,20 @@
                     errorEl.innerHTML = '<div class="error-box">No valid next status is configured for this action — contact your site admin.</div>';
                     return;
                 }
+
+                try {
+                    await _supabase.from(T('BrokenSeals')).insert(
+                        selectedSeals.map(s => ({
+                            seal_number: s.seal_number,
+                            asset_name: s.asset_name,
+                            location: s.location,
+                            break_date: breakDate,
+                            remover_email: removerEmail,
+                            remover_company: removerCompany,
+                            break_reason: breakReason
+                        }))
+                    );
+                } catch (e) { console.warn('BrokenSeals log insert failed (break itself was still saved):', e); }
 
                 showSuccess('Seal Break Logged', 'The log has been updated. Use the Work Completed form once your work behind the seal is finished.');
             } catch (e) {
@@ -643,6 +702,7 @@
         function renderWorkCompletedForm(content) {
             content.innerHTML = `
                 <a class="back-link" onclick="backToActionSelect()">&larr; Back</a>
+                <div class="form-explainer"><strong>Use this when:</strong> your work behind a broken seal is finished and the asset is ready to be re-sealed. This alerts the CxA/CCM to coordinate re-sealing with the GC.</div>
                 <div class="card">
                     <p>Let the CxA/CCM know these seals are ready to be replaced.</p>
                     ${renderAssetSealPickerHtml('work-completed')}
