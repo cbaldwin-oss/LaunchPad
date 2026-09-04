@@ -612,12 +612,14 @@
                     return;
                 }
 
-                await _supabase.from(T('BreakRequests')).insert([{
-                    asset_name: assetName, location: location,
-                    requested_seal_numbers: sealNumbers,
-                    reason, requestor_name: name, requestor_company: company, requestor_email: email,
-                    ccm_decision: 'Pending'
-                }]);
+                try {
+                    await _supabase.from(T('BreakRequests')).insert([{
+                        asset_name: assetName, location: location,
+                        requested_seal_numbers: sealNumbers,
+                        reason, requestor_name: name, requestor_company: company, requestor_email: email,
+                        ccm_decision: 'Pending'
+                    }]);
+                } catch (e) { console.warn('BreakRequests audit insert failed (request itself was still saved):', e); }
 
                 // One row per seal, with every field this form collects.
                 // Best-effort — this table may not exist for every project.
@@ -643,7 +645,7 @@
                 }
 
                 const result = buildResultMessage(transitionResult, 'The Chain of Custody Manager has been notified and will review your request. You\'ll be notified by email once a decision has been made.');
-                showSuccess(result.skipped.length === 0 ? 'Break Request Submitted' : result.title, result.message);
+                showSuccess(transitionResult.skipped.length === 0 ? 'Break Request Submitted' : result.title, result.message);
             } catch (e) {
                 errorEl.innerHTML = `<div class="error-box">Something went wrong: ${e.message}</div>`;
             }
@@ -716,7 +718,7 @@
                 } catch (e) { console.warn('BrokenSeals log insert failed (break itself was still saved):', e); }
 
                 const result = buildResultMessage(transitionResult, 'The log has been updated. Use the Work Completed form once your work behind the seal is finished.');
-                showSuccess(result.skipped.length === 0 ? 'Seal Break Logged' : result.title, result.message);
+                showSuccess(transitionResult.skipped.length === 0 ? 'Seal Break Logged' : result.title, result.message);
             } catch (e) {
                 errorEl.innerHTML = `<div class="error-box">Something went wrong: ${e.message}</div>`;
             }
@@ -768,7 +770,7 @@
                 }
 
                 const result = buildResultMessage(transitionResult, 'The CxA will coordinate re-sealing with the GC.');
-                showSuccess(result.skipped.length === 0 ? 'Marked Ready for Reseal' : result.title, result.message);
+                showSuccess(transitionResult.skipped.length === 0 ? 'Marked Ready for Reseal' : result.title, result.message);
             } catch (e) {
                 errorEl.innerHTML = `<div class="error-box">Something went wrong: ${e.message}</div>`;
             }
