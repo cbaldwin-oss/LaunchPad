@@ -670,13 +670,21 @@ input:not([type="checkbox"]), textarea, select {
         </div>
 
         <div id="ts-panel-statusflow" style="display:none;">
-            <p style="color:#666; font-size:13px; margin-top:-8px;">Define the seal statuses and how they can progress. Check a box to add an arrow from that status to another — check more than one to branch into multiple paths.</p>
+            <p style="color:#666; font-size:13px; margin-top:-8px;">Define the seal statuses, then build the triggers that move a seal between them — each trigger can require any of several previous statuses and optionally fire automatically when a specific form is submitted.</p>
             <div id="workflow-selector-wrap" style="display:flex; gap:8px; margin-bottom:14px;"></div>
-            <div id="status-flow-editor" style="max-height:280px; overflow-y:auto; margin-bottom:12px; display:flex; flex-direction:column; gap:10px;"></div>
-            <div style="position:relative; display:inline-block;">
+            <div style="font-size:12px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:8px;">Statuses</div>
+            <div id="status-flow-editor" style="max-height:220px; overflow-y:auto; margin-bottom:12px; display:flex; flex-direction:column; gap:10px;"></div>
+            <div style="position:relative; display:inline-block; margin-bottom:16px;">
                 <button id="add-status-menu-btn" class="btn btn-add" onclick="toggleAddStatusMenu()">+ Add Status ▾</button>
                 <div id="add-status-menu" style="display:none; position:absolute; top:100%; left:0; margin-top:4px; background:white; border:1px solid #ddd; border-radius:8px; box-shadow:0 4px 16px rgba(0,0,0,0.15); z-index:50; min-width:240px; max-height:260px; overflow-y:auto;"></div>
             </div>
+
+            <div style="border-top:1px dashed #ccc; padding-top:14px;">
+                <div style="font-size:12px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:8px;">Triggers</div>
+                <div id="triggers-list" style="max-height:280px; overflow-y:auto; margin-bottom:12px;"></div>
+                <button class="btn btn-add" onclick="addTrigger()">+ Add Trigger</button>
+            </div>
+
             <div style="margin-top:16px; border-top:1px dashed #ccc; padding-top:14px;">
                 <div style="font-size:12px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:8px;">Preview</div>
                 <div id="status-flow-preview" style="position:relative; background:#fafafa; border:1px solid #eee; border-radius:8px; padding:24px; min-height:100px; overflow:visible;"></div>
@@ -780,13 +788,13 @@ function makeDefaultWorkflow() {
             { id: 'replaced_non_approved', name: 'Replaced (Non-Approved)', color: '#e0e0e0' }
         ],
         transitions: [
-            { from: 'intact', to: 'break_requested' },
-            { from: 'break_requested', to: 'break_approved' },
-            { from: 'break_approved', to: 'broken_approved' },
-            { from: 'broken_approved', to: 'ready_for_reseal' },
-            { from: 'ready_for_reseal', to: 'replaced_approved' },
-            { from: 'intact', to: 'non_approved_break' },
-            { from: 'non_approved_break', to: 'replaced_non_approved' }
+            { id: 't1', from: ['intact'], to: 'break_requested', formTrigger: 'break-request' },
+            { id: 't2', from: ['break_requested'], to: 'break_approved', formTrigger: '' },
+            { id: 't3', from: ['break_approved'], to: 'broken_approved', formTrigger: 'break-seals' },
+            { id: 't4', from: ['broken_approved'], to: 'ready_for_reseal', formTrigger: 'work-completed' },
+            { id: 't5', from: ['ready_for_reseal'], to: 'replaced_approved', formTrigger: '' },
+            { id: 't6', from: ['intact'], to: 'non_approved_break', formTrigger: '' },
+            { id: 't7', from: ['non_approved_break'], to: 'replaced_non_approved', formTrigger: '' }
         ]
     };
 }
@@ -902,6 +910,18 @@ async function loadColumnConfig() {
                 transitions: data.statusFlow.transitions || []
             }];
         }
+        // Normalize every transition to the current shape — needed for any
+        // save made before triggers supported multiple previous statuses,
+        // where "from" was a single id instead of an array, and before
+        // transitions had their own id at all.
+        workflows.forEach(w => {
+            w.transitions = (w.transitions || []).map((t, i) => ({
+                id: t.id || ('trigger_' + w.id + '_' + i),
+                from: Array.isArray(t.from) ? t.from : [t.from],
+                to: t.to,
+                formTrigger: t.formTrigger || ''
+            }));
+        });
         currentEditingWorkflowId = getActiveWorkflow().id;
     } catch (e) {
         console.warn('Could not load column settings, using defaults:', e);
@@ -1076,7 +1096,7 @@ function renderStatusFlowEditor() {
     const container = document.getElementById('status-flow-editor');
     container.innerHTML = wf.statuses.map((s, i) => `
         <div style="border:1px solid #ddd; border-radius:8px; padding:10px 12px; background:#f8f9fa;">
-            <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+            <div style="display:flex; align-items:center; gap:8px;">
                 <div style="display:flex; flex-direction:column;">
                     <button onclick="moveFlowStatus('${s.id}', -1)" ${i === 0 ? 'disabled' : ''} title="Move up" style="background:none; border:none; cursor:${i === 0 ? 'default' : 'pointer'}; color:${i === 0 ? '#ccc' : '#555'}; font-size:12px; line-height:1; padding:2px;">▲</button>
                     <button onclick="moveFlowStatus('${s.id}', 1)" ${i === wf.statuses.length - 1 ? 'disabled' : ''} title="Move down" style="background:none; border:none; cursor:${i === wf.statuses.length - 1 ? 'default' : 'pointer'}; color:${i === wf.statuses.length - 1 ? '#ccc' : '#555'}; font-size:12px; line-height:1; padding:2px;">▼</button>
@@ -1085,29 +1105,97 @@ function renderStatusFlowEditor() {
                 <input type="text" value="${s.name}" onchange="updateFlowStatusName('${s.id}', this.value)" style="flex:1; font-weight:600; padding:8px; border:1px solid #ddd; border-radius:4px; font-size:14px;">
                 <button onclick="removeFlowStatus('${s.id}')" title="Delete status" style="background:none; border:none; color:#d32f2f; cursor:pointer; font-size:18px; padding:0 4px; flex-shrink:0;">&times;</button>
             </div>
-            <div style="font-size:11px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:6px;">Leads to:</div>
-            <div style="display:flex; flex-direction:column; gap:8px;">
-                ${wf.statuses.filter(other => other.id !== s.id).map(other => {
-                    const transition = wf.transitions.find(t => t.from === s.id && t.to === other.id);
-                    return `
-                    <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-                        <label style="display:flex; align-items:center; gap:5px; font-size:13px; cursor:pointer;">
-                            <input type="checkbox" ${transition ? 'checked' : ''} onchange="toggleFlowTransition('${s.id}', '${other.id}', this.checked); renderStatusFlowEditor();">
-                            ${other.name}
-                        </label>
-                        ${transition ? `
-                            <select onchange="setTransitionFormTrigger('${s.id}', '${other.id}', this.value)" style="font-size:12px; padding:4px 8px; border:1px solid #ddd; border-radius:4px; color:#555;">
-                                <option value="" ${!transition.formTrigger ? 'selected' : ''}>Manual only (no form)</option>
-                                <option value="break-request" ${transition.formTrigger === 'break-request' ? 'selected' : ''}>Triggered by: Break Request</option>
-                                <option value="break-seals" ${transition.formTrigger === 'break-seals' ? 'selected' : ''}>Triggered by: Break Seals</option>
-                                <option value="work-completed" ${transition.formTrigger === 'work-completed' ? 'selected' : ''}>Triggered by: Work Completed</option>
-                            </select>
-                        ` : ''}
-                    </div>
-                `; }).join('') || '<span style="color:#bbb; font-size:12px;">Add another status first</span>'}
-            </div>
         </div>
     `).join('');
+
+    renderTriggersList();
+}
+
+// A trigger defines: given the seal is CURRENTLY in any one of several
+// possible previous statuses, submitting a given form (or nothing, for a
+// manual-only change) moves it to one resulting status. Supporting
+// multiple previous statuses per trigger means "Intact OR Removed, via
+// Break Request, → Break Requested" is one rule instead of needing a
+// separate one per previous status.
+function renderTriggersList() {
+    const wf = getEditingWorkflow();
+    const container = document.getElementById('triggers-list');
+    if (!container) return;
+
+    if (wf.statuses.length < 2) {
+        container.innerHTML = '<p style="color:#bbb; font-size:12px; padding:8px 0;">Add at least two statuses above first.</p>';
+        return;
+    }
+
+    container.innerHTML = wf.transitions.map(t => `
+        <div style="border:1px solid #ddd; border-radius:8px; padding:12px; background:#fafafa; margin-bottom:10px;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px;">
+                <div style="flex:1;">
+                    <div style="font-size:11px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:6px;">Previous Status(es)</div>
+                    <div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:10px;">
+                        ${wf.statuses.map(s => `
+                            <label style="display:flex; align-items:center; gap:5px; font-size:13px; cursor:pointer;">
+                                <input type="checkbox" ${t.from.includes(s.id) ? 'checked' : ''} onchange="toggleTriggerFromStatus('${t.id}', '${s.id}', this.checked)">
+                                ${s.name}
+                            </label>
+                        `).join('')}
+                    </div>
+
+                    <div style="display:flex; gap:16px; flex-wrap:wrap; align-items:center;">
+                        <div>
+                            <label style="display:block; font-size:11px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:4px;">Resulting Status</label>
+                            <select onchange="setTriggerTo('${t.id}', this.value)" style="font-size:13px; padding:6px 8px; border:1px solid #ddd; border-radius:4px;">
+                                <option value="">Select...</option>
+                                ${wf.statuses.map(s => `<option value="${s.id}" ${t.to === s.id ? 'selected' : ''}>${s.name}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div>
+                            <label style="display:block; font-size:11px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:4px;">Triggered By</label>
+                            <select onchange="setTriggerFormTrigger('${t.id}', this.value)" style="font-size:13px; padding:6px 8px; border:1px solid #ddd; border-radius:4px;">
+                                <option value="" ${!t.formTrigger ? 'selected' : ''}>Manual only (no form)</option>
+                                <option value="break-request" ${t.formTrigger === 'break-request' ? 'selected' : ''}>Break Request</option>
+                                <option value="break-seals" ${t.formTrigger === 'break-seals' ? 'selected' : ''}>Break Seals</option>
+                                <option value="work-completed" ${t.formTrigger === 'work-completed' ? 'selected' : ''}>Work Completed</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                <button onclick="removeTrigger('${t.id}')" title="Delete trigger" style="background:none; border:none; color:#d32f2f; cursor:pointer; font-size:18px; padding:0 4px; flex-shrink:0;">&times;</button>
+            </div>
+        </div>
+    `).join('') + (wf.transitions.length === 0 ? '<p style="color:#bbb; font-size:12px; padding:8px 0;">No triggers defined yet.</p>' : '');
+}
+
+function addTrigger() {
+    const wf = getEditingWorkflow();
+    wf.transitions.push({ id: 'trigger_' + Date.now(), from: [], to: '', formTrigger: '' });
+    renderTriggersList();
+}
+
+function removeTrigger(id) {
+    const wf = getEditingWorkflow();
+    wf.transitions = wf.transitions.filter(t => t.id !== id);
+    renderTriggersList();
+}
+
+function toggleTriggerFromStatus(triggerId, statusId, checked) {
+    const wf = getEditingWorkflow();
+    const t = wf.transitions.find(t => t.id === triggerId);
+    if (!t) return;
+    if (checked && !t.from.includes(statusId)) t.from.push(statusId);
+    else if (!checked) t.from = t.from.filter(id => id !== statusId);
+}
+
+function setTriggerTo(triggerId, statusId) {
+    const wf = getEditingWorkflow();
+    const t = wf.transitions.find(t => t.id === triggerId);
+    if (t) t.to = statusId;
+}
+
+function setTriggerFormTrigger(triggerId, formTrigger) {
+    const wf = getEditingWorkflow();
+    const t = wf.transitions.find(t => t.id === triggerId);
+    if (t) t.formTrigger = formTrigger;
 }
 
 function moveFlowStatus(id, direction) {
@@ -1189,10 +1277,12 @@ function addFlowStatus() {
 }
 
 function removeFlowStatus(id) {
-    if (!confirm('Delete this status? Any arrows to/from it will also be removed.')) return;
+    if (!confirm('Delete this status? Any triggers using it will also be updated or removed.')) return;
     const wf = getEditingWorkflow();
     wf.statuses = wf.statuses.filter(s => s.id !== id);
-    wf.transitions = wf.transitions.filter(t => t.from !== id && t.to !== id);
+    wf.transitions = wf.transitions
+        .map(t => ({ ...t, from: t.from.filter(fromId => fromId !== id) }))
+        .filter(t => t.to !== id && t.from.length > 0);
     renderStatusFlowEditor();
 }
 
@@ -1204,22 +1294,6 @@ function updateFlowStatusName(id, name) {
 function updateFlowStatusColor(id, color) {
     const s = getEditingWorkflow().statuses.find(s => s.id === id);
     if (s) s.color = color;
-}
-
-function toggleFlowTransition(fromId, toId, checked) {
-    const wf = getEditingWorkflow();
-    const exists = wf.transitions.some(t => t.from === fromId && t.to === toId);
-    if (checked && !exists) {
-        wf.transitions.push({ from: fromId, to: toId, formTrigger: '' });
-    } else if (!checked && exists) {
-        wf.transitions = wf.transitions.filter(t => !(t.from === fromId && t.to === toId));
-    }
-}
-
-function setTransitionFormTrigger(fromId, toId, formTrigger) {
-    const wf = getEditingWorkflow();
-    const t = wf.transitions.find(t => t.from === fromId && t.to === toId);
-    if (t) t.formTrigger = formTrigger;
 }
 
 // Renders each status as a stacked box (top to bottom, in list order) with
@@ -1251,17 +1325,21 @@ function renderStatusFlowPreview() {
     let labelsHtml = '';
     const formLabels = { 'break-request': 'Break Request', 'break-seals': 'Break Seals', 'work-completed': 'Work Completed' };
     wf.transitions.forEach(t => {
-        const from = positions[t.from], to = positions[t.to];
-        if (!from || !to) return;
-        // Straight line from the center of one box to the center of the
-        // other; the boxes themselves (z-index above the line) visually
-        // clip the line to look like it starts/ends at each edge.
-        arrowsHtml += `<line x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}" stroke="#2e7d32" stroke-width="2" marker-end="url(#ts-arrowhead)" />`;
+        const to = positions[t.to];
+        if (!to) return;
+        t.from.forEach(fromId => {
+            const from = positions[fromId];
+            if (!from) return;
+            // Straight line from the center of one box to the center of
+            // the other; the boxes themselves (z-index above the line)
+            // visually clip the line to look like it starts/ends at each edge.
+            arrowsHtml += `<line x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}" stroke="#2e7d32" stroke-width="2" marker-end="url(#ts-arrowhead)" />`;
 
-        const midX = (from.x + to.x) / 2;
-        const midY = (from.y + to.y) / 2;
-        const label = t.formTrigger ? formLabels[t.formTrigger] : 'Manual';
-        labelsHtml += `<div style="position:absolute; left:${midX}px; top:${midY}px; transform:translate(-50%,-50%); background:white; border:1px solid #ddd; border-radius:4px; padding:1px 6px; font-size:10px; color:${t.formTrigger ? '#1565c0' : '#999'}; font-weight:600; white-space:nowrap; z-index:3;">${label}</div>`;
+            const midX = (from.x + to.x) / 2;
+            const midY = (from.y + to.y) / 2;
+            const label = t.formTrigger ? formLabels[t.formTrigger] : 'Manual';
+            labelsHtml += `<div style="position:absolute; left:${midX}px; top:${midY}px; transform:translate(-50%,-50%); background:white; border:1px solid #ddd; border-radius:4px; padding:1px 6px; font-size:10px; color:${t.formTrigger ? '#1565c0' : '#999'}; font-weight:600; white-space:nowrap; z-index:3;">${label}</div>`;
+        });
     });
 
     preview.innerHTML = `

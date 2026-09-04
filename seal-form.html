@@ -97,9 +97,9 @@
                     { id: 'replaced_approved', name: 'Replaced (Approved)', color: '#e0e0e0' }
                 ],
                 transitions: [
-                    { from: 'intact', to: 'break_requested', formTrigger: 'break-request' },
-                    { from: 'break_approved', to: 'broken_approved', formTrigger: 'break-seals' },
-                    { from: 'broken_approved', to: 'ready_for_reseal', formTrigger: 'work-completed' }
+                    { id: 't1', from: ['intact'], to: 'break_requested', formTrigger: 'break-request' },
+                    { id: 't2', from: ['break_approved'], to: 'broken_approved', formTrigger: 'break-seals' },
+                    { id: 't3', from: ['broken_approved'], to: 'ready_for_reseal', formTrigger: 'work-completed' }
                 ]
             }];
         }
@@ -128,11 +128,18 @@
             const result = [];
             getActiveWorkflows().forEach(w => {
                 w.transitions.forEach(t => {
-                    const fromStatus = w.statuses.find(s => s.id === t.from);
                     const toStatus = w.statuses.find(s => s.id === t.to);
-                    if (fromStatus && toStatus) {
-                        result.push({ fromName: fromStatus.name, toName: toStatus.name, formTrigger: t.formTrigger || '' });
-                    }
+                    if (!toStatus) return;
+                    // "from" is normally an array (a trigger can require
+                    // any of several previous statuses) — this also handles
+                    // an older save where it was still a single value.
+                    const fromIds = Array.isArray(t.from) ? t.from : [t.from];
+                    fromIds.forEach(fromId => {
+                        const fromStatus = w.statuses.find(s => s.id === fromId);
+                        if (fromStatus) {
+                            result.push({ fromName: fromStatus.name, toName: toStatus.name, formTrigger: t.formTrigger || '' });
+                        }
+                    });
                 });
             });
             return result;
