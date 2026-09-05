@@ -97,6 +97,8 @@
         let scriptUrl = '';
         let newlyCreatedSeals = [];
         let workflows = [];
+        let globalStatusOrder = [];
+        let reinspectionFilterStatuses = [];
 
         // Same sensible default as tamperseal.html's own makeDefaultWorkflow,
         // used only if no config has ever been saved for this project yet.
@@ -136,7 +138,15 @@
                     if (!seen.has(key)) { seen.add(key); result.push(s); }
                 });
             });
-            return result;
+            if (globalStatusOrder.length === 0) return result;
+            return result.slice().sort((a, b) => {
+                const ai = globalStatusOrder.indexOf(a.name.toLowerCase());
+                const bi = globalStatusOrder.indexOf(b.name.toLowerCase());
+                if (ai === -1 && bi === -1) return 0;
+                if (ai === -1) return 1;
+                if (bi === -1) return -1;
+                return ai - bi;
+            });
         }
 
         // Resolves each transition's internal status ids to their actual
@@ -172,25 +182,20 @@
             return first ? first.name : '';
         }
 
-        // Reinspection is a broader "catch anything broken" concept per the
-        // SOP (any unauthorized breach, regardless of the exact wording of
-        // the status text) — so it matches by substring containment rather
-        // than requiring an exact status match like the other sections do.
-        function statusMatchesTransitionFrom(currentStatus, fromName, section) {
-            if (section === 'reinspection') {
-                return currentStatus.includes(fromName) || fromName.includes(currentStatus);
-            }
-            return currentStatus === fromName;
-        }
-
         function isEligibleForSection(seal, section) {
             const current = effectiveStatusName(seal).toLowerCase();
-            return getActiveTransitions().some(t => statusMatchesTransitionFrom(current, t.fromName.toLowerCase(), section) && t.formTrigger === section);
+            if (section === 'reinspection') {
+                // Explicit, admin-curated list — independent of whatever
+                // triggers are configured, so eligibility here is set
+                // directly rather than inferred from transition names.
+                return reinspectionFilterStatuses.includes(current);
+            }
+            return getActiveTransitions().some(t => t.fromName.toLowerCase() === current && t.formTrigger === section);
         }
 
         function getNextStatus(seal, section) {
             const current = effectiveStatusName(seal).toLowerCase();
-            const match = getActiveTransitions().find(t => statusMatchesTransitionFrom(current, t.fromName.toLowerCase(), section) && t.formTrigger === section);
+            const match = getActiveTransitions().find(t => t.fromName.toLowerCase() === current && t.formTrigger === section);
             return match ? match.toName : null;
         }
 
@@ -249,6 +254,8 @@
                             transitions: data.statusFlow.transitions || []
                         }];
                     }
+                    if (Array.isArray(data.globalStatusOrder)) globalStatusOrder = data.globalStatusOrder;
+                    if (Array.isArray(data.reinspectionFilterStatuses)) reinspectionFilterStatuses = data.reinspectionFilterStatuses;
                 } catch (e) { console.warn('Could not load workflow config, using default:', e); }
             }
 

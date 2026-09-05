@@ -687,6 +687,12 @@ input:not([type="checkbox"]), textarea, select {
             </div>
 
             <div style="margin-top:16px; border-top:1px dashed #ccc; padding-top:14px;">
+                <div style="font-size:12px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:4px;">Reinspection Eligibility</div>
+                <p style="color:#888; font-size:12px; margin:0 0 8px;">Which statuses should make a seal show up on the field Reinspection form. This is separate from Triggers — it only controls which seals appear, not what they transition to.</p>
+                <div id="reinspection-filter-list" style="max-height:200px; overflow-y:auto;"></div>
+            </div>
+
+            <div style="margin-top:16px; border-top:1px dashed #ccc; padding-top:14px;">
                 <div style="font-size:12px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:8px;">Preview</div>
                 <div id="status-flow-preview" style="position:relative; background:#fafafa; border:1px solid #eee; border-radius:8px; padding:24px; min-height:100px; overflow:visible;"></div>
             </div>
@@ -806,6 +812,15 @@ function makeDefaultWorkflow() {
 }
 let workflows = [makeDefaultWorkflow()];
 let currentEditingWorkflowId = workflows[0].id;
+// Display order for statuses, spanning ALL workflows (not just the one
+// currently being edited) — controls order in the status filter bar,
+// dropdowns, and trigger checklists. Stored as lowercased names since a
+// status is identified by name once aggregated across workflows.
+let globalStatusOrder = [];
+// Explicit admin-curated list of which statuses make a seal eligible for
+// the Reinspection form — independent of any configured trigger, so it's
+// not tied to fuzzy substring-matching against trigger "from" names.
+let reinspectionFilterStatuses = [];
 
 function getActiveWorkflows() {
     const active = workflows.filter(w => w.active);
@@ -814,6 +829,9 @@ function getActiveWorkflows() {
 // Aggregated, deduplicated-by-name statuses across every active workflow —
 // this is what actually drives the real per-row status dropdown and the
 // status filter bar, now that more than one workflow can be active at once.
+// Sorted by globalStatusOrder when available; anything not yet placed in
+// that order (e.g. freshly-added statuses) falls in after everything that
+// is, in whatever order it was otherwise encountered.
 function getActiveStatuses() {
     const seen = new Set();
     const result = [];
@@ -826,8 +844,43 @@ function getActiveStatuses() {
             }
         });
     });
-    return result;
+    if (globalStatusOrder.length === 0) return result;
+    return result.slice().sort((a, b) => {
+        const ai = globalStatusOrder.indexOf(a.name.toLowerCase());
+        const bi = globalStatusOrder.indexOf(b.name.toLowerCase());
+        if (ai === -1 && bi === -1) return 0;
+        if (ai === -1) return 1;
+        if (bi === -1) return -1;
+        return ai - bi;
+    });
 }
+// Same aggregation as getActiveStatuses(), but across ALL workflows
+// (active or not) — used by the Status Order settings tab, since an admin
+// should be able to arrange a workflow's status order even before
+// activating it.
+function getAllUniqueStatusesAcrossWorkflows() {
+    const seen = new Set();
+    const result = [];
+    workflows.forEach(w => {
+        w.statuses.forEach(s => {
+            const key = s.name.toLowerCase();
+            if (!seen.has(key)) {
+                seen.add(key);
+                result.push(s);
+            }
+        });
+    });
+    if (globalStatusOrder.length === 0) return result;
+    return result.slice().sort((a, b) => {
+        const ai = globalStatusOrder.indexOf(a.name.toLowerCase());
+        const bi = globalStatusOrder.indexOf(b.name.toLowerCase());
+        if (ai === -1 && bi === -1) return 0;
+        if (ai === -1) return 1;
+        if (bi === -1) return -1;
+        return ai - bi;
+    });
+}
+
 // Singular — used only for UI defaulting (which workflow the Settings
 // editor opens to first), not for anything that determines real behavior.
 function getActiveWorkflow() {
@@ -928,6 +981,8 @@ async function loadColumnConfig() {
                 formTrigger: t.formTrigger || ''
             }));
         });
+        if (Array.isArray(data.globalStatusOrder)) globalStatusOrder = data.globalStatusOrder;
+        if (Array.isArray(data.reinspectionFilterStatuses)) reinspectionFilterStatuses = data.reinspectionFilterStatuses;
         currentEditingWorkflowId = getActiveWorkflow().id;
     } catch (e) {
         console.warn('Could not load column settings, using defaults:', e);
@@ -986,25 +1041,33 @@ function switchTsSettingsTab(tab) {
     }
 }
 
-// Same drag-and-drop reorder pattern as the Columns tab, just applied to
-// the currently-edited workflow's statuses instead — a dedicated, more
-// discoverable place to reorder them than the small ▲/▼ buttons buried in
-// each status card over on the Status Flow tab.
+// Same drag-and-drop reorder pattern as the Columns tab, applied to every
+// status across every workflow combined — not just the one currently
+// being edited, since the display order (filter bar, dropdowns, trigger
+// checklists) is shared across all of them.
 function renderStatusOrderList() {
-    const wf = getEditingWorkflow();
+    // Seed globalStatusOrder from whatever order things are already in,
+    // the first time this is opened (or if nothing's been saved yet) —
+    // gives drag-and-drop a concrete starting order to manipulate.
+    if (globalStatusOrder.length === 0) {
+        globalStatusOrder = getAllUniqueStatusesAcrossWorkflows().map(s => s.name.toLowerCase());
+    }
+
+    const allStatuses = getAllUniqueStatusesAcrossWorkflows();
     const list = document.getElementById('status-order-list');
     list.innerHTML = '';
-    wf.statuses.forEach((s) => {
-        const isFirst = wf.statuses.indexOf(s) === 0;
-        const isLast = wf.statuses.indexOf(s) === wf.statuses.length - 1;
+    allStatuses.forEach((s) => {
+        const key = s.name.toLowerCase();
+        const isFirst = allStatuses.indexOf(s) === 0;
+        const isLast = allStatuses.indexOf(s) === allStatuses.length - 1;
 
         const item = document.createElement('div');
         item.style.cssText = "display:flex; align-items:center; width:100%; padding:10px 12px; background:#f8f9fa; border:1px solid #ddd; border-radius:6px; cursor:grab; user-select:none; box-sizing:border-box;";
         item.draggable = true;
-        item.dataset.statusId = s.id;
+        item.dataset.statusKey = key;
 
         item.addEventListener('dragstart', (e) => {
-            e.dataTransfer.setData('text/plain', s.id);
+            e.dataTransfer.setData('text/plain', key);
             item.style.opacity = '0.5';
         });
         item.addEventListener('dragend', () => {
@@ -1020,26 +1083,34 @@ function renderStatusOrderList() {
         });
         item.addEventListener('drop', (e) => {
             e.preventDefault();
-            const draggedId = e.dataTransfer.getData('text/plain');
-            const draggedIndex = wf.statuses.findIndex(x => x.id === draggedId);
-            const targetIndex = wf.statuses.findIndex(x => x.id === s.id);
+            const draggedKey = e.dataTransfer.getData('text/plain');
+            const draggedIndex = globalStatusOrder.indexOf(draggedKey);
+            const targetIndex = globalStatusOrder.indexOf(key);
             if (draggedIndex === -1 || targetIndex === -1 || draggedIndex === targetIndex) return;
-            const draggedItem = wf.statuses.splice(draggedIndex, 1)[0];
-            wf.statuses.splice(targetIndex, 0, draggedItem);
+            const draggedItem = globalStatusOrder.splice(draggedIndex, 1)[0];
+            globalStatusOrder.splice(targetIndex, 0, draggedItem);
             renderStatusOrderList();
         });
 
         item.innerHTML = `
             <span style="margin-right:10px; cursor:grab; color:#999; font-size:16px;" title="Drag to reorder">⣿</span>
             <div style="display:flex; flex-direction:column; margin-right:10px;">
-                <button onclick="moveFlowStatus('${s.id}', -1); renderStatusOrderList();" ${isFirst ? 'disabled' : ''} title="Move up" style="background:none; border:none; cursor:${isFirst ? 'default' : 'pointer'}; color:${isFirst ? '#ccc' : '#555'}; font-size:12px; line-height:1; padding:2px;">▲</button>
-                <button onclick="moveFlowStatus('${s.id}', 1); renderStatusOrderList();" ${isLast ? 'disabled' : ''} title="Move down" style="background:none; border:none; cursor:${isLast ? 'default' : 'pointer'}; color:${isLast ? '#ccc' : '#555'}; font-size:12px; line-height:1; padding:2px;">▼</button>
+                <button onclick="moveGlobalStatusOrder('${key}', -1)" ${isFirst ? 'disabled' : ''} title="Move up" style="background:none; border:none; cursor:${isFirst ? 'default' : 'pointer'}; color:${isFirst ? '#ccc' : '#555'}; font-size:12px; line-height:1; padding:2px;">▲</button>
+                <button onclick="moveGlobalStatusOrder('${key}', 1)" ${isLast ? 'disabled' : ''} title="Move down" style="background:none; border:none; cursor:${isLast ? 'default' : 'pointer'}; color:${isLast ? '#ccc' : '#555'}; font-size:12px; line-height:1; padding:2px;">▼</button>
             </div>
             <span style="width:16px; height:16px; border-radius:3px; background:${s.color}; border:1px solid rgba(0,0,0,0.15); margin-right:10px; flex-shrink:0;"></span>
             <span style="font-weight:600; color:#333; font-size:14px;">${s.name}</span>
         `;
         list.appendChild(item);
     });
+}
+
+function moveGlobalStatusOrder(key, direction) {
+    const index = globalStatusOrder.indexOf(key);
+    const newIndex = index + direction;
+    if (newIndex < 0 || newIndex >= globalStatusOrder.length) return;
+    [globalStatusOrder[index], globalStatusOrder[newIndex]] = [globalStatusOrder[newIndex], globalStatusOrder[index]];
+    renderStatusOrderList();
 }
 
 function renderColumnSettingsList() {
@@ -1180,6 +1251,24 @@ function renderStatusFlowEditor() {
     `).join('');
 
     renderTriggersList();
+    renderReinspectionFilterList();
+}
+
+function renderReinspectionFilterList() {
+    const container = document.getElementById('reinspection-filter-list');
+    if (!container) return;
+    const allStatuses = getAllUniqueStatusesAcrossWorkflows();
+    container.innerHTML = allStatuses.length > 0 ? allStatuses.map(s => `
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; padding:4px 0;">
+            <input type="checkbox" ${reinspectionFilterStatuses.includes(s.name.toLowerCase()) ? 'checked' : ''} onchange="toggleReinspectionFilterStatus('${s.name.toLowerCase()}', this.checked)">
+            ${s.name}
+        </label>
+    `).join('') : '<p style="color:#bbb; font-size:12px;">Add statuses above first.</p>';
+}
+
+function toggleReinspectionFilterStatus(key, checked) {
+    if (checked && !reinspectionFilterStatuses.includes(key)) reinspectionFilterStatuses.push(key);
+    else if (!checked) reinspectionFilterStatuses = reinspectionFilterStatuses.filter(k => k !== key);
 }
 
 // A trigger defines: given the seal is CURRENTLY in any one of several
@@ -1448,7 +1537,13 @@ async function saveTsSettings() {
     try {
         await fetch(TS_SCRIPT_URL, {
             method: 'POST',
-            body: JSON.stringify({ action: 'setTamperSealColumnConfig', columnConfig: columnConfig, workflows: workflows })
+            body: JSON.stringify({
+                action: 'setTamperSealColumnConfig',
+                columnConfig: columnConfig,
+                workflows: workflows,
+                globalStatusOrder: globalStatusOrder,
+                reinspectionFilterStatuses: reinspectionFilterStatuses
+            })
         });
     } catch (e) {
         alert('Settings applied, but saving them to the backend failed: ' + e.message);
