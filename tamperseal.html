@@ -35,8 +35,8 @@
 }
 
         .header {
-            height: 48px; background-color: #ffffff; border-bottom: 1px solid #dcdcdc;
-            display: flex; align-items: center; padding: 0 30px; box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+            min-height: 48px; padding: 8px 30px; background-color: #ffffff; border-bottom: 1px solid #dcdcdc;
+            display: flex; align-items: center; box-shadow: 0 2px 10px rgba(0,0,0,0.08);
         }
         .header-center { flex: 1; text-align: center; }
         .header-center span { color: #d32f2f; font-weight: 800; font-size: 30px; letter-spacing: -1px; }
@@ -280,13 +280,14 @@
     gap: 24px;               /* breathing room between the Locations and Statuses groups */
     align-items: center;
     justify-content: flex-start;
-    height: 100%;
+    height: auto;
     width: 100%;             /* fill the header's full width now that the logo/title are gone */
 }
 
 .filter-group {
     display: flex;
     gap: 6px;
+    flex-wrap: wrap;
     align-items: center;
 }
 
@@ -1771,7 +1772,7 @@ function generateReinspectionPreview() {
         inspection_date: document.getElementById('reinspectDate').value,
         signoff: document.getElementById('reinspectSignoff').value,
         status: 'Intact',
-        inspection_notes: `Reinspection replacement for Seal #${cb.dataset.old_seal}`
+        inspection_notes: `Reinspection replacement for Seal #${cb.dataset.oldSeal}`
     }));
 
     closeAddModal();
@@ -2573,7 +2574,7 @@ function proceedToStandardForm() {
 
     isReinspectionMode = true;
     // Capture Seal Numbers for the note
-    selectedBrokenSeals = Array.from(checked).map(cb => cb.dataset.old_seal);
+    selectedBrokenSeals = Array.from(checked).map(cb => cb.dataset.oldSeal);
     // NEW: Capture Database IDs for the status update
     selectedBrokenSealIds = Array.from(checked).map(cb => cb.value); 
 
