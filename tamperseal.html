@@ -70,7 +70,15 @@
     color: white;
 }
 
-        .frozen-grid { display: flex; width: 100%; align-items: center; gap: 4px; padding: 0 20px; box-sizing: border-box; }
+        .frozen-grid { 
+    display: flex; 
+    width: 95%; 
+    margin: 0 auto;
+    align-items: center; 
+    gap: 4px; 
+    padding: 0 20px;
+    box-sizing: border-box; 
+}
         .header-cell { flex: 1; text-align: center; font-size: 11px; font-weight: bold; text-transform: uppercase; border-right: 1px solid rgba(255,255,255,0.5); padding: 4px 0; box-sizing: border-box; }
         .header-cell:last-of-type { border-right: none; }
 
@@ -1694,12 +1702,12 @@ async function loadBrokenAssets() {
     const select = document.getElementById('brokenAssetSelect');
     const { data, error } = await _supabase
         .from(T('Assets'))
-        .select('asset_name')
-        .ilike('status', '%broken%'); // Matches 'Broken' case-insensitive
+        .select('asset_name, status');
 
     if (error) return;
 
-    const uniqueAssets = [...new Set(data.map(d => d.asset_name))].sort();
+    const eligible = data.filter(d => reinspectionFilterStatuses.includes((d.status || '').toLowerCase().trim()));
+    const uniqueAssets = [...new Set(eligible.map(d => d.asset_name))].sort();
     select.innerHTML = '<option value="">-- Select Asset --</option>' + 
         uniqueAssets.map(a => `<option value="${a}">${a}</option>`).join('');
 }
@@ -1712,11 +1720,12 @@ async function loadBrokenSealsForAsset(assetName) {
     const container = document.getElementById('brokenSealsContainer');
     const list = document.getElementById('sealCheckboxList');
     
-    const { data, error } = await _supabase
+    const { data: allData, error } = await _supabase
         .from(T('Assets'))
-        .select('id, seal_number, location, sub_area')
-        .eq('asset_name', assetName)
-        .ilike('status', '%broken%');
+        .select('id, seal_number, location, sub_area, status')
+        .eq('asset_name', assetName);
+
+    const data = (allData || []).filter(s => reinspectionFilterStatuses.includes((s.status || '').toLowerCase().trim()));
 
     if (error || data.length === 0) {
         container.style.display = 'none';
@@ -2295,10 +2304,17 @@ async function fetchAndRender(container, assetName) {
         });
     }
 
-    // Sort: Broken first
+    // Sort rows by the admin's configured status order (Settings → Status
+    // Order) — not a hardcoded "broken first" rule that only recognized
+    // two specific status names and broke entirely for any custom or
+    // renamed status (like "Non-Authorized Break", which doesn't contain
+    // the substring "broken" at all).
     filteredData.sort((a, b) => {
-        const getP = (s) => (s||'').toLowerCase().includes('broken') ? 1 : (s||'').toLowerCase().includes('intact') ? 2 : 3;
-        return getP(a.status) - getP(b.status);
+        const orderOf = (status) => {
+            const idx = globalStatusOrder.indexOf((status || '').toLowerCase().trim());
+            return idx === -1 ? globalStatusOrder.length : idx;
+        };
+        return orderOf(a.status) - orderOf(b.status);
     });
 
     container.innerHTML = '';
@@ -2518,11 +2534,12 @@ async function loadBrokenSealsForAsset(assetName) {
     const container = document.getElementById('brokenSealsContainer');
     const list = document.getElementById('sealCheckboxList');
     
-    const { data, error } = await _supabase
+    const { data: allData, error } = await _supabase
         .from(T('Assets'))
-        .select('id, seal_number, location, sub_area')
-        .eq('asset_name', assetName)
-        .ilike('status', '%broken%');
+        .select('id, seal_number, location, sub_area, status')
+        .eq('asset_name', assetName);
+
+    const data = (allData || []).filter(s => reinspectionFilterStatuses.includes((s.status || '').toLowerCase().trim()));
 
     if (error || data.length === 0) {
         container.style.display = 'none';
