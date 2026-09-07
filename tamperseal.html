@@ -835,6 +835,28 @@ function getActiveWorkflows() {
     const active = workflows.filter(w => w.active);
     return active.length > 0 ? active : [workflows[0]];
 }
+// Looks up what a seal currently in `currentStatusName` should become when
+// the Reinspection modal's replacement is confirmed — based on whatever
+// trigger(s) are configured with "Triggered By: Reinspection". Only
+// active workflows count, matching exactly what seal-form.html's own
+// transition lookup considers.
+function getReinspectionNextStatus(currentStatusName) {
+    const current = (currentStatusName || '').toLowerCase().trim();
+    for (const w of getActiveWorkflows()) {
+        for (const t of w.transitions) {
+            if (t.formTrigger !== 'reinspection') continue;
+            const matches = t.from.some(fromId => {
+                const s = w.statuses.find(x => x.id === fromId);
+                return s && s.name.toLowerCase() === current;
+            });
+            if (matches) {
+                const toStatus = w.statuses.find(x => x.id === t.to);
+                if (toStatus) return toStatus.name;
+            }
+        }
+    }
+    return null;
+}
 // Aggregated, deduplicated-by-name statuses across every active workflow —
 // this is what actually drives the real per-row status dropdown and the
 // status filter bar, now that more than one workflow can be active at once.
@@ -2756,13 +2778,69 @@ async function saveNewEntries() {
         const { error } = await _supabase.from(T('Assets')).insert(newRecords);
         if (error) throw error;
 
+        // The new replacement seals are saved — now handle the OLD (broken)
+        // seals' status. This was previously never wired up at all:
+        // selectedBrokenSealIds was captured but never used anywhere.
+        let reinspectionSummary = '';
+        if (isReinspectionMode && selectedBrokenSealIds.length > 0) {
+            const groups = {};
+            const skipped = [];
+
+            selectedBrokenSealIds.forEach(id => {
+                const seal = allHierarchyRecords.find(r => String(r.id) === String(id));
+                const currentStatus = seal ? seal.status : null;
+                const nextStatus = getReinspectionNextStatus(currentStatus);
+                if (!nextStatus) {
+                    skipped.push(seal ? `#${seal.seal_number} (currently "${currentStatus || 'unknown'}")` : `id ${id}`);
+                    return;
+                }
+                if (!groups[nextStatus]) groups[nextStatus] = [];
+                groups[nextStatus].push(id);
+            });
+
+            let updatedCount = 0;
+            const blocked = [];
+            for (const [status, ids] of Object.entries(groups)) {
+                // Chaining .select() verifies the write actually happened —
+                // a plain .update() doesn't error when RLS silently filters
+                // it down to zero affected rows, it just "succeeds" having
+                // changed nothing.
+                const { data: updatedRows, error: updateErr } = await _supabase
+                    .from(T('Assets'))
+                    .update({ status })
+                    .in('id', ids)
+                    .select();
+
+                if (updateErr) {
+                    blocked.push(...ids.map(id => `id ${id} (${updateErr.message || 'database error'})`));
+                } else if (!updatedRows || updatedRows.length === 0) {
+                    blocked.push(...ids.map(id => `id ${id} (write blocked, likely a permissions/RLS issue)`));
+                } else {
+                    updatedCount += updatedRows.length;
+                }
+            }
+
+            const problems = [...skipped, ...blocked];
+            if (problems.length === 0) {
+                reinspectionSummary = `\n\n${updatedCount} original seal(s) moved to their next status successfully.`;
+            } else if (updatedCount === 0) {
+                reinspectionSummary = `\n\nERROR: none of the original seals' statuses were updated.\n${problems.join('\n')}`;
+            } else {
+                reinspectionSummary = `\n\n${updatedCount} original seal(s) updated. ${problems.length} had a problem:\n${problems.join('\n')}`;
+            }
+        }
+
         // Success Cleanup
         localStorage.removeItem('pendingPreview');
         isPreviewMode = false;
+        isReinspectionMode = false;
+        selectedBrokenSealIds = [];
         
         indicator.innerText = "Created Successfully";
         await fetchLookupData();
         await fetchHierarchyData();
+
+        if (reinspectionSummary) alert('Reinspection saved.' + reinspectionSummary);
     } catch (err) {
         console.error(err);
         alert("Operation failed. Check console for details.");
