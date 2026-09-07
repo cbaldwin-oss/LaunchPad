@@ -1267,12 +1267,36 @@ function renderReinspectionFilterList() {
     const container = document.getElementById('reinspection-filter-list');
     if (!container) return;
     const allStatuses = getAllUniqueStatusesAcrossWorkflows();
-    container.innerHTML = allStatuses.length > 0 ? allStatuses.map(s => `
+
+    // A status checked here but with no reinspection trigger whose
+    // "Previous Status(es)" includes it will show up as selectable on the
+    // field form, but submitting will find no matching transition and
+    // silently skip it — this cross-checks for that exact gap.
+    const statusesWithReinspectionTrigger = new Set();
+    workflows.forEach(w => {
+        w.transitions.forEach(t => {
+            if (t.formTrigger === 'reinspection') {
+                t.from.forEach(fromId => {
+                    const s = w.statuses.find(x => x.id === fromId);
+                    if (s) statusesWithReinspectionTrigger.add(s.name.toLowerCase());
+                });
+            }
+        });
+    });
+
+    container.innerHTML = allStatuses.length > 0 ? allStatuses.map(s => {
+        const key = s.name.toLowerCase();
+        const isChecked = reinspectionFilterStatuses.includes(key);
+        const hasTrigger = statusesWithReinspectionTrigger.has(key);
+        const warning = (isChecked && !hasTrigger)
+            ? `<span style="color:#e65100; font-size:11px; font-weight:600;" title="This status has no Reinspection trigger configured — seals will be selectable here but submitting won't change their status.">⚠ No matching trigger</span>`
+            : '';
+        return `
         <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; padding:4px 0;">
-            <input type="checkbox" ${reinspectionFilterStatuses.includes(s.name.toLowerCase()) ? 'checked' : ''} onchange="toggleReinspectionFilterStatus('${s.name.toLowerCase()}', this.checked)">
-            ${s.name}
+            <input type="checkbox" ${isChecked ? 'checked' : ''} onchange="toggleReinspectionFilterStatus('${key}', this.checked)">
+            ${s.name} ${warning}
         </label>
-    `).join('') : '<p style="color:#bbb; font-size:12px;">Add statuses above first.</p>';
+    `; }).join('') : '<p style="color:#bbb; font-size:12px;">Add statuses above first.</p>';
 }
 
 function toggleReinspectionFilterStatus(key, checked) {
@@ -1340,12 +1364,14 @@ function addTrigger() {
     const wf = getEditingWorkflow();
     wf.transitions.push({ id: 'trigger_' + Date.now(), from: [], to: '', formTrigger: '' });
     renderTriggersList();
+    renderReinspectionFilterList();
 }
 
 function removeTrigger(id) {
     const wf = getEditingWorkflow();
     wf.transitions = wf.transitions.filter(t => t.id !== id);
     renderTriggersList();
+    renderReinspectionFilterList();
 }
 
 function toggleTriggerFromStatus(triggerId, statusId, checked) {
@@ -1354,6 +1380,7 @@ function toggleTriggerFromStatus(triggerId, statusId, checked) {
     if (!t) return;
     if (checked && !t.from.includes(statusId)) t.from.push(statusId);
     else if (!checked) t.from = t.from.filter(id => id !== statusId);
+    renderReinspectionFilterList();
 }
 
 function setTriggerTo(triggerId, statusId) {
@@ -1366,6 +1393,7 @@ function setTriggerFormTrigger(triggerId, formTrigger) {
     const wf = getEditingWorkflow();
     const t = wf.transitions.find(t => t.id === triggerId);
     if (t) t.formTrigger = formTrigger;
+    renderReinspectionFilterList();
 }
 
 function moveFlowStatus(id, direction) {
