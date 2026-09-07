@@ -1271,9 +1271,13 @@ function renderReinspectionFilterList() {
     // A status checked here but with no reinspection trigger whose
     // "Previous Status(es)" includes it will show up as selectable on the
     // field form, but submitting will find no matching transition and
-    // silently skip it — this cross-checks for that exact gap.
+    // silently skip it — this cross-checks for that exact gap. Only
+    // ACTIVE workflows count here, matching exactly what seal-form.html's
+    // getActiveTransitions() actually considers at runtime — a trigger
+    // sitting in an inactive workflow would otherwise show as "fine" here
+    // while never actually working when someone submits the form.
     const statusesWithReinspectionTrigger = new Set();
-    workflows.forEach(w => {
+    getActiveWorkflows().forEach(w => {
         w.transitions.forEach(t => {
             if (t.formTrigger === 'reinspection') {
                 t.from.forEach(fromId => {
