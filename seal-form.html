@@ -45,7 +45,6 @@
         .action-break-request { background: #1976d2; }
         .action-break-seals { background: #c62828; }
         .action-work-completed { background: #ef6c00; }
-        .action-reinspection { background: #6a1b9a; }
         .back-link { display: inline-block; margin-bottom: 12px; color: #1b5e20; font-weight: 600; font-size: 14px; cursor: pointer; text-decoration: none; }
 
         .multiselect-dropdown { position: relative; margin-bottom: 4px; }
@@ -89,7 +88,8 @@
         const _supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
         const params = new URLSearchParams(window.location.search);
-        const PROJECT_KEY = params.get('project') || '';
+        const PROJECT_ID = params.get('id') || '';
+        let PROJECT_KEY = '';
 
         function T(table) { return `${PROJECT_KEY}${table}`; }
 
@@ -98,7 +98,6 @@
         let newlyCreatedSeals = [];
         let workflows = [];
         let globalStatusOrder = [];
-        let reinspectionFilterStatuses = [];
 
         // Same sensible default as tamperseal.html's own makeDefaultWorkflow,
         // used only if no config has ever been saved for this project yet.
@@ -118,8 +117,7 @@
                 transitions: [
                     { id: 't1', from: ['intact'], to: 'break_requested', formTrigger: 'break-request' },
                     { id: 't2', from: ['break_approved'], to: 'broken_approved', formTrigger: 'break-seals' },
-                    { id: 't3', from: ['broken_approved'], to: 'ready_for_reseal', formTrigger: 'work-completed' },
-                    { id: 't4', from: ['non_approved_break'], to: 'replaced_non_approved', formTrigger: 'reinspection' }
+                    { id: 't3', from: ['broken_approved'], to: 'ready_for_reseal', formTrigger: 'work-completed' }
                 ]
             }];
         }
@@ -184,12 +182,6 @@
 
         function isEligibleForSection(seal, section) {
             const current = effectiveStatusName(seal).toLowerCase();
-            if (section === 'reinspection') {
-                // Explicit, admin-curated list — independent of whatever
-                // triggers are configured, so eligibility here is set
-                // directly rather than inferred from transition names.
-                return reinspectionFilterStatuses.includes(current);
-            }
             return getActiveTransitions().some(t => t.fromName.toLowerCase() === current && t.formTrigger === section);
         }
 
@@ -211,17 +203,13 @@
             'work-completed': {
                 title: 'Work Completed',
                 subtitle: 'Mark seals ready for reseal'
-            },
-            'reinspection': {
-                title: 'Reinspection',
-                subtitle: 'Log a re-inspection following an unauthorized breach'
             }
         };
 
         async function init() {
             const content = document.getElementById('app-content');
 
-            if (!PROJECT_KEY) {
+            if (!PROJECT_ID) {
                 content.innerHTML = '<div class="card"><div class="error-box">This link is missing required information. Please contact your site admin.</div></div>';
                 return;
             }
@@ -231,11 +219,22 @@
             try {
                 const { data: project } = await _supabase
                     .from('launchpad_projects')
-                    .select('google_script_url')
-                    .eq('project_key', PROJECT_KEY)
+                    .select('project_key, google_script_url')
+                    .eq('public_uuid', PROJECT_ID)
                     .maybeSingle();
-                scriptUrl = (project && project.google_script_url) || '';
-            } catch (e) { console.warn('Could not load project config:', e); }
+
+                if (!project) {
+                    content.innerHTML = '<div class="card"><div class="error-box">This link isn\'t valid. Please contact your site admin for a current QR code.</div></div>';
+                    return;
+                }
+
+                PROJECT_KEY = project.project_key;
+                scriptUrl = project.google_script_url || '';
+            } catch (e) {
+                console.warn('Could not load project config:', e);
+                content.innerHTML = '<div class="card"><div class="error-box">Could not load this project. Please contact your site admin.</div></div>';
+                return;
+            }
 
             workflows = getDefaultWorkflows();
             if (scriptUrl) {
@@ -255,7 +254,6 @@
                         }];
                     }
                     if (Array.isArray(data.globalStatusOrder)) globalStatusOrder = data.globalStatusOrder;
-                    if (Array.isArray(data.reinspectionFilterStatuses)) reinspectionFilterStatuses = data.reinspectionFilterStatuses;
                 } catch (e) { console.warn('Could not load workflow config, using default:', e); }
             }
 
@@ -285,10 +283,6 @@
                     ✅ Work Completed
                     <span class="sub">Mark work done and ready for reseal</span>
                 </button>
-                <button class="action-btn action-reinspection" onclick="selectSection('reinspection')">
-                    🔍 Reinspection
-                    <span class="sub">Log a re-inspection following an unauthorized breach</span>
-                </button>
             `;
         }
 
@@ -301,7 +295,6 @@
             if (section === 'break-request') renderBreakRequestForm(content);
             else if (section === 'break-seals') renderBreakSealsForm(content);
             else if (section === 'work-completed') renderWorkCompletedForm(content);
-            else if (section === 'reinspection') renderReinspectionForm(content);
         }
 
         function backToActionSelect() {
@@ -858,59 +851,6 @@
 
                 const result = buildResultMessage(transitionResult, 'The CxA will coordinate re-sealing with the GC.');
                 showSuccess((transitionResult.skipped.length + transitionResult.blocked.length) === 0 ? 'Marked Ready for Reseal' : result.title, result.message);
-            } catch (e) {
-                errorEl.innerHTML = `<div class="error-box">Something went wrong: ${e.message}</div>`;
-            }
-        }
-
-        // ===== Reinspection (SOP Section 7 — following an unauthorized breach) =====
-        function renderReinspectionForm(content) {
-            content.innerHTML = `
-                <a class="back-link" onclick="backToActionSelect()">&larr; Back</a>
-                <div class="form-explainer"><strong>Use this when:</strong> a seal was found broken with no approved Break Request on file. Log the required full re-inspection here before the asset can be re-sealed and returned to service.</div>
-                <div class="card">
-                    <p>Select the seal(s) that were re-inspected following an unauthorized breach.</p>
-                    ${renderAssetSealPickerHtml('reinspection')}
-                    <label>Inspector Email</label>
-                    <input type="email" id="reinspectorEmail">
-                    <label>Inspector Company</label>
-                    <select id="reinspectorCompany" onchange="handleCompanySelectChange('reinspectorCompany', 'reinspectorCompanyNew')"><option value="">Loading companies...</option></select>
-                    <input type="text" id="reinspectorCompanyNew" placeholder="Enter your company name" style="display:none; margin-top:8px;">
-                    <label>Re-Inspection Findings</label>
-                    <textarea id="reinspectionNotes" placeholder="Describe what was found and confirmed during the re-inspection..."></textarea>
-                    <button class="submit-btn" onclick="submitReinspection()">Log Reinspection</button>
-                    <div id="form-error"></div>
-                </div>
-            `;
-            loadCompanyOptions('reinspectorCompany');
-        }
-
-        async function submitReinspection() {
-            const checkedSealIds = getCheckedSealIds('reinspection');
-            const inspectorEmail = document.getElementById('reinspectorEmail').value.trim();
-            const inspectorCompany = getCompanyValue('reinspectorCompany', 'reinspectorCompanyNew');
-            const notes = document.getElementById('reinspectionNotes').value.trim();
-            const errorEl = document.getElementById('form-error');
-            errorEl.innerHTML = '';
-
-            if (checkedSealIds.length === 0 || !inspectorEmail || !inspectorCompany || !notes) {
-                errorEl.innerHTML = '<div class="error-box">Please select at least one seal and fill in all fields.</div>';
-                return;
-            }
-
-            try {
-                const transitionResult = await applyStatusTransitions(checkedSealIds, 'reinspection', {
-                    inspection_notes: notes
-                });
-
-                if (!transitionResult.anyUpdated) {
-                    const { message } = buildResultMessage(transitionResult, '');
-                    errorEl.innerHTML = `<div class="error-box">${message}</div>`;
-                    return;
-                }
-
-                const result = buildResultMessage(transitionResult, 'The re-inspection has been logged and the log updated.');
-                showSuccess((transitionResult.skipped.length + transitionResult.blocked.length) === 0 ? 'Reinspection Logged' : result.title, result.message);
             } catch (e) {
                 errorEl.innerHTML = `<div class="error-box">Something went wrong: ${e.message}</div>`;
             }

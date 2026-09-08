@@ -2344,10 +2344,30 @@ function loadSealFormPreview() {
 // separate per-asset or per-section codes. The base URL is editable and
 // remembered per-browser, since where seal-form.html actually ends up
 // hosted isn't something this app can know on its own.
-function openSealFormQrModal() {
+let cachedSealFormProjectUuid = null;
+
+async function openSealFormQrModal() {
     if (!window.LP_CONFIG) return;
     const savedBase = localStorage.getItem('sealFormBaseUrl') || (window.location.origin + '/seal-form.html');
     document.getElementById('sealform-qr-base-url').value = savedBase;
+
+    // The QR code links using an opaque per-project identifier, not the
+    // readable project key — that key is short and guessable, and this
+    // form requires no login at all, so a predictable identifier in a
+    // public link would make other projects' forms easy to enumerate.
+    if (!cachedSealFormProjectUuid) {
+        try {
+            const { data } = await _supabase
+                .from('launchpad_projects')
+                .select('public_uuid')
+                .eq('project_key', window.LP_CONFIG.projectKey)
+                .maybeSingle();
+            cachedSealFormProjectUuid = data ? data.public_uuid : null;
+        } catch (e) {
+            console.error('Could not load project identifier for QR code:', e);
+        }
+    }
+
     renderSealFormQrCode();
     document.getElementById('sealFormQrModal').style.display = 'flex';
 }
@@ -2356,8 +2376,15 @@ function renderSealFormQrCode() {
     const baseUrl = document.getElementById('sealform-qr-base-url').value.trim();
     localStorage.setItem('sealFormBaseUrl', baseUrl);
 
+    if (!cachedSealFormProjectUuid) {
+        document.getElementById('sealform-qr-code-display').innerHTML = `
+            <div style="color:#d32f2f; font-size:13px;">Could not generate a QR code — this project is missing its identifier. Contact support.</div>
+        `;
+        return;
+    }
+
     const projectKey = window.LP_CONFIG.projectKey;
-    const url = `${baseUrl}?project=${encodeURIComponent(projectKey)}`;
+    const url = `${baseUrl}?id=${encodeURIComponent(cachedSealFormProjectUuid)}`;
     const qrImgSrc = `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(url)}`;
 
     document.getElementById('sealform-qr-code-display').innerHTML = `
