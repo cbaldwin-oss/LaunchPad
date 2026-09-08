@@ -617,9 +617,9 @@ input:not([type="checkbox"]), textarea, select {
 
         <div id="step-standard" style="display: none;">
             <div class="bulk-add-grid">
-                <div><label>First Seal #</label><input type="number" id="startSeal" placeholder="e.g. 1001"></div>
-                <div><label>Last Seal #</label><input type="number" id="endSeal" placeholder="e.g. 1010"></div>
-                <div><label>Omitted Numbers</label><input type="text" id="omittedSeals" placeholder="e.g. 1003, 1007"></div>
+                <div><label>First Seal #</label><input type="text" id="startSeal" placeholder="e.g. 1001 or A-1001"></div>
+                <div><label>Last Seal #</label><input type="text" id="endSeal" placeholder="e.g. 1010 or A-1010"></div>
+                <div><label>Omitted Numbers</label><input type="text" id="omittedSeals" placeholder="e.g. 1003, A-1007"></div>
                 <div><label>Location / Area</label><input type="text" id="newLocation" list="location-list"></div>
                 <div><label>Asset Name</label><input type="text" id="newAsset" list="asset-list"></div>
                 <div><label>Sub Area</label><input type="text" id="newSubArea"></div>
@@ -2684,11 +2684,20 @@ function closeAddModal() {
 /**
  * Step 1: Generate the editable preview list
  */
+// Splits a seal number into a leading non-digit prefix, a numeric core,
+// and a trailing non-digit suffix — e.g. "A-1001-B" -> prefix "A-", num
+// "1001", suffix "-B". Returns null if there's no numeric core at all
+// (a range needs something to increment).
+function parseSealNumberParts(value) {
+    const match = String(value).trim().match(/^(\D*)(\d+)(\D*)$/);
+    if (!match) return null;
+    return { prefix: match[1], num: match[2], suffix: match[3] };
+}
+
 function generatePreview() {
-    const start = parseInt(document.getElementById('startSeal').value);
-    const end = parseInt(document.getElementById('endSeal').value);
+    const startRaw = document.getElementById('startSeal').value;
+    const endRaw = document.getElementById('endSeal').value;
     const omittedStr = document.getElementById('omittedSeals').value;
-    const omitted = omittedStr.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
 
     const commonData = {
         location: document.getElementById('newLocation').value,
@@ -2700,15 +2709,37 @@ function generatePreview() {
         status: 'Intact'
     };
 
+    const startParts = parseSealNumberParts(startRaw);
+    const endParts = parseSealNumberParts(endRaw);
+
+    if (!startParts || !endParts) {
+        alert('Please enter valid seal numbers — each needs a numeric part (letters/dashes around it are fine, e.g. "A-1001").');
+        return;
+    }
+    if (startParts.prefix !== endParts.prefix || startParts.suffix !== endParts.suffix) {
+        alert('The first and last seal numbers need matching letters/prefix and suffix — only the numeric part should differ, e.g. "A-1001" to "A-1010".');
+        return;
+    }
+
+    const start = parseInt(startParts.num, 10);
+    const end = parseInt(endParts.num, 10);
+    const padWidth = startParts.num.length; // preserves leading-zero width, e.g. "001" -> "010" not "10"
+
     if (isNaN(start) || isNaN(end) || start > end) {
         alert("Please enter a valid seal range.");
         return;
     }
 
+    // Omitted seals now match against the FULL seal number (case-
+    // insensitive), not just a bare number, since the range itself can
+    // include letters now too.
+    const omitted = omittedStr.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+
     const previewEntries = [];
     for (let i = start; i <= end; i++) {
-        if (omitted.includes(i)) continue;
-        previewEntries.push({ ...commonData, seal_number: i.toString() });
+        const sealNumber = `${startParts.prefix}${String(i).padStart(padWidth, '0')}${startParts.suffix}`;
+        if (omitted.includes(sealNumber.toLowerCase())) continue;
+        previewEntries.push({ ...commonData, seal_number: sealNumber });
     }
 
     closeAddModal();
