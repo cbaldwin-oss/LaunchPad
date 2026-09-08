@@ -2322,7 +2322,7 @@ document.addEventListener('click', (e) => {
 // without needing to physically print/scan anything. Loads the SAME
 // standalone seal-form.html field workers use, just embedded in an iframe
 // here with the project/asset/section wired up from the dropdowns above it.
-function loadSealFormPreview() {
+async function loadSealFormPreview() {
     window.sealFormAssetsLoaded = true;
     const iframe = document.getElementById('sealform-iframe');
     if (!iframe || !window.LP_CONFIG) return;
@@ -2333,8 +2333,27 @@ function loadSealFormPreview() {
         iframe.onload = () => { overlay.style.display = 'none'; };
     }
 
+    if (!cachedSealFormProjectUuid) {
+        try {
+            const { data } = await _supabase
+                .from('launchpad_projects')
+                .select('public_uuid')
+                .eq('project_key', window.LP_CONFIG.projectKey)
+                .maybeSingle();
+            cachedSealFormProjectUuid = data ? data.public_uuid : null;
+        } catch (e) {
+            console.error('Could not load project identifier for Seal Form preview:', e);
+        }
+    }
+
+    if (!cachedSealFormProjectUuid) {
+        if (overlay) overlay.style.display = 'none';
+        iframe.removeAttribute('src');
+        return;
+    }
+
     const base = iframe.getAttribute('data-src-base');
-    const params = new URLSearchParams({ project: window.LP_CONFIG.projectKey });
+    const params = new URLSearchParams({ id: cachedSealFormProjectUuid });
     iframe.src = `${base}?${params.toString()}`;
 }
 
