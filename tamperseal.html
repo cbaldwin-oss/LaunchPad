@@ -2821,12 +2821,10 @@ async function saveNewEntries() {
             }
 
             const problems = [...skipped, ...blocked];
-            if (problems.length === 0) {
-                reinspectionSummary = `\n\n${updatedCount} original seal(s) moved to their next status successfully.`;
-            } else if (updatedCount === 0) {
-                reinspectionSummary = `\n\nERROR: none of the original seals' statuses were updated.\n${problems.join('\n')}`;
-            } else {
-                reinspectionSummary = `\n\n${updatedCount} original seal(s) updated. ${problems.length} had a problem:\n${problems.join('\n')}`;
+            if (updatedCount === 0 && problems.length > 0) {
+                reinspectionSummary = `ERROR: none of the original seals' statuses were updated.\n${problems.join('\n')}`;
+            } else if (problems.length > 0) {
+                reinspectionSummary = `${updatedCount} original seal(s) updated, but ${problems.length} had a problem:\n${problems.join('\n')}`;
             }
         }
 
@@ -2840,7 +2838,9 @@ async function saveNewEntries() {
         await fetchLookupData();
         await fetchHierarchyData();
 
-        if (reinspectionSummary) alert('Reinspection saved.' + reinspectionSummary);
+        // Only speak up if something actually needs attention — a full,
+        // clean success doesn't need a popup confirming it worked.
+        if (reinspectionSummary) alert(reinspectionSummary);
     } catch (err) {
         console.error(err);
         alert("Operation failed. Check console for details.");
