@@ -74,7 +74,7 @@
 </head>
 <body>
     <div class="header">
-        <h1 id="form-title">Site Tamper Seal Forms</h1>
+        <h1 id="form-title">Tamper Seal Forms</h1>
         <p id="form-subtitle">Loading...</p>
     </div>
     <div class="container">
@@ -90,6 +90,7 @@
         const params = new URLSearchParams(window.location.search);
         const PROJECT_ID = params.get('id') || '';
         let PROJECT_KEY = '';
+        let SITE_NAME = '';
 
         function T(table) { return `${PROJECT_KEY}${table}`; }
 
@@ -219,7 +220,7 @@
             try {
                 const { data: project } = await _supabase
                     .from('launchpad_projects')
-                    .select('project_key, google_script_url')
+                    .select('project_key, google_script_url, client_name')
                     .eq('public_uuid', PROJECT_ID)
                     .maybeSingle();
 
@@ -230,6 +231,8 @@
 
                 PROJECT_KEY = project.project_key;
                 scriptUrl = project.google_script_url || '';
+                SITE_NAME = project.client_name || project.project_key || '';
+                if (SITE_NAME) document.title = `${SITE_NAME} Tamper Seal Forms`;
             } catch (e) {
                 console.warn('Could not load project config:', e);
                 content.innerHTML = '<div class="card"><div class="error-box">Could not load this project. Please contact your site admin.</div></div>';
@@ -268,7 +271,7 @@
         }
 
         function renderActionSelect() {
-            document.getElementById('form-title').innerText = 'Site Tamper Seal Forms';
+            document.getElementById('form-title').innerText = SITE_NAME ? `${SITE_NAME} Tamper Seal Forms` : 'Tamper Seal Forms';
             document.getElementById('form-subtitle').innerText = 'What would you like to do?';
             document.getElementById('app-content').innerHTML = `
                 <button class="action-btn action-break-request" onclick="selectSection('break-request')">
