@@ -291,8 +291,7 @@
 
         function selectSection(section) {
             const cfg = sectionConfig[section];
-            document.getElementById('form-title').innerText = cfg.title;
-            document.getElementById('form-subtitle').innerText = cfg.subtitle;
+            document.getElementById('form-subtitle').innerText = `${cfg.title} — ${cfg.subtitle}`;
 
             const content = document.getElementById('app-content');
             if (section === 'break-request') renderBreakRequestForm(content);
