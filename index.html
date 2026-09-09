@@ -1853,6 +1853,8 @@ async function loadScheduleConfig() {
             if (totalWidth > 105) {
                 scheduleColConfig.forEach(col => { col.width = ((col.width / totalWidth) * 100); });
             }
+
+            LP_CACHE.set('scheduleColConfig', scheduleColConfig);
         }
     } catch (e) {
         console.error("Failed to load Schedule Config from cloud. Using defaults.", e);
@@ -4112,6 +4114,40 @@ async function triggerFullStatusRefresh() {
             return `${window.LP_CONFIG.tablePrefix}${tableName}`;
         }
 
+        // Fast-reload cache: remembers the last successful copy of a few
+        // expensive things (schedule rows, dropdown options, column/app
+        // config) per project, in localStorage, so the next visit can paint
+        // the app instantly from that instead of waiting on the network —
+        // see continueStartAppAfterProject() for how it's used. Never a
+        // source of truth: every cached value gets silently refreshed and
+        // re-saved in the background right after it's shown.
+        const LP_CACHE_VERSION = 'v1';
+        const LP_CACHE = {
+            _key(name) {
+                const prefix = window.LP_CONFIG.tablePrefix || 'unknown';
+                return `lp_cache_${LP_CACHE_VERSION}_${prefix}_${name}`;
+            },
+            get(name) {
+                try {
+                    const raw = localStorage.getItem(this._key(name));
+                    if (!raw) return null;
+                    const parsed = JSON.parse(raw);
+                    return (parsed && parsed.value !== undefined) ? parsed.value : null;
+                } catch (e) {
+                    return null;
+                }
+            },
+            set(name, value) {
+                try {
+                    localStorage.setItem(this._key(name), JSON.stringify({ value, savedAt: Date.now() }));
+                } catch (e) {
+                    // Caching is a nice-to-have (quota exceeded / private
+                    // browsing can throw here) — never let it break the app.
+                    console.warn('LP_CACHE: could not save', name, e);
+                }
+            }
+        };
+
         // --- THE FIX: Let Supabase officially flag when a password reset happens ---
         _supabase.auth.onAuthStateChange((event, session) => {
             if (event === 'PASSWORD_RECOVERY') {
@@ -4682,6 +4718,7 @@ async function loadAppConfig() {
             let parsedData = typeof data.data === 'string' ? JSON.parse(data.data) : data.data;
             // Safely merge the downloaded data with the defaults so nothing breaks
             appConfig = { ...appConfig, ...parsedData };
+            LP_CACHE.set('appConfig', appConfig);
         }
     } catch (e) {
         console.error("Failed to load App Config from cloud.", e);
@@ -4703,6 +4740,7 @@ async function loadEquivalentActivities() {
         const data = await response.json();
         if (data.status === 'success') {
             equivalentActivitiesConfig = data.data;
+            LP_CACHE.set('equivalentActivitiesConfig', equivalentActivitiesConfig);
         }
     } catch (e) {
         console.error("Failed to load Eq Activities:", e);
@@ -5394,6 +5432,66 @@ async function continueStartAppAfterProject(user) {
         
         const scheduleDataPromise = _supabase.from(T('BackEndData')).select('*');
 
+        // --- Fast-reload cache ---
+        // If a previous visit left us a last-known-good snapshot of this
+        // project, paint it immediately and drop the loading overlay right
+        // away instead of making everyone wait on the network on every
+        // single load. The real, current data is still fetched right behind
+        // it and silently replaces the cached copy the moment it's in —
+        // this only changes WHEN things first appear, never what ends up on
+        // screen once the page settles.
+        const cachedSchedule = LP_CACHE.get('scheduleData');
+
+        if (cachedSchedule) {
+            const cachedColConfig = LP_CACHE.get('scheduleColConfig');
+            const cachedAppConfig = LP_CACHE.get('appConfig');
+            const cachedEqActivities = LP_CACHE.get('equivalentActivitiesConfig');
+            const cachedDropdowns = LP_CACHE.get('dropdownData');
+
+            if (cachedColConfig) { scheduleColConfig = cachedColConfig; renderDynamicHeaders(); }
+            if (cachedAppConfig) { appConfig = { ...appConfig, ...cachedAppConfig }; applySidebarConfig(); }
+            if (cachedEqActivities) { equivalentActivitiesConfig = cachedEqActivities; renderEquivalentActivitiesUI(); }
+            if (cachedDropdowns) {
+                window.dropdownData = cachedDropdowns.dropdownData;
+                window.assetToPlaceMap = cachedDropdowns.assetToPlaceMap;
+                renderSidebarFilters();
+            }
+
+            // Rebuild the day/week shell now that LP_CONFIG's real start
+            // date/duration are known (the very first createSections() call,
+            // back in startApp(), ran before project selection and used
+            // fallback defaults), then paint the cached rows onto it.
+            createSections();
+            __lastScheduleData = cachedSchedule;
+            applyScheduleDataToDom(cachedSchedule);
+            rebuildFilterOptionsFromBackendData(cachedSchedule);
+            autoCleanUI();
+
+            initPresence(user.email);
+            refreshDropdowns();
+            initRealtimeSync();
+            applyViewFilter('view2');
+            collapseEverything();
+            loader.classList.add('hidden');
+            setTimeout(() => { loader.style.display = 'none'; autoCleanUI(); }, 800);
+
+            // Quietly refresh everything in the background. These are the
+            // exact same calls as the no-cache path below — each one already
+            // re-renders and re-caches its own result when it resolves —
+            // just no longer something the person has to sit and wait for.
+            Promise.all([
+                fetchDropdownOptions(),
+                loadEquivalentActivities(),
+                loadScheduleConfig(),
+                loadAppConfig()
+            ]).catch(e => console.error('Background config refresh failed:', e));
+            loadData(false, scheduleDataPromise).catch(e => console.error('Background schedule refresh failed:', e));
+
+            return;
+        }
+
+        // No cached snapshot yet for this project on this device (first
+        // visit) — original fully-blocking behavior, unchanged.
         await Promise.all([
             fetchDropdownOptions(),
             loadEquivalentActivities(),
@@ -5898,6 +5996,7 @@ async function fetchDropdownOptions() {
     // SWAP the data globally
     window.dropdownData = newData;
     window.assetToPlaceMap = assetToPlaceMap;
+    LP_CACHE.set('dropdownData', { dropdownData: newData, assetToPlaceMap });
 
     console.log(`✅ Dropdown data synced (${newData.col4.length} assets loaded).`);
 
@@ -7867,6 +7966,7 @@ async function loadData(isSilent = false, preFetchedPromise = null) {
 
         if (data) {
             __lastScheduleData = data;
+            LP_CACHE.set('scheduleData', data);
             applyScheduleDataToDom(data);
             // 🟢 FILTER FIX: rebuild the sidebar filter option lists from the
             // exact same rows we just rendered, so filters always match live data.
