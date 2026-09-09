@@ -12,6 +12,19 @@ export class CriticalArcDashboard {
     this.ISS_THRESH = 30;
     this.COMPLETE_STATUSES = ['Finished'];
     this.REFRESH_ENDPOINT = null;
+
+    // Apps Script Web App URL bound to the "SandBox API Database" Google
+    // Sheet (see dashboard_data_endpoint.gs.txt for the server-side code
+    // this calls). Paste the deployment URL here.
+    this.GOOGLE_SCRIPT_URL = 'PASTE_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE';
+
+    // One entry per project this dashboard can show. If every project
+    // shares the same spreadsheet/script, leave scriptUrl blank and
+    // GOOGLE_SCRIPT_URL is used for all of them; set a per-project
+    // scriptUrl to point a project at a different sheet's Web App instead.
+    this.PROJECTS = [
+      { project_id: '50506', name: 'Stream Data Centers - PHXA7', scriptUrl: '' }
+    ];
     
     // Theme Constants
     this.FONT = 'Barlow, sans-serif';
@@ -351,28 +364,10 @@ export class CriticalArcDashboard {
 
   async init() {
     try {
-      const resp = await fetch('shared-dashboard/html-dashboard/data/projects.json');
-      const projects = await resp.json();
       const sel = this.q('ca-projectSelect');
-      sel.innerHTML = projects.map(p => `<option value="${p.project_id}">${p.name}</option>`).join('');
+      sel.innerHTML = this.PROJECTS.map(p => `<option value="${p.project_id}">${p.name}</option>`).join('');
       sel.onchange = () => { this.STATE.project = sel.value; this.loadProject(sel.value); };
-
-      // Every project export we've seen so far (see projects.json) contains
-      // exactly one entry — project_id here is CxAlloy's own numeric ID
-      // (e.g. "50506"), unrelated to LaunchPad's project_key (e.g. "PHXA7"),
-      // so we can't match them directly. When there's only one project to
-      // choose from anyway, just pick it and hide the now-redundant
-      // dropdown. Safely falls back to the original behavior if a
-      // deployment ever legitimately has more than one.
-      if (projects.length === 1) {
-        this.STATE.project = projects[0].project_id;
-        sel.value = projects[0].project_id;
-        const wrapper = sel.closest('div') || sel.parentElement;
-        if (wrapper) wrapper.style.display = 'none';
-      } else {
-        this.STATE.project = projects[0].project_id;
-      }
-
+      this.STATE.project = this.PROJECTS[0].project_id;
       await this.loadProject(this.STATE.project);
     } catch (e) {
       this.q('ca-loading').textContent = 'Error: ' + e.message; 
@@ -382,20 +377,36 @@ export class CriticalArcDashboard {
 
   async loadProject(pid) {
     this.q('ca-loading').style.display = 'block';
+    this.q('ca-loading').textContent = 'Loading…';
     this.q('ca-dash').style.display = 'none';
-    
-    const resp = await fetch(`shared-dashboard/html-dashboard/data/project_${pid}.json`);
-    this.STATE.data = await resp.json();
-    this.STATE.eqPhase = new Map(this.STATE.data.equipment.map(e => [String(e.equipment_id), e.building_phase]));
-    this.STATE.filters = { discipline: [], contractor: [], status: [], phase: [] };
-    this.EQ_FILTER = { bldg: 'All', floor: 'All' };
-    
-    this.rebuildFilterOptions();
-    this.renderAll();
-    
-    this.q('ca-loading').style.display = 'none';
-    this.q('ca-dash').style.display = 'block';
-    window.dispatchEvent(new Event('resize'));
+
+    try {
+      const proj = this.PROJECTS.find(p => String(p.project_id) === String(pid)) || this.PROJECTS[0];
+      const scriptUrl = (proj && proj.scriptUrl) || this.GOOGLE_SCRIPT_URL;
+      if (!scriptUrl || scriptUrl.indexOf('PASTE_YOUR') === 0) {
+        throw new Error('GOOGLE_SCRIPT_URL is not set yet — paste your Apps Script Web App URL into dashboard.js.');
+      }
+      const resp = await fetch(`${scriptUrl}?action=getDashboardData&project_id=${encodeURIComponent(pid)}`);
+      if (!resp.ok) throw new Error(`Request failed: ${resp.status} ${resp.statusText}`);
+      const data = await resp.json();
+      if (data && data.error) throw new Error(data.error);
+      this.STATE.data = data;
+      this.STATE.eqPhase = new Map(this.STATE.data.equipment.map(e => [String(e.equipment_id), e.building_phase]));
+      this.STATE.filters = { discipline: [], contractor: [], status: [], phase: [] };
+      this.EQ_FILTER = { bldg: 'All', floor: 'All' };
+
+      this.rebuildFilterOptions();
+      this.renderAll();
+
+      this.q('ca-loading').style.display = 'none';
+      this.q('ca-dash').style.display = 'block';
+      window.dispatchEvent(new Event('resize'));
+    } catch (e) {
+      this.q('ca-loading').style.display = 'block';
+      this.q('ca-loading').textContent = 'Error loading dashboard data: ' + e.message;
+      this.q('ca-dash').style.display = 'none';
+      console.error(e);
+    }
   }
 
   renderAll() {

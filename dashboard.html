@@ -192,6 +192,19 @@
 
 const REFRESH_ENDPOINT = null;
 
+// Apps Script Web App URL bound to the "SandBox API Database" Google Sheet.
+// Paste the deployment URL from Deploy > Manage deployments (see
+// dashboard_data_endpoint.gs.txt for the server-side code this calls).
+const GOOGLE_SCRIPT_URL = 'PASTE_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE';
+
+// One entry per project this dashboard can show. If every project shares the
+// same spreadsheet/script, leave scriptUrl blank and GOOGLE_SCRIPT_URL is
+// used for all of them; set a per-project scriptUrl to point at a different
+// sheet's Web App instead.
+const PROJECTS = [
+  { project_id: '50506', name: 'Stream Data Centers - PHXA7', scriptUrl: '' }
+];
+
 const FONT = 'Barlow, sans-serif';
 const COND = 'Barlow Condensed, sans-serif';
 const C = { text:'#F0F0F0', muted:'#8A8F98', border:'#3E4248', panel:'#2D3035',
@@ -840,8 +853,11 @@ async function loadProject(pid) {
   document.getElementById('dash').style.height = '0';
   document.getElementById('dash').style.overflow = 'hidden';
   
-  const resp = await fetch(`shared-dashboard/html-dashboard/data/project_${pid}.json`);
+  const proj = PROJECTS.find(p => String(p.project_id) === String(pid)) || PROJECTS[0];
+  const scriptUrl = (proj && proj.scriptUrl) || GOOGLE_SCRIPT_URL;
+  const resp = await fetch(`${scriptUrl}?action=getDashboardData&project_id=${encodeURIComponent(pid)}`);
   STATE.data = await resp.json();
+  if (STATE.data && STATE.data.error) throw new Error(STATE.data.error);
   STATE.eqPhase = new Map(STATE.data.equipment.map(e => [String(e.equipment_id), e.building_phase]));
   STATE.filters = { discipline: [], contractor: [], status: [], phase: [] };
   EQ_FILTER = { bldg: 'All', floor: 'All' };
@@ -883,11 +899,10 @@ async function init() {
     } finally { btn.disabled = false; btn.textContent = '🔄 Refresh Data'; }
   };
 
-  const projects = await (await fetch('shared-dashboard/html-dashboard/data/projects.json')).json();
   const sel = document.getElementById('projectSelect');
-  sel.innerHTML = projects.map(p => `<option value="${p.project_id}">${p.name}</option>`).join('');
+  sel.innerHTML = PROJECTS.map(p => `<option value="${p.project_id}">${p.name}</option>`).join('');
   sel.onchange = () => { STATE.project = sel.value; loadProject(sel.value); };
-  STATE.project = projects[0].project_id;
+  STATE.project = PROJECTS[0].project_id;
   await loadProject(STATE.project);
 }
 
