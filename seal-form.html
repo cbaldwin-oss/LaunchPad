@@ -231,7 +231,7 @@
 
                 PROJECT_KEY = project.project_key;
                 scriptUrl = project.google_script_url || '';
-                SITE_NAME = project.client_name || project.project_key || '';
+                SITE_NAME = project.project_key || project.client_name || '';
                 if (SITE_NAME) document.title = `${SITE_NAME} Tamper Seal Forms`;
             } catch (e) {
                 console.warn('Could not load project config:', e);
