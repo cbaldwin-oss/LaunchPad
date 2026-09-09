@@ -12,19 +12,6 @@ export class CriticalArcDashboard {
     this.ISS_THRESH = 30;
     this.COMPLETE_STATUSES = ['Finished'];
     this.REFRESH_ENDPOINT = null;
-
-    // Apps Script Web App URL bound to the "SandBox API Database" Google
-    // Sheet (see dashboard_data_endpoint.gs.txt for the server-side code
-    // this calls). Paste the deployment URL here.
-    this.GOOGLE_SCRIPT_URL = 'PASTE_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE';
-
-    // One entry per project this dashboard can show. If every project
-    // shares the same spreadsheet/script, leave scriptUrl blank and
-    // GOOGLE_SCRIPT_URL is used for all of them; set a per-project
-    // scriptUrl to point a project at a different sheet's Web App instead.
-    this.PROJECTS = [
-      { project_id: '50506', name: 'Stream Data Centers - PHXA7', scriptUrl: '' }
-    ];
     
     // Theme Constants
     this.FONT = 'Barlow, sans-serif';
@@ -67,6 +54,7 @@ export class CriticalArcDashboard {
       .ca-side-label { font-size: 11px; letter-spacing: 1px; color: var(--muted); text-transform: uppercase; margin: 16px 0 6px; }
       
       .ca-wrapper select, .ca-wrapper input[type="text"] { width: 100%; background: #23262B; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-family: 'Barlow', sans-serif; font-size: 13px; }
+      .ca-connected-project { width: 100%; background: #23262B; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-family: 'Barlow', sans-serif; font-size: 13px; font-weight: 600; }
       .ca-wrapper select:focus, .ca-wrapper input[type="text"]:focus { outline: none; border-color: var(--muted); }
       
       .ca-checkgroup { display: flex; flex-direction: column; gap: 5px; max-height: 190px; overflow-y: auto; background: #23262B; border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
@@ -157,8 +145,8 @@ export class CriticalArcDashboard {
         <div class="ca-app">
           <aside class="ca-sidebar">
             <div class="ca-brand">CriticalArc<div class="ca-brand-sub">Project Dashboard Platform</div></div>
-            <div class="ca-side-label">Select Project</div>
-            <select id="ca-projectSelect"></select>
+            <div class="ca-side-label">Connected Project</div>
+            <div class="ca-connected-project" id="ca-connectedProject">—</div>
             <hr class="ca-hr" />
             <div style="font-weight:600; letter-spacing:.5px;">Filters</div>
             <div class="ca-filter-hint">Check any to filter — none checked = all.</div>
@@ -334,7 +322,7 @@ export class CriticalArcDashboard {
       btn.disabled = true; btn.textContent = '⏳ Refreshing…';
       try {
         if (this.REFRESH_ENDPOINT) { await fetch(this.REFRESH_ENDPOINT, { method: 'POST' }); }
-        await this.loadProject(this.STATE.project);
+        await this.loadProject();
       } finally { btn.disabled = false; btn.textContent = '🔄 Refresh Data'; }
     };
   }
@@ -362,31 +350,43 @@ export class CriticalArcDashboard {
     this.buildCheckGroup('ca-fPhase', phases);
   }
 
+  // Waits briefly for window.LP_CONFIG to be populated (it's loaded by the
+  // host app's project-selection flow, which should already have finished
+  // by the time someone opens this tab, but this guards against any race).
+  async waitForProjectConfig_(timeoutMs = 5000) {
+    const start = Date.now();
+    while (!(window.LP_CONFIG && window.LP_CONFIG.googleScriptUrl)) {
+      if (Date.now() - start > timeoutMs) return null;
+      await new Promise(r => setTimeout(r, 150));
+    }
+    return window.LP_CONFIG;
+  }
+
   async init() {
     try {
-      const sel = this.q('ca-projectSelect');
-      sel.innerHTML = this.PROJECTS.map(p => `<option value="${p.project_id}">${p.name}</option>`).join('');
-      sel.onchange = () => { this.STATE.project = sel.value; this.loadProject(sel.value); };
-      this.STATE.project = this.PROJECTS[0].project_id;
-      await this.loadProject(this.STATE.project);
+      const cfg = await this.waitForProjectConfig_();
+      if (!cfg) throw new Error('No project is loaded yet (window.LP_CONFIG.googleScriptUrl is missing).');
+      const label = this.q('ca-connectedProject');
+      if (label) label.textContent = cfg.clientName || cfg.projectKey || 'Connected project';
+      await this.loadProject();
     } catch (e) {
       this.q('ca-loading').textContent = 'Error: ' + e.message; 
       console.error(e);
     }
   }
 
-  async loadProject(pid) {
+  async loadProject() {
     this.q('ca-loading').style.display = 'block';
     this.q('ca-loading').textContent = 'Loading…';
     this.q('ca-dash').style.display = 'none';
 
     try {
-      const proj = this.PROJECTS.find(p => String(p.project_id) === String(pid)) || this.PROJECTS[0];
-      const scriptUrl = (proj && proj.scriptUrl) || this.GOOGLE_SCRIPT_URL;
-      if (!scriptUrl || scriptUrl.indexOf('PASTE_YOUR') === 0) {
-        throw new Error('GOOGLE_SCRIPT_URL is not set yet — paste your Apps Script Web App URL into dashboard.js.');
+      const cfg = window.LP_CONFIG;
+      const scriptUrl = cfg && cfg.googleScriptUrl;
+      if (!scriptUrl) {
+        throw new Error('This project has no google_script_url set in launchpad_projects yet.');
       }
-      const resp = await fetch(`${scriptUrl}?action=getDashboardData&project_id=${encodeURIComponent(pid)}`);
+      const resp = await fetch(`${scriptUrl}?action=getDashboardData`);
       if (!resp.ok) throw new Error(`Request failed: ${resp.status} ${resp.statusText}`);
       const data = await resp.json();
       if (data && data.error) throw new Error(data.error);

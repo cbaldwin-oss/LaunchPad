@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>CriticalArc Dashboard</title>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&family=DM+Mono:wght@400;500&display=swap');
 
@@ -192,18 +193,16 @@
 
 const REFRESH_ENDPOINT = null;
 
-// Apps Script Web App URL bound to the "SandBox API Database" Google Sheet.
-// Paste the deployment URL from Deploy > Manage deployments (see
-// dashboard_data_endpoint.gs.txt for the server-side code this calls).
-const GOOGLE_SCRIPT_URL = 'PASTE_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE';
+// This standalone page isn't hosted inside the main LaunchPad app, so unlike
+// dashboard.js (which reads window.LP_CONFIG that the host app already
+// populated) it looks up every project's google_script_url itself, straight
+// from the launchpad_projects table.
+const SUPABASE_URL = 'https://rcnxetcomdrlxvlarqoc.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJjbnhldGNvbWRybHh2bGFycW9jIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY0NDIyMjksImV4cCI6MjA5MjAxODIyOX0.gP37sT5OrCOVRZXekMrBZHm5mtfnr6JrC2YGflWsDQU';
+const { createClient } = supabase;
+const _supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// One entry per project this dashboard can show. If every project shares the
-// same spreadsheet/script, leave scriptUrl blank and GOOGLE_SCRIPT_URL is
-// used for all of them; set a per-project scriptUrl to point at a different
-// sheet's Web App instead.
-const PROJECTS = [
-  { project_id: '50506', name: 'Stream Data Centers - PHXA7', scriptUrl: '' }
-];
+let PROJECTS = []; // populated from launchpad_projects in init()
 
 const FONT = 'Barlow, sans-serif';
 const COND = 'Barlow Condensed, sans-serif';
@@ -846,16 +845,21 @@ function renderAll() {
     stamp.toLocaleString('en-US', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
 }
 
-async function loadProject(pid) {
+async function loadProject(projectKey) {
   // Use visibility rendering fixes rather than 'display: none'
   document.getElementById('loading').style.display = 'block';
+  document.getElementById('loading').textContent = 'Loading…';
   document.getElementById('dash').style.visibility = 'hidden';
   document.getElementById('dash').style.height = '0';
   document.getElementById('dash').style.overflow = 'hidden';
-  
-  const proj = PROJECTS.find(p => String(p.project_id) === String(pid)) || PROJECTS[0];
-  const scriptUrl = (proj && proj.scriptUrl) || GOOGLE_SCRIPT_URL;
-  const resp = await fetch(`${scriptUrl}?action=getDashboardData&project_id=${encodeURIComponent(pid)}`);
+
+  const proj = PROJECTS.find(p => p.project_key === projectKey) || PROJECTS[0];
+  const scriptUrl = proj && proj.google_script_url;
+  if (!scriptUrl) {
+    throw new Error(`${(proj && proj.client_name) || projectKey} has no google_script_url set in launchpad_projects.`);
+  }
+  const resp = await fetch(`${scriptUrl}?action=getDashboardData`);
+  if (!resp.ok) throw new Error(`Request failed: ${resp.status} ${resp.statusText}`);
   STATE.data = await resp.json();
   if (STATE.data && STATE.data.error) throw new Error(STATE.data.error);
   STATE.eqPhase = new Map(STATE.data.equipment.map(e => [String(e.equipment_id), e.building_phase]));
@@ -899,10 +903,18 @@ async function init() {
     } finally { btn.disabled = false; btn.textContent = '🔄 Refresh Data'; }
   };
 
+  const { data: projects, error } = await _supabase
+    .from('launchpad_projects')
+    .select('project_key, client_name, google_script_url')
+    .order('client_name');
+  if (error) throw new Error('Could not load launchpad_projects: ' + error.message);
+  PROJECTS = projects || [];
+  if (!PROJECTS.length) throw new Error('No rows found in launchpad_projects.');
+
   const sel = document.getElementById('projectSelect');
-  sel.innerHTML = PROJECTS.map(p => `<option value="${p.project_id}">${p.name}</option>`).join('');
+  sel.innerHTML = PROJECTS.map(p => `<option value="${p.project_key}">${p.client_name || p.project_key}</option>`).join('');
   sel.onchange = () => { STATE.project = sel.value; loadProject(sel.value); };
-  STATE.project = PROJECTS[0].project_id;
+  STATE.project = PROJECTS[0].project_key;
   await loadProject(STATE.project);
 }
 
