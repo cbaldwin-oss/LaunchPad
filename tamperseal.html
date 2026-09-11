@@ -702,6 +702,24 @@ input:not([type="checkbox"]), textarea, select {
             </div>
 
             <div style="margin-top:16px; border-top:1px dashed #ccc; padding-top:14px;">
+                <div style="font-size:12px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:4px;">Break Request Eligibility</div>
+                <p style="color:#888; font-size:12px; margin:0 0 8px;">Which statuses should show up when filtering seals on the field Break Request form. Separate from Triggers — only controls which seals appear, not what they transition to. Unchecked until you configure it here means every status is currently allowed.</p>
+                <div id="break-request-filter-list" style="max-height:200px; overflow-y:auto;"></div>
+            </div>
+
+            <div style="margin-top:16px; border-top:1px dashed #ccc; padding-top:14px;">
+                <div style="font-size:12px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:4px;">Break Seals Eligibility</div>
+                <p style="color:#888; font-size:12px; margin:0 0 8px;">Which statuses should show up when filtering seals on the field Break Seals form.</p>
+                <div id="break-seals-filter-list" style="max-height:200px; overflow-y:auto;"></div>
+            </div>
+
+            <div style="margin-top:16px; border-top:1px dashed #ccc; padding-top:14px;">
+                <div style="font-size:12px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:4px;">Work Completed Eligibility</div>
+                <p style="color:#888; font-size:12px; margin:0 0 8px;">Which statuses should show up when filtering seals on the field Work Completed form.</p>
+                <div id="work-completed-filter-list" style="max-height:200px; overflow-y:auto;"></div>
+            </div>
+
+            <div style="margin-top:16px; border-top:1px dashed #ccc; padding-top:14px;">
                 <div style="font-size:12px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:8px;">Preview</div>
                 <div id="status-flow-preview" style="position:relative; background:#fafafa; border:1px solid #eee; border-radius:8px; padding:24px; min-height:100px; overflow:visible;"></div>
             </div>
@@ -831,6 +849,22 @@ let globalStatusOrder = [];
 // the Reinspection form — independent of any configured trigger, so it's
 // not tied to fuzzy substring-matching against trigger "from" names.
 let reinspectionFilterStatuses = [];
+// Same idea as reinspectionFilterStatuses, but for the three main seal-form.html
+// sections. null (not []) means "never configured" — treated as "no
+// restriction, every status that already passes the trigger check is
+// shown" so this feature can't silently break every live form the moment
+// it ships, before anyone's had a chance to visit Setup Config and
+// actually opt into restricting anything. Once an admin touches a
+// checkbox for a section, it becomes a real array (which can legitimately
+// end up empty if they uncheck everything).
+let breakRequestFilterStatuses = null;
+let breakSealsFilterStatuses = null;
+let workCompletedFilterStatuses = null;
+const SECTION_FILTER_META = {
+    'break-request': { get: () => breakRequestFilterStatuses, set: (v) => breakRequestFilterStatuses = v, containerId: 'break-request-filter-list', label: 'Break Request' },
+    'break-seals': { get: () => breakSealsFilterStatuses, set: (v) => breakSealsFilterStatuses = v, containerId: 'break-seals-filter-list', label: 'Break Seals' },
+    'work-completed': { get: () => workCompletedFilterStatuses, set: (v) => workCompletedFilterStatuses = v, containerId: 'work-completed-filter-list', label: 'Work Completed' }
+};
 
 function getActiveWorkflows() {
     const active = workflows.filter(w => w.active);
@@ -1019,6 +1053,9 @@ async function loadColumnConfig() {
         });
         if (Array.isArray(data.globalStatusOrder)) globalStatusOrder = data.globalStatusOrder;
         if (Array.isArray(data.reinspectionFilterStatuses)) reinspectionFilterStatuses = data.reinspectionFilterStatuses;
+        if (Array.isArray(data.breakRequestFilterStatuses)) breakRequestFilterStatuses = data.breakRequestFilterStatuses;
+        if (Array.isArray(data.breakSealsFilterStatuses)) breakSealsFilterStatuses = data.breakSealsFilterStatuses;
+        if (Array.isArray(data.workCompletedFilterStatuses)) workCompletedFilterStatuses = data.workCompletedFilterStatuses;
         currentEditingWorkflowId = getActiveWorkflow().id;
     } catch (e) {
         console.warn('Could not load column settings, using defaults:', e);
@@ -1288,6 +1325,9 @@ function renderStatusFlowEditor() {
 
     renderTriggersList();
     renderReinspectionFilterList();
+    renderSectionFilterList('break-request');
+    renderSectionFilterList('break-seals');
+    renderSectionFilterList('work-completed');
 }
 
 function renderReinspectionFilterList() {
@@ -1333,6 +1373,56 @@ function renderReinspectionFilterList() {
 function toggleReinspectionFilterStatus(key, checked) {
     if (checked && !reinspectionFilterStatuses.includes(key)) reinspectionFilterStatuses.push(key);
     else if (!checked) reinspectionFilterStatuses = reinspectionFilterStatuses.filter(k => k !== key);
+}
+
+// Same pattern as renderReinspectionFilterList()/toggleReinspectionFilterStatus()
+// above, generalized across the three seal-form.html sections so they
+// don't need three near-identical copies of this logic.
+function renderSectionFilterList(section) {
+    const meta = SECTION_FILTER_META[section];
+    const container = document.getElementById(meta.containerId);
+    if (!container) return;
+    const allStatuses = getAllUniqueStatusesAcrossWorkflows();
+    const currentList = meta.get(); // null = unconfigured, treat every status as allowed
+
+    const statusesWithTrigger = new Set();
+    getActiveWorkflows().forEach(w => {
+        w.transitions.forEach(t => {
+            if (t.formTrigger === section) {
+                t.from.forEach(fromId => {
+                    const s = w.statuses.find(x => x.id === fromId);
+                    if (s) statusesWithTrigger.add(s.name.toLowerCase());
+                });
+            }
+        });
+    });
+
+    container.innerHTML = allStatuses.length > 0 ? allStatuses.map(s => {
+        const key = s.name.toLowerCase();
+        const isChecked = currentList === null ? true : currentList.includes(key);
+        const hasTrigger = statusesWithTrigger.has(key);
+        const warning = (isChecked && !hasTrigger)
+            ? `<span style="color:#e65100; font-size:11px; font-weight:600;" title="This status has no ${meta.label} trigger configured — seals will be selectable here but submitting won't change their status.">⚠ No matching trigger</span>`
+            : '';
+        return `
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; padding:4px 0;">
+            <input type="checkbox" ${isChecked ? 'checked' : ''} onchange="toggleSectionFilterStatus('${section}', '${key}', this.checked)">
+            ${s.name} ${warning}
+        </label>
+    `; }).join('') : '<p style="color:#bbb; font-size:12px;">Add statuses above first.</p>';
+}
+
+function toggleSectionFilterStatus(section, key, checked) {
+    const meta = SECTION_FILTER_META[section];
+    let list = meta.get();
+    // First time this section's filter has ever been touched — start from
+    // "everything currently allowed" (matching how it behaves while
+    // unconfigured) instead of an empty list, so unchecking one status
+    // doesn't silently forbid every other one too.
+    list = list === null ? getAllUniqueStatusesAcrossWorkflows().map(s => s.name.toLowerCase()) : [...list];
+    if (checked && !list.includes(key)) list.push(key);
+    else if (!checked) list = list.filter(k => k !== key);
+    meta.set(list);
 }
 
 // A trigger defines: given the seal is CURRENTLY in any one of several
@@ -1396,6 +1486,9 @@ function addTrigger() {
     wf.transitions.push({ id: 'trigger_' + Date.now(), from: [], to: '', formTrigger: '' });
     renderTriggersList();
     renderReinspectionFilterList();
+    renderSectionFilterList('break-request');
+    renderSectionFilterList('break-seals');
+    renderSectionFilterList('work-completed');
 }
 
 function removeTrigger(id) {
@@ -1403,6 +1496,9 @@ function removeTrigger(id) {
     wf.transitions = wf.transitions.filter(t => t.id !== id);
     renderTriggersList();
     renderReinspectionFilterList();
+    renderSectionFilterList('break-request');
+    renderSectionFilterList('break-seals');
+    renderSectionFilterList('work-completed');
 }
 
 function toggleTriggerFromStatus(triggerId, statusId, checked) {
@@ -1604,7 +1700,10 @@ async function saveTsSettings() {
                 columnConfig: columnConfig,
                 workflows: workflows,
                 globalStatusOrder: globalStatusOrder,
-                reinspectionFilterStatuses: reinspectionFilterStatuses
+                reinspectionFilterStatuses: reinspectionFilterStatuses,
+                breakRequestFilterStatuses: breakRequestFilterStatuses,
+                breakSealsFilterStatuses: breakSealsFilterStatuses,
+                workCompletedFilterStatuses: workCompletedFilterStatuses
             },
             updated_by: USER_EMAIL || null
         }, { onConflict: 'project_key' });

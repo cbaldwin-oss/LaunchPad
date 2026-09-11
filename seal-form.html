@@ -91,6 +91,7 @@
         const PROJECT_ID = params.get('id') || '';
         let PROJECT_KEY = '';
         let SITE_NAME = '';
+        let sectionFilterStatuses = { 'break-request': null, 'break-seals': null, 'work-completed': null };
 
         function T(table) { return `${PROJECT_KEY}${table}`; }
 
@@ -183,7 +184,18 @@
 
         function isEligibleForSection(seal, section) {
             const current = effectiveStatusName(seal).toLowerCase();
-            return getActiveTransitions().some(t => t.fromName.toLowerCase() === current && t.formTrigger === section);
+            const hasTransition = getActiveTransitions().some(t => t.fromName.toLowerCase() === current && t.formTrigger === section);
+            if (!hasTransition) return false;
+
+            // Admin-configured allow-list of statuses for this specific
+            // section (Setup Config > Status Flow > "<Section> Eligibility").
+            // null means it's never been configured, so every status that
+            // already passed the trigger check above is shown — an actual
+            // array (even an empty one) is a deliberate admin choice to
+            // restrict this section to only those statuses.
+            const allowList = sectionFilterStatuses[section];
+            if (allowList === null || allowList === undefined) return true;
+            return allowList.includes(current);
         }
 
         function getNextStatus(seal, section) {
@@ -261,6 +273,13 @@
                         }];
                     }
                     if (Array.isArray(data.globalStatusOrder)) globalStatusOrder = data.globalStatusOrder;
+                    // null stays null (unconfigured = no restriction) if the
+                    // saved config doesn't have this key yet or it's not an
+                    // array — see the matching comment in tamperseal.html's
+                    // SECTION_FILTER_META for why that default matters here.
+                    if (Array.isArray(data.breakRequestFilterStatuses)) sectionFilterStatuses['break-request'] = data.breakRequestFilterStatuses;
+                    if (Array.isArray(data.breakSealsFilterStatuses)) sectionFilterStatuses['break-seals'] = data.breakSealsFilterStatuses;
+                    if (Array.isArray(data.workCompletedFilterStatuses)) sectionFilterStatuses['work-completed'] = data.workCompletedFilterStatuses;
                 }
             } catch (e) { console.warn('Could not load workflow config, using default:', e); }
 
