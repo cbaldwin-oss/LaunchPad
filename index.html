@@ -5811,6 +5811,20 @@ async function saveAllSettings(btn) {
             if (failed) throw failed.error;
         });
         console.log("All settings successfully saved.");
+
+        // The fast-reload cache from continueStartAppAfterProject() would
+        // otherwise still be holding the OLD column/nav/eq-activities config
+        // at this point — reloading without updating it first meant the
+        // next load's fast path rebuilt every row using the stale config
+        // (a newly-hidden column's cells still got built into the DOM; the
+        // background refresh that followed only updates the header row, not
+        // cells already built), so a hidden column would visibly stay put
+        // until a second manual reload. Updating the cache here, before
+        // reloading, means the very next load already has the config that
+        // was just saved.
+        LP_CACHE.set('scheduleColConfig', scheduleColConfig);
+        LP_CACHE.set('appConfig', appConfig);
+        LP_CACHE.set('equivalentActivitiesConfig', equivalentActivitiesConfig);
         
         // Phase Rules still writes to Google Sheets in the background, so we
         // still give that a moment to finish before reloading — the three
