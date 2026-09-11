@@ -7,6 +7,7 @@
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚙️</text></svg>">
     
     <base target="_blank">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
     <style>
         /* --- EASY SIZING CONFIGURATION --- */
@@ -674,7 +675,7 @@ body.dark-mode .frozen-group-bar .frozen-combined {
                 </div>
                 <div style="flex: 1 1 30%; border-left: 2px solid #c8e6c9; padding-left: 15px; display: flex; flex-direction: column; gap: 8px;">
                     <h3 style="margin: 0;">Site</h3>
-                    <input type="text" id="cust-zone-title" placeholder="e.g. Zone 1" style="padding: 6px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; width: 90%;">
+                    <input type="text" id="cust-zone-title" disabled title="Site name now comes from the project record and can't be edited here." style="padding: 6px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; width: 90%; background: #eee; color: #777;">
                 </div>
                 <div style="flex: 1 1 30%; border-left: 2px solid #c8e6c9; padding-left: 15px; display: flex; flex-direction: column; gap: 8px;">
                     <h3 style="margin: 0;">Area Header Prefix</h3>
@@ -842,6 +843,56 @@ body.dark-mode .frozen-group-bar .frozen-combined {
     // opening this file directly during dev.
     const API_URL = new URLSearchParams(window.location.search).get('scriptUrl')
         || 'https://script.google.com/macros/s/AKfycbxkJfxdnt3j9l_8EH0ZUmAc48PSVP2W53t1ps-9LH_RlGGwO41Uq6jbnt78JMinDIDN/exec'; 
+
+    // Site name, phase toggles, custom header labels, and status color
+    // lists are now stored in Supabase (launchpad_equipment_tracker_config)
+    // instead of this project's Google Sheet — see migrate_equipment_tracker_settings_to_supabase.gs.txt
+    // for the one-time per-project migration this replaced. Phase Rules
+    // stay Google-Sheets-backed on purpose (still read via payload.config
+    // from the Apps Script below, still saved via the setPhaseRulesOnly
+    // action — see add_phase_rules_only_endpoint.gs.txt). Row/checklist/
+    // test/issue DATA (payload.data below) is also unaffected and still
+    // comes from the Apps Script the same as always.
+    const SUPABASE_URL = 'https://rcnxetcomdrlxvlarqoc.supabase.co';
+    const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJjbnhldGNvbWRybHh2bGFycW9jIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY0NDIyMjksImV4cCI6MjA5MjAxODIyOX0.gP37sT5OrCOVRZXekMrBZHm5mtfnr6JrC2YGflWsDQU';
+    const _supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+    // Loads the live site name straight from launchpad_projects instead of
+    // a manually-typed "Zone Title" setting, so it can never drift out of
+    // sync with the project's actual name.
+    async function loadSiteName() {
+        try {
+            const { data, error } = await _supabase
+                .from('launchpad_projects')
+                .select('project_key, client_name')
+                .eq('project_key', PROJECT_KEY)
+                .maybeSingle();
+            if (error) throw error;
+            const siteName = (data && (data.project_key || data.client_name)) || PROJECT_KEY;
+            const el = document.getElementById('zone-title-display');
+            if (el) el.innerText = siteName;
+        } catch (e) {
+            console.error('Failed to load site name from launchpad_projects:', e);
+        }
+    }
+
+    // Loads phase toggles, header labels, status color lists, and phase
+    // rules for this project. Returns null (never throws) if the row
+    // doesn't exist yet — callers already merge onto sensible defaults.
+    async function fetchTrackerConfig() {
+        try {
+            const { data, error } = await _supabase
+                .from('launchpad_equipment_tracker_config')
+                .select('config')
+                .eq('project_key', PROJECT_KEY)
+                .maybeSingle();
+            if (error) throw error;
+            return (data && data.config) || null;
+        } catch (e) {
+            console.error('Failed to load Equipment Tracker config from Supabase:', e);
+            return null;
+        }
+    }
 
     let globalConfig = { 
         showL2Gate: true, showL3Gate: true, showL4Gate: true,
@@ -1336,7 +1387,10 @@ async function fetchTrackerData(isSilent = false) {
             }
 
             let fetchOptions = { method: 'GET', mode: 'cors', cache: 'no-cache' };
-            const response = await fetch(API_URL, fetchOptions);
+            const [response, supabaseConfig] = await Promise.all([
+                fetch(API_URL, fetchOptions),
+                fetchTrackerConfig()
+            ]);
             const payload = await response.json(); 
             
             // Backend diagnostics used to be dumped wholesale to the console
@@ -1355,7 +1409,13 @@ async function fetchTrackerData(isSilent = false) {
             }
 
             const rows = payload.data || [];
-            if (payload.config) globalConfig = { ...globalConfig, ...payload.config };
+            // Phase Rules stay Google-Sheets-backed by request — everything
+            // else (toggles, custom headers, status lists) comes from
+            // Supabase. The Sheet-sourced phaseRules always wins here even
+            // if an older Supabase row still has a leftover phaseRules key.
+            const sheetPhaseRules = (payload.config && payload.config.phaseRules) || [];
+            if (supabaseConfig) globalConfig = { ...globalConfig, ...supabaseConfig };
+            globalConfig.phaseRules = sheetPhaseRules;
 
             // --- PERF FIX: skip the (expensive) full grid rebuild if nothing has
             // actually changed since the last successful fetch. This matters most
@@ -1363,7 +1423,7 @@ async function fetchTrackerData(isSilent = false) {
             // and rebuild every row's DOM every single minute even when the
             // underlying data is identical — resetting scroll position and any
             // open dropdown along the way.
-            const fingerprint = JSON.stringify({ rows, config: payload.config || null });
+            const fingerprint = JSON.stringify({ rows, config: supabaseConfig || null, phaseRules: sheetPhaseRules });
             if (isSilent && window.__lastTrackerFingerprint === fingerprint) {
                 if (document.getElementById('global-search-input').value.trim() === '') {
                     document.getElementById('sync-status').innerText = 'Up to date ✓';
@@ -1373,7 +1433,10 @@ async function fetchTrackerData(isSilent = false) {
             window.__lastTrackerFingerprint = fingerprint;
             
             if (globalConfig.customHeaders) {
-                document.getElementById('zone-title-display').innerText = globalConfig.customHeaders.zoneTitle || 'Zone 1';
+                // Site name is now owned by loadSiteName() (from launchpad_projects),
+                // not the old customHeaders.zoneTitle setting — intentionally not
+                // set here so it can't get clobbered back to a stale sheet value
+                // on every refresh.
                 updateHeaderElement('area-title', globalConfig.customHeaders.areaPrefix, true);
                 updateHeaderElement('group-l2', globalConfig.customHeaders.l2Phase);
                 updateHeaderElement('l2-gate-title', globalConfig.customHeaders.l2Gate, true);
@@ -1574,6 +1637,7 @@ async function fetchTrackerData(isSilent = false) {
 window.onload = function() {
         // 1. Boot up the tracker data grid normally
         fetchTrackerData(false); 
+        loadSiteName();
         
         // Automatic background polling removed — data now refreshes only
         // on initial load or when the user clicks "Refresh Data" above.
@@ -1609,7 +1673,7 @@ window.onload = function() {
         document.getElementById('settings-modal').classList.add('active');
         document.getElementById('fallback-color-picker').value = globalConfig.fallbackColor || '#f5f5f5';
         if (globalConfig.customHeaders) {
-            document.getElementById('cust-zone-title').value = globalConfig.customHeaders.zoneTitle || 'Zone 1';
+            document.getElementById('cust-zone-title').value = document.getElementById('zone-title-display').innerText || PROJECT_KEY;
             document.getElementById('cust-area-prefix').value = globalConfig.customHeaders.areaPrefix || 'Area';
             document.getElementById('cust-l2-phase').value = globalConfig.customHeaders.l2Phase;
             document.getElementById('cust-l2-gate').value = globalConfig.customHeaders.l2Gate;
@@ -1724,7 +1788,6 @@ window.onload = function() {
             testOpenStatuses: getListValues('test-open-list'), testClosedStatuses: getListValues('test-closed-list'),
             issueOpenStatuses: getListValues('iss-open-list'), issueClosedStatuses: getListValues('iss-closed-list'),
             gatingIssues: getListValues('iss-gating-list'), nonGatingIssues: getListValues('iss-nongating-list'),
-            phaseRules: newPhaseRules,
             fallbackColor: document.getElementById('fallback-color-picker').value,
             customHeaders: newCustomHeaders,
             showL2Gate: document.getElementById('show-l2-gate').checked,
@@ -1736,10 +1799,31 @@ window.onload = function() {
         };
 
         try {
-            await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
+            // Phase Rules stay Google-Sheets-backed by request, so they're
+            // saved through their own dedicated Apps Script action (only
+            // touches the "Phase Rules" sheet) instead of going into the
+            // Supabase config blob with everything else.
+            const [sheetResp, supabaseResult] = await Promise.all([
+                fetch(API_URL, {
+                    method: 'POST',
+                    body: JSON.stringify({ action: 'setPhaseRulesOnly', phaseRules: newPhaseRules })
+                }),
+                _supabase.from('launchpad_equipment_tracker_config').upsert({
+                    project_key: PROJECT_KEY,
+                    config: payload,
+                    // This iframe isn't currently passed the logged-in user's
+                    // email (unlike bridge.html's ?email= param) — wire that up
+                    // via index.html's iframe URL if you want real attribution here.
+                    updated_by: null
+                }, { onConflict: 'project_key' })
+            ]);
+            if (supabaseResult.error) throw supabaseResult.error;
+            let sheetJson = null;
+            try { sheetJson = await sheetResp.json(); } catch (e) { /* non-JSON/opaque response, ignore */ }
+            if (sheetJson && sheetJson.success === false) throw new Error(sheetJson.error || 'Phase Rules save failed');
             window.location.reload(); 
         } catch(e) {
-            console.error("Save failed", e); alert("Failed to save to Google Sheets.");
+            console.error("Save failed", e); alert("Failed to save settings.");
             btn.innerText = 'Save & Sync to Sheet'; btn.disabled = false;
         }
     }
