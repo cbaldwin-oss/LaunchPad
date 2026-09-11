@@ -1763,6 +1763,30 @@ body.dark-mode .phase-row {
     <p id="auth-success" style="color: #2e7d32; margin-top: 20px; font-size: 14px; display: none; font-weight: bold;"></p>
 </div>
 </div>
+
+<!-- Help button: only shown while the sign-in form itself is up (not the
+     loading spinner or project picker, which share the same full-screen
+     overlay) — visibility is kept in sync by a MutationObserver on
+     #auth-prompt further down, since that's set to display:block from
+     several different places in this file. -->
+<div id="launchpad-help-widget" style="display: none; position: fixed; bottom: 24px; right: 24px; z-index: 10001; align-items: center;">
+    <div id="launchpad-help-tooltip" style="position: absolute; bottom: 62px; right: 0; background: #222; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity 0.15s;">Help</div>
+    <button id="launchpad-help-btn" onclick="openHelpModal()"
+        onmouseover="document.getElementById('launchpad-help-tooltip').style.opacity='1'; this.style.transform='scale(1.08)';"
+        onmouseout="document.getElementById('launchpad-help-tooltip').style.opacity='0'; this.style.transform='scale(1)';"
+        style="width: 50px; height: 50px; border-radius: 50%; background: #1565c0; color: white; border: none; font-size: 24px; font-weight: bold; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,0.3); transition: transform 0.15s; display: flex; align-items: center; justify-content: center;"
+        aria-label="Help" title="Help">?</button>
+</div>
+
+<div id="help-modal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 10002; align-items: center; justify-content: center;">
+    <div style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); width: 900px; max-width: 95vw; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #eee; background: #1565c0; color: white; flex-shrink: 0;">
+            <h3 style="margin: 0; font-size: 18px;">Requesting Access to a LaunchPad Project</h3>
+            <button onclick="closeHelpModal()" style="background: none; border: none; cursor: pointer; font-size: 26px; color: white; line-height: 1; padding: 0;">&times;</button>
+        </div>
+        <iframe id="help-modal-iframe" src="about:blank" style="flex: 1; border: none; width: 100%;" allow="fullscreen"></iframe>
+    </div>
+</div>
 <div id="admin-panel" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 2000; align-items: center; justify-content: center;">
     <div style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.25); width: 480px; max-width: 90vw; max-height: 80vh; display: flex; flex-direction: column; overflow: hidden;">
         <div style="display: flex; justify-content: space-between; align-items: center; padding: 18px 20px; border-bottom: 1px solid #eee;">
@@ -4176,6 +4200,46 @@ async function triggerFullStatusRefresh() {
 // deployment. Code elsewhere still reads the name "ADMIN_EMAIL" via this
 // getter so nothing else needs to change.
 Object.defineProperty(window, 'ADMIN_EMAIL', { get: () => window.LP_CONFIG.adminEmail, configurable: true });
+
+// ===== HELP (SIGN-IN SCREEN) =====
+// Paste your Scribe guide's EMBED URL here — from the guide in Scribe,
+// use Share > Embed and copy the URL out of the iframe's src="..."
+// (this is a different link than the normal "share" URL). Loaded lazily,
+// only the first time someone actually opens the help modal.
+const SCRIBE_SIGNUP_GUIDE_URL = 'https://scribehow.com/embed/Requesting_Access_To_A_New_LaunchPad_Project__mjQesHSsSQOJ1v8gtuFdlA';
+
+function openHelpModal() {
+    const iframe = document.getElementById('help-modal-iframe');
+    if (iframe.src === 'about:blank' || !iframe.src) {
+        if (SCRIBE_SIGNUP_GUIDE_URL.indexOf('PASTE_YOUR') === 0) {
+            iframe.outerHTML = '<div id="help-modal-iframe" style="flex:1; display:flex; align-items:center; justify-content:center; color:#888; font-size:14px; padding:20px; text-align:center;">The sign-up guide hasn\'t been added yet — set SCRIBE_SIGNUP_GUIDE_URL near the top of the script.</div>';
+        } else {
+            iframe.src = SCRIBE_SIGNUP_GUIDE_URL;
+        }
+    }
+    document.getElementById('help-modal').style.display = 'flex';
+}
+
+function closeHelpModal() {
+    document.getElementById('help-modal').style.display = 'none';
+}
+
+// The sign-in form (#auth-prompt) is set to display:block from several
+// different places in this file (initial load, sign-out, session expiry,
+// etc.) — rather than editing every one of those to also show/hide the
+// help button, just watch #auth-prompt itself and mirror it. Runs once;
+// the elements it references already exist by the time this script tag
+// is reached, since they're defined earlier in the body.
+(function initHelpButtonVisibility() {
+    const authPrompt = document.getElementById('auth-prompt');
+    const helpWidget = document.getElementById('launchpad-help-widget');
+    if (!authPrompt || !helpWidget) return;
+    const sync = () => {
+        helpWidget.style.display = (authPrompt.style.display === 'block') ? 'flex' : 'none';
+    };
+    sync();
+    new MutationObserver(sync).observe(authPrompt, { attributes: true, attributeFilter: ['style'] });
+})();
 
 function toggleAdminPanel() {
     // 1. HARD SECURITY BLOCK: If they are not an admin in the database, stop immediately.
