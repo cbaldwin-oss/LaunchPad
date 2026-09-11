@@ -1827,10 +1827,14 @@ const defaultScheduleConfig = [
 
 async function loadScheduleConfig() {
     try {
-        const response = await fetch(`${GOOGLE_SCRIPT_URL}?action=getScheduleConfig&t=${new Date().getTime()}`);
-        const data = await response.json();
-        if (data.status === 'success' && data.data) {
-            scheduleColConfig = typeof data.data === 'string' ? JSON.parse(data.data) : data.data;
+        const { data: row, error } = await _supabase
+            .from('launchpad_schedule_config')
+            .select('column_config')
+            .eq('project_key', window.LP_CONFIG.projectKey)
+            .maybeSingle();
+        if (error) throw error;
+        if (row && row.column_config && row.column_config.length) {
+            scheduleColConfig = row.column_config;
             
             if (!scheduleColConfig.find(c => c.id === 9)) {
                 scheduleColConfig.push({ id: 9, name: 'Duration', visible: true, width: 5 });
@@ -1857,7 +1861,7 @@ async function loadScheduleConfig() {
             LP_CACHE.set('scheduleColConfig', scheduleColConfig);
         }
     } catch (e) {
-        console.error("Failed to load Schedule Config from cloud. Using defaults.", e);
+        console.error("Failed to load Schedule Config from Supabase. Using defaults.", e);
     }
     renderDynamicHeaders();
 }
@@ -4712,16 +4716,19 @@ async function verifyPermission(email) {
 
 async function loadAppConfig() {
     try {
-        const response = await fetch(`${GOOGLE_SCRIPT_URL}?action=getAppConfig&t=${new Date().getTime()}`);
-        const data = await response.json();
-        if (data.status === 'success' && data.data) {
-            let parsedData = typeof data.data === 'string' ? JSON.parse(data.data) : data.data;
+        const { data: row, error } = await _supabase
+            .from('launchpad_nav_config')
+            .select('sidebar_config')
+            .eq('project_key', window.LP_CONFIG.projectKey)
+            .maybeSingle();
+        if (error) throw error;
+        if (row && row.sidebar_config) {
             // Safely merge the downloaded data with the defaults so nothing breaks
-            appConfig = { ...appConfig, ...parsedData };
+            appConfig = { ...appConfig, ...row.sidebar_config };
             LP_CACHE.set('appConfig', appConfig);
         }
     } catch (e) {
-        console.error("Failed to load App Config from cloud.", e);
+        console.error("Failed to load App Config from Supabase.", e);
     }
     applySidebarConfig();
 }
@@ -4732,21 +4739,25 @@ async function loadEquivalentActivities() {
     // Show a temporary loading state
     phases.forEach(phase => {
         const container = document.getElementById(`eq-act-${phase}-list`);
-        if (container) container.innerHTML = '<div style="color: #999; font-size: 12px; padding: 5px; text-align: center;">Loading from Google Sheets...</div>';
+        if (container) container.innerHTML = '<div style="color: #999; font-size: 12px; padding: 5px; text-align: center;">Loading...</div>';
     });
     
     try {
-        const response = await fetch(`${GOOGLE_SCRIPT_URL}?action=getEqActivities&t=${new Date().getTime()}`);
-        const data = await response.json();
-        if (data.status === 'success') {
-            equivalentActivitiesConfig = data.data;
+        const { data: row, error } = await _supabase
+            .from('launchpad_equivalent_activities')
+            .select('activities_config')
+            .eq('project_key', window.LP_CONFIG.projectKey)
+            .maybeSingle();
+        if (error) throw error;
+        if (row && row.activities_config) {
+            equivalentActivitiesConfig = row.activities_config;
             LP_CACHE.set('equivalentActivitiesConfig', equivalentActivitiesConfig);
         }
     } catch (e) {
-        console.error("Failed to load Eq Activities:", e);
+        console.error("Failed to load Eq Activities from Supabase:", e);
     }
     
-    // Render the checklists now that we have the data from the sheet
+    // Render the checklists now that we have the data
     renderEquivalentActivitiesUI();
 }
 
@@ -5775,37 +5786,41 @@ async function saveAllSettings(btn) {
         }
     });
 
-// 4. FIRE ALL CLOUD SAVES AND WAIT FOR THEM TO FINISH
+// 4. SAVE THE THREE SUPABASE-BACKED SETTINGS, PLUS PHASE RULES (still sheet-backed)
     try {
+        const savedBy = window.__currentUserEmail || null;
         await Promise.all([
-            fetch(GOOGLE_SCRIPT_URL, {
-                method: 'POST',
-                body: JSON.stringify({ action: 'setEqActivities', data: equivalentActivitiesConfig }),
-                mode: 'no-cors'
-            }),
+            _supabase.from('launchpad_equivalent_activities').upsert({
+                project_key: window.LP_CONFIG.projectKey,
+                activities_config: equivalentActivitiesConfig,
+                updated_by: savedBy
+            }, { onConflict: 'project_key' }),
             savePhaseRules(),
-            fetch(GOOGLE_SCRIPT_URL, {
-                method: 'POST',
-                body: JSON.stringify({ action: 'setScheduleConfig', data: scheduleColConfig }),
-                mode: 'no-cors'
-            }),
-            fetch(GOOGLE_SCRIPT_URL, {
-                method: 'POST',
-                body: JSON.stringify({ action: 'setAppConfig', data: appConfig }),
-                mode: 'no-cors'
-            })
-        ]);
-        console.log("All settings successfully dispatched to cloud.");
+            _supabase.from('launchpad_schedule_config').upsert({
+                project_key: window.LP_CONFIG.projectKey,
+                column_config: scheduleColConfig,
+                updated_by: savedBy
+            }, { onConflict: 'project_key' }),
+            _supabase.from('launchpad_nav_config').upsert({
+                project_key: window.LP_CONFIG.projectKey,
+                sidebar_config: appConfig,
+                updated_by: savedBy
+            }, { onConflict: 'project_key' })
+        ]).then(results => {
+            const failed = results.find(r => r && r.error);
+            if (failed) throw failed.error;
+        });
+        console.log("All settings successfully saved.");
         
-        // --- THE FIX: WAIT FOR GOOGLE SHEETS TO FINISH WRITING ---
-        // Because these run in the background, we MUST pause to give Google Sheets 
-        // time to write the data to the cells before we reload the app!
+        // Phase Rules still writes to Google Sheets in the background, so we
+        // still give that a moment to finish before reloading — the three
+        // Supabase saves above are already confirmed by the time we get here.
         btn.innerText = "Finalizing... ⏳";
-        await new Promise(resolve => setTimeout(resolve, 2500));
+        await new Promise(resolve => setTimeout(resolve, 1000));
         
     } catch (e) {
-        console.error("Cloud save error:", e);
-        alert("There was an issue saving to Google Sheets, but local changes were applied.");
+        console.error("Settings save error:", e);
+        alert("There was an issue saving settings, but local changes were applied.");
     }
 
     // 5. Finally, reload the page cleanly to fetch the newly written data
@@ -6415,15 +6430,17 @@ async function saveLayoutEdits() {
     btn.disabled = true;
     
     try {
-        await fetch(GOOGLE_SCRIPT_URL, {
-            method: 'POST',
-            body: JSON.stringify({ action: 'setScheduleConfig', data: scheduleColConfig }),
-            mode: 'no-cors'
-        });
+        const { error } = await _supabase.from('launchpad_schedule_config').upsert({
+            project_key: window.LP_CONFIG.projectKey,
+            column_config: scheduleColConfig,
+            updated_by: window.__currentUserEmail || null
+        }, { onConflict: 'project_key' });
+        if (error) throw error;
+        LP_CACHE.set('scheduleColConfig', scheduleColConfig);
         alert("Column layout saved successfully!");
     } catch (e) {
         console.error("Failed to save layout.", e);
-        alert("There was an issue saving to Google Sheets.");
+        alert("There was an issue saving the layout.");
     }
     
     btn.innerText = "Save Layout";
