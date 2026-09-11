@@ -759,9 +759,10 @@ const USER_EMAIL = (new URLSearchParams(window.location.search).get('email') || 
 // overall — actually logging/editing seals is CriticalArc-staff-only.
 const canEditTamperSeals = (USER_ROLE === 'editor' || USER_ROLE === 'admin') && USER_EMAIL.endsWith('@criticalarccx.com');
 
-// The project's own Apps Script URL, passed in by the LaunchPad shell —
-// same one Equipment Tracker and the Schedule use, just a different action
-// for this file's own column layout config.
+// The project's own Apps Script URL, passed in by the LaunchPad shell.
+// No longer used for this file's own settings (those moved to Supabase —
+// see loadColumnConfig()/saveTsSettings() below) but kept here in case a
+// future feature in this file needs the Apps Script backend directly.
 const TS_SCRIPT_URL = new URLSearchParams(window.location.search).get('scriptUrl') || '';
 
 // Column layout is a shared, project-wide setting (like Equipment
@@ -968,10 +969,14 @@ let isPreviewMode = false;
 // to the in-app preview of that same form.
 
 async function loadColumnConfig() {
-    if (!TS_SCRIPT_URL) { applyColumnConfig(); return; }
     try {
-        const response = await fetch(`${TS_SCRIPT_URL}?action=getTamperSealColumnConfig`);
-        const data = await response.json();
+        const { data: row, error } = await _supabase
+            .from('launchpad_tamperseal_config')
+            .select('config')
+            .eq('project_key', PROJECT_KEY)
+            .maybeSingle();
+        if (error) throw error;
+        const data = row && row.config;
         if (data && Array.isArray(data.columnConfig) && data.columnConfig.length > 0) {
             // Merge with defaults so a column added to the app later (or
             // one missing from an older save) doesn't just disappear.
@@ -1592,22 +1597,18 @@ async function saveTsSettings() {
     refreshAllStatusDropdowns();
     closeColumnSettingsModal();
 
-    if (!TS_SCRIPT_URL) {
-        alert('Settings applied for this session, but no backend connection was available to save them permanently.');
-        return;
-    }
-
     try {
-        await fetch(TS_SCRIPT_URL, {
-            method: 'POST',
-            body: JSON.stringify({
-                action: 'setTamperSealColumnConfig',
+        const { error } = await _supabase.from('launchpad_tamperseal_config').upsert({
+            project_key: PROJECT_KEY,
+            config: {
                 columnConfig: columnConfig,
                 workflows: workflows,
                 globalStatusOrder: globalStatusOrder,
                 reinspectionFilterStatuses: reinspectionFilterStatuses
-            })
-        });
+            },
+            updated_by: USER_EMAIL || null
+        }, { onConflict: 'project_key' });
+        if (error) throw error;
     } catch (e) {
         alert('Settings applied, but saving them to the backend failed: ' + e.message);
     }

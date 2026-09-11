@@ -240,14 +240,18 @@
             }
 
             workflows = getDefaultWorkflows();
-            if (scriptUrl) {
-                try {
-                    const response = await fetch(`${scriptUrl}?action=getTamperSealColumnConfig`);
-                    const data = await response.json();
-                    if (data && Array.isArray(data.workflows) && data.workflows.length > 0) {
+            try {
+                const { data: cfgRow } = await _supabase
+                    .from('launchpad_tamperseal_config')
+                    .select('config')
+                    .eq('project_key', PROJECT_KEY)
+                    .maybeSingle();
+                const data = cfgRow && cfgRow.config;
+                if (data) {
+                    if (Array.isArray(data.workflows) && data.workflows.length > 0) {
                         workflows = data.workflows;
                         if (!workflows.some(w => w.active)) workflows[0].active = true;
-                    } else if (data && data.statusFlow && Array.isArray(data.statusFlow.statuses)) {
+                    } else if (data.statusFlow && Array.isArray(data.statusFlow.statuses)) {
                         // Migrate an older single-workflow save into the
                         // current structure, same as tamperseal.html does.
                         workflows = [{
@@ -257,8 +261,8 @@
                         }];
                     }
                     if (Array.isArray(data.globalStatusOrder)) globalStatusOrder = data.globalStatusOrder;
-                } catch (e) { console.warn('Could not load workflow config, using default:', e); }
-            }
+                }
+            } catch (e) { console.warn('Could not load workflow config, using default:', e); }
 
             const { data: seals, error } = await _supabase.from(T('Assets')).select('*');
             if (error) {
