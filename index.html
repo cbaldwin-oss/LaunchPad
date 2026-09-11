@@ -1725,6 +1725,15 @@ body.dark-mode .phase-row {
 <div id="project-picker" style="display: none; flex-direction: column; text-align: center; background: white; padding: 0; border-radius: 14px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); color: #333; max-width: 600px; margin: 0 20px; width: 100%; overflow: hidden;">
     <div style="position: relative; background: linear-gradient(135deg, #1b5e20, #2e7d32); padding: 34px 28px 28px; display: flex; align-items: center; justify-content: space-between; gap: 12px; overflow: hidden;">
         <img src="https://lh3.googleusercontent.com/u/0/d/1Wy_ftXtce-UG5jV-5vwS80lV1yt7QTbG" alt="" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); height: 260%; width: auto; opacity: 0.14; filter: brightness(0) invert(1); pointer-events: none;">
+        <!-- Always visible regardless of how many projects are in the
+             scrollable list below — someone who doesn't want any of the
+             listed projects (wrong account, needs to sign in as someone
+             else, etc.) previously had no way out of this screen at all. -->
+        <button onclick="logout()" style="position: absolute; top: 12px; right: 14px; background: rgba(0,0,0,0.18); color: rgba(255,255,255,0.9); border: 1px solid rgba(255,255,255,0.35); border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 5px;"
+            onmouseover="this.style.background='rgba(0,0,0,0.32)'; this.style.color='white';"
+            onmouseout="this.style.background='rgba(0,0,0,0.18)'; this.style.color='rgba(255,255,255,0.9)';">
+            <span>🚪</span> Log Out
+        </button>
         <span style="position: relative; font-size: 46px; flex-shrink: 0;" title="LaunchPad">📡</span>
         <div style="position: relative; flex: 1; min-width: 0;">
             <h2 style="margin: 0; color: white; font-size: 27px; letter-spacing: -0.3px;">Select a Project</h2>
@@ -5299,10 +5308,10 @@ async function toggleSwitchProjectPopover(event) {
 
     popover.innerHTML = `
         <div style="padding:6px; border-bottom:1px solid #eee; flex-shrink:0;">
-            <button onclick="document.getElementById('switch-project-popover').remove();" style="width:100%; display:flex; align-items:center; gap:6px; text-align:left; background:#f5f5f5; border:1px solid #ddd; border-radius:7px; padding:8px 10px; font-size:13px; font-weight:600; color:#333; cursor:pointer;"
+            <button onclick="location.reload();" style="width:100%; display:flex; align-items:center; gap:6px; text-align:left; background:#f5f5f5; border:1px solid #ddd; border-radius:7px; padding:8px 10px; font-size:13px; font-weight:600; color:#333; cursor:pointer;"
                 onmouseover="this.style.background='#e8f5e9'; this.style.borderColor='#2e7d32';"
                 onmouseout="this.style.background='#f5f5f5'; this.style.borderColor='#ddd';">
-                <span>←</span> Return to Project
+                <span>←</span> Return to Site Selector
             </button>
         </div>
         <div id="switch-project-popover-list" style="padding:6px; overflow-y:auto; flex:1; min-height:0;">
