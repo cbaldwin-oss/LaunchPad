@@ -7,7 +7,6 @@
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&family=DM+Mono:wght@400;500&display=swap');
 
   :root {
     --bg: #23262B; --panel: #2D3035; --border: #3E4248; --line: #34383E;
@@ -16,7 +15,7 @@
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
-    font-family: 'Barlow', sans-serif; }
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
   a { color: inherit; }
 
   .app { display: flex; min-height: 100vh; width: 100%; }
@@ -25,7 +24,7 @@
   .sidebar { width: clamp(220px, 20vw, 300px); flex: 0 0 clamp(220px, 20vw, 300px);
     background: var(--panel); border-right: 1px solid var(--border); padding: 20px;
     position: sticky; top: 0; height: 100vh; overflow-y: auto; }
-  .ca-brand { font-family: 'Barlow Condensed', sans-serif; font-size: 20px;
+  .ca-brand { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 20px;
     font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
     border-bottom: 2px solid var(--green); padding-bottom: 12px; margin-bottom: 20px; }
   .ca-brand-sub { font-size: 11px; color: var(--muted); letter-spacing: 1px; margin-top: 2px; }
@@ -33,7 +32,7 @@
     text-transform: uppercase; margin: 16px 0 6px; }
   select { width: 100%; background: #23262B; color: var(--text);
     border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
-    font-family: 'Barlow', sans-serif; font-size: 13px; }
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; }
   select:focus { outline: none; border-color: var(--muted); }
   /* Multi-select checkbox filter groups (empty selection = all) */
   .checkgroup { display: flex; flex-direction: column; gap: 5px; max-height: 190px; overflow-y: auto;
@@ -51,13 +50,13 @@
   .eq-search-wrap { display: flex; gap: 12px; align-items: center; margin: 4px 0 12px; flex-wrap: wrap; }
   .eq-search-wrap input[type="text"] { flex: 1; min-width: 200px; background: #23262B; color: var(--text);
     border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
-    font-family: 'Barlow', sans-serif; font-size: 13px; }
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; }
   .eq-search-wrap input[type="text"]:focus { outline: none; border-color: var(--muted); }
   .eq-search-wrap label { color: var(--muted); font-size: 13px; white-space: nowrap; cursor: pointer;
     display: flex; align-items: center; gap: 6px; }
   .eq-search-wrap input[type="checkbox"] { accent-color: var(--green); width: 15px; height: 15px; cursor: pointer; }
   .refreshed { font-size: 11px; color: var(--muted); margin-top: 4px; }
-  button.refresh { margin-top: 12px; width: 100%; font-family: 'Barlow Condensed', sans-serif;
+  button.refresh { margin-top: 12px; width: 100%; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; background: transparent;
     color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 9px;
     cursor: pointer; transition: background .15s, border-color .15s; }
@@ -66,7 +65,7 @@
 
   /* ── Main ────────────────────────────────────────────── */
   .main { flex: 1; padding: clamp(16px, 2vw, 28px) clamp(16px, 2.5vw, 36px); min-width: 0; }
-  .page-title { font-family: 'Barlow Condensed', sans-serif; font-size: clamp(28px, 4vw, 42px);
+  .page-title { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: clamp(28px, 4vw, 42px);
     font-weight: 700; letter-spacing: 1px; text-transform: uppercase; line-height: 1.1;
     color: var(--text); }
   .page-sub { font-size: 14px; color: var(--muted); margin-top: 4px; letter-spacing: .5px; }
@@ -77,7 +76,7 @@
   .tabs { display: flex; gap: 4px; background: var(--panel); padding: 4px;
     border-radius: 10px; border: 1px solid var(--border); margin: 16px 0 20px; width: fit-content; }
   .tab { background: transparent; border: none; border-radius: 6px; color: var(--muted);
-    font-family: 'Barlow Condensed', sans-serif; font-weight: 600; font-size: 13px;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-weight: 600; font-size: 13px;
     letter-spacing: .5px; padding: 8px 16px; cursor: pointer; }
   .tab.active { background: var(--line); color: var(--green); }
   
@@ -85,7 +84,7 @@
   .tabpage { height: 0; overflow: hidden; visibility: hidden; } 
   .tabpage.active { height: auto; overflow: visible; visibility: visible; }
 
-  .section-header { font-family: 'Barlow Condensed', sans-serif; font-size: 12px;
+  .section-header { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 12px;
     font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--green);
     margin: 24px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
 
@@ -94,9 +93,9 @@
   .kpi-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
     padding: 20px 24px; text-align: center; transition: border-color .2s; }
   .kpi-card:hover { border-color: var(--muted); }
-  .kpi-label { font-family: 'Barlow Condensed', sans-serif; font-size: 11px; font-weight: 600;
+  .kpi-label { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 11px; font-weight: 600;
     letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
-  .kpi-value { font-family: 'DM Mono', monospace; font-size: 32px; font-weight: 500;
+  .kpi-value { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 32px; font-weight: 500;
     line-height: 1; margin-bottom: 4px; }
   .kpi-sub { font-size: 12px; color: var(--muted); }
   .kpi-red { color: var(--red); } .kpi-yellow { color: var(--yellow); }
@@ -121,7 +120,7 @@
 
   /* Tables */
   table.dt { width: 100%; border-collapse: collapse; font-size: 12.5px; margin: 6px 0; }
-  table.dt th { text-align: left; color: var(--muted); font-family: 'Barlow Condensed', sans-serif;
+  table.dt th { text-align: left; color: var(--muted); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     font-weight: 600; letter-spacing: .5px; text-transform: uppercase; font-size: 11px;
     border-bottom: 1px solid var(--border); padding: 8px 10px; position: sticky; top: 0;
     background: var(--panel); }
@@ -130,7 +129,7 @@
   .table-wrap { max-height: 460px; overflow: auto; border: 1px solid var(--border);
     border-radius: 8px; background: var(--panel); }
   details { margin: 12px 0; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
-  details > summary { cursor: pointer; padding: 12px 16px; font-family: 'Barlow Condensed', sans-serif;
+  details > summary { cursor: pointer; padding: 12px 16px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     font-weight: 600; letter-spacing: .5px; color: var(--muted); }
   details[open] > summary { border-bottom: 1px solid var(--border); color: var(--text); }
   details .table-wrap { border: none; border-radius: 0; }
@@ -862,6 +861,22 @@ async function loadProject(projectKey) {
   if (!resp.ok) throw new Error(`Request failed: ${resp.status} ${resp.statusText}`);
   STATE.data = await resp.json();
   if (STATE.data && STATE.data.error) throw new Error(STATE.data.error);
+
+  // Defensive: see the matching comment in dashboard.js's loadProject() —
+  // a getDashboardData wiring/deployment problem can come back missing one
+  // of these instead of failing outright.
+  const missingKeys = ['equipment', 'companies', 'issues', 'checklists', 'tests']
+    .filter(key => !Array.isArray(STATE.data[key]));
+  if (missingKeys.length) {
+    console.warn(
+      `Dashboard response is missing expected array field(s): ${missingKeys.join(', ')}. ` +
+      `This usually means the getDashboardData action isn't reaching buildDashboardJson_ yet — ` +
+      `double-check it's wired into doGet and that the Apps Script was redeployed as a NEW ` +
+      `version (not just saved) after adding it. Actual response keys: ${Object.keys(STATE.data || {}).join(', ') || '(none)'}`
+    );
+    missingKeys.forEach(key => { STATE.data[key] = []; });
+  }
+
   STATE.eqPhase = new Map(STATE.data.equipment.map(e => [String(e.equipment_id), e.building_phase]));
   STATE.filters = { discipline: [], contractor: [], status: [], phase: [] };
   EQ_FILTER = { bldg: 'All', floor: 'All' };

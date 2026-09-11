@@ -1663,8 +1663,8 @@ body.dark-mode .phase-row {
 
         <div class="subheader">
             <div class="subheader-item">
-                <button class="tool-btn" onclick="expandAllWeeks()">Expand Weeks</button>
-                <button class="tool-btn" onclick="expandAllDays()">Expand Days</button>
+                <button class="tool-btn" id="btn-expand-weeks" onclick="expandAllWeeks()">Expand Weeks</button>
+                <button class="tool-btn" id="btn-expand-days" onclick="expandAllDays()">Expand Days</button>
                 <button class="tool-btn" id="btn-reset" onclick="collapseEverything()">Collapse All</button>
                 <button id="ready-activities-btn" class="tool-btn" onclick="toggleReadyActivities()" style="background: #ffffff; color: #0c44fa; border-color: #0c44fa; display: inline-flex; align-items: center; gap: 8px;">
                     Ready Activities
@@ -1800,7 +1800,7 @@ body.dark-mode .phase-row {
         </button>
     </div>
 </div>
-<div id="history-menu" style="display:none; position:fixed; background:white; border:1px solid #ccc; box-shadow:0 4px 15px rgba(0,0,0,0.2); z-index:9999; width:280px; padding:0; border-radius:8px; overflow:hidden; font-family: sans-serif;">
+<div id="history-menu" style="display:none; position:fixed; background:white; border:1px solid #ccc; box-shadow:0 4px 15px rgba(0,0,0,0.2); z-index:9999; width:280px; padding:0; border-radius:8px; overflow:hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
     <div style="background:#2e7d32; color:white; padding:10px; font-size:14px; font-weight:bold; display:flex; justify-content:space-between;">
         <span>Cell Edit History</span>
         <span onclick="document.getElementById('history-menu').style.display='none'" style="cursor:pointer;">×</span>
@@ -2663,7 +2663,7 @@ function openSearchableSingleSelect(cellElement, colIndex) {
     if (!menu) {
         menu = document.createElement('div');
         menu.id = 'single-select-menu';
-        menu.style.cssText = 'display: none; position: absolute; background: white; border: 1px solid #ccc; box-shadow: 0 4px 12px rgba(0,0,0,0.15); border-radius: 4px; z-index: 10000; max-height: 280px; flex-direction: column; min-width: 220px; font-family: sans-serif;';
+        menu.style.cssText = 'display: none; position: absolute; background: white; border: 1px solid #ccc; box-shadow: 0 4px 12px rgba(0,0,0,0.15); border-radius: 4px; z-index: 10000; max-height: 280px; flex-direction: column; min-width: 220px; font-family: \'Segoe UI\', Tahoma, Geneva, Verdana, sans-serif;';
         document.body.appendChild(menu);
         
         const searchInput = document.createElement('input');
@@ -3998,6 +3998,7 @@ function revealElement(el) {
         const weekContent = weekContainer.querySelector('.week-content');
         if (weekContent) weekContent.classList.remove('hidden');
     }
+    updateExpandCollapseButtons();
 }
 
 function updateSearchUI() {
@@ -5222,14 +5223,30 @@ async function toggleSwitchProjectPopover(event) {
 
     const popover = document.createElement('div');
     popover.id = 'switch-project-popover';
-    popover.style.cssText = 'position:fixed; background:white; border:1px solid #ddd; border-radius:10px; box-shadow:0 8px 24px rgba(0,0,0,0.18); z-index:3000; min-width:220px; max-height:280px; overflow-y:auto; padding:6px;';
+    // Header (with the return button) and the scrollable project list are
+    // two separate flex children now, so a long list of other projects
+    // scrolls on its own without ever carrying the return button out of
+    // view with it.
+    popover.style.cssText = 'position:fixed; background:white; border:1px solid #ddd; border-radius:10px; box-shadow:0 8px 24px rgba(0,0,0,0.18); z-index:3000; min-width:220px; max-height:340px; display:flex; flex-direction:column; overflow:hidden; padding:0;';
 
     const rect = clickedEl.getBoundingClientRect();
     popover.style.left = (rect.right + 8) + 'px';
     popover.style.bottom = (window.innerHeight - rect.bottom) + 'px';
 
-    popover.innerHTML = '<div style="padding:10px; font-size:13px; color:#999;">Loading...</div>';
+    popover.innerHTML = `
+        <div style="padding:6px; border-bottom:1px solid #eee; flex-shrink:0;">
+            <button onclick="document.getElementById('switch-project-popover').remove();" style="width:100%; display:flex; align-items:center; gap:6px; text-align:left; background:#f5f5f5; border:1px solid #ddd; border-radius:7px; padding:8px 10px; font-size:13px; font-weight:600; color:#333; cursor:pointer;"
+                onmouseover="this.style.background='#e8f5e9'; this.style.borderColor='#2e7d32';"
+                onmouseout="this.style.background='#f5f5f5'; this.style.borderColor='#ddd';">
+                <span>←</span> Return to Project
+            </button>
+        </div>
+        <div id="switch-project-popover-list" style="padding:6px; overflow-y:auto; flex:1; min-height:0;">
+            <div style="padding:10px; font-size:13px; color:#999;">Loading...</div>
+        </div>
+    `;
     document.body.appendChild(popover);
+    const popoverList = document.getElementById('switch-project-popover-list');
 
     const { data: memberships } = await _supabase
         .from('launchpad_memberships')
@@ -5241,7 +5258,7 @@ async function toggleSwitchProjectPopover(event) {
         .filter(k => k !== window.LP_CONFIG.projectKey);
 
     if (otherKeys.length === 0) {
-        popover.innerHTML = '<div style="padding:12px; font-size:13px; color:#999; text-align:center;">No other projects</div>';
+        popoverList.innerHTML = '<div style="padding:12px; font-size:13px; color:#999; text-align:center;">No other projects</div>';
     } else {
         const { data: projects, error: projectsErr } = await _supabase
             .from('launchpad_projects')
@@ -5250,11 +5267,11 @@ async function toggleSwitchProjectPopover(event) {
 
         if (projectsErr) {
             console.error('Switch-project popover: failed to load project details:', projectsErr);
-            popover.innerHTML = '<div style="padding:12px; font-size:13px; color:#d32f2f; text-align:center;">Couldn\'t load projects — check the console.</div>';
+            popoverList.innerHTML = '<div style="padding:12px; font-size:13px; color:#d32f2f; text-align:center;">Couldn\'t load projects — check the console.</div>';
             return;
         }
 
-        popover.innerHTML = (projects || []).map(p => `
+        popoverList.innerHTML = (projects || []).map(p => `
             <div onclick="switchToProjectDirect('${p.project_key}')" style="display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:7px; cursor:pointer; font-size:14px; font-weight:600; color:#1b1b1b;"
                  onmouseover="this.style.background='#e8f5e9'" onmouseout="this.style.background='transparent'">
                 ${p.logo_url ? `<img src="${p.logo_url}" style="height:24px; width:24px; object-fit:cover; border-radius:4px; flex-shrink:0;">` : '<span style="font-size:18px;">📁</span>'}
@@ -6680,6 +6697,7 @@ function createWeekElement(baseDate, w) {
     weekHeader.onclick = () => {
         const isHidden = weekContent.classList.toggle('hidden');
         weekHeader.querySelector('.week-arrow').innerText = isHidden ? '▶' : '▼';
+        updateExpandCollapseButtons();
     };
 
     for (let d = 0; d < 7; d++) {
@@ -6710,6 +6728,7 @@ function createWeekElement(baseDate, w) {
 
             const isHidden = rowsDiv.classList.toggle('hidden');
             header.querySelector('.arrow').innerText = isHidden ? '▶' : '▼';
+            updateExpandCollapseButtons();
         };
 
         const addBtn = document.createElement('button');
@@ -6751,6 +6770,27 @@ function createSections() {
     } else {
         renderNextWeekBatch();
     }
+
+    // Safety net for the Expand/Collapse toolbar state: the explicit calls
+    // to updateExpandCollapseButtons() scattered through the toggle
+    // handlers above cover every place THIS file currently changes
+    // .week-content/.rows-container, but this catches anything else too —
+    // most notably renderNextWeekBatch() appending a fresh, collapsed-by-
+    // default week onto an otherwise-fully-expanded schedule while
+    // scrolling. Attribute-filtered to class changes only, so routine cell
+    // edits elsewhere in the grid don't trigger it. Set up once; createSections()
+    // itself can run many times (view switches, project switches) but the
+    // observer just keeps watching whatever's currently inside #main-content-area.
+    if (!window.__expandCollapseObserverStarted) {
+        window.__expandCollapseObserverStarted = true;
+        let debounceTimer = null;
+        const observer = new MutationObserver(() => {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(updateExpandCollapseButtons, 50);
+        });
+        observer.observe(contentArea, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+    }
+    updateExpandCollapseButtons();
 }
 
 // Look Ahead views only ever need a small window of weeks around today —
@@ -7031,7 +7071,7 @@ function openMultiSelectMenu(cellElement, rowNum, dayLabel) {
         menu = document.createElement('div');
         menu.id = 'multi-select-menu';
         // Updated styling to use display: flex and support the new search bar
-        menu.style.cssText = 'display: none; position: absolute; background: white; border: 1px solid #ccc; box-shadow: 0 4px 12px rgba(0,0,0,0.15); border-radius: 4px; z-index: 10000; max-height: 280px; flex-direction: column; min-width: 220px; font-family: sans-serif;';
+        menu.style.cssText = 'display: none; position: absolute; background: white; border: 1px solid #ccc; box-shadow: 0 4px 12px rgba(0,0,0,0.15); border-radius: 4px; z-index: 10000; max-height: 280px; flex-direction: column; min-width: 220px; font-family: \'Segoe UI\', Tahoma, Geneva, Verdana, sans-serif;';
         
         const header = document.createElement('div');
         header.innerText = 'Select Options';
@@ -7538,6 +7578,7 @@ function expandAllWeeks() {
         const arrow = document.querySelectorAll('.week-arrow')[i];
         if (arrow) arrow.innerText = '▼';
     });
+    updateExpandCollapseButtons();
 }
 
 // 2. Only targets the grey Day bars
@@ -7547,6 +7588,7 @@ function expandAllDays() {
         const arrow = document.querySelectorAll('.arrow')[i];
         if (arrow) arrow.innerText = '▼';
     });
+    updateExpandCollapseButtons();
 }
 
 // 3. The "Reset" - hides everything
@@ -7569,6 +7611,37 @@ function collapseEverything() {
         searchInput.value = "";
         performSearch(""); // Clears all yellow/orange highlights
     }
+    updateExpandCollapseButtons();
+}
+
+// Three states for the toolbar, based on what's actually expanded right now
+// (not just whether one of the bulk buttons above was the last thing
+// clicked — a person can also expand/collapse a single week or day by
+// clicking its own header, so this always re-checks the real DOM state):
+//   - Nothing expanded: only "Expand Weeks" makes sense to offer.
+//   - At least one week open, but not everything: offer "Expand Days" to
+//     finish the job, and "Collapse All" to back out.
+//   - Everything expanded: only "Collapse All" is meaningful.
+// Called after every bulk action above, after toggling a single week/day
+// header, and after revealSearchResult() force-expands something — plus a
+// MutationObserver (set up once in createSections()) as a safety net for
+// any other place new (collapsed-by-default) weeks/days get added later.
+function updateExpandCollapseButtons() {
+    const weekEls = document.querySelectorAll('.week-content');
+    const dayEls = document.querySelectorAll('.rows-container');
+
+    const anyWeekExpanded = Array.from(weekEls).some(el => !el.classList.contains('hidden'));
+    const allWeeksExpanded = weekEls.length > 0 && Array.from(weekEls).every(el => !el.classList.contains('hidden'));
+    const allDaysExpanded = dayEls.length > 0 && Array.from(dayEls).every(el => !el.classList.contains('hidden'));
+    const fullyExpanded = allWeeksExpanded && allDaysExpanded;
+
+    const btnExpandWeeks = document.getElementById('btn-expand-weeks');
+    const btnExpandDays = document.getElementById('btn-expand-days');
+    const btnCollapseAll = document.getElementById('btn-reset');
+
+    if (btnExpandWeeks) btnExpandWeeks.style.display = anyWeekExpanded ? 'none' : '';
+    if (btnExpandDays) btnExpandDays.style.display = (anyWeekExpanded && !fullyExpanded) ? '' : 'none';
+    if (btnCollapseAll) btnCollapseAll.style.display = anyWeekExpanded ? '' : 'none';
 }
 
 function autoCleanUI() {
@@ -8146,7 +8219,7 @@ function exportToPDF() {
     <head>
         <title>Schedule Report Export</title>
         <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; padding: 25px; color: #222; line-height: 1.4; }
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 25px; color: #222; line-height: 1.4; }
             .report-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #1b5e20; padding-bottom: 10px; margin-bottom: 20px; }
             h1 { font-size: 22px; margin: 0; color: #1b5e20; font-weight: bold; }
             .meta-stamp { font-size: 13px; color: #666; font-weight: 500; }
