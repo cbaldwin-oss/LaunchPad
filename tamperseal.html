@@ -93,17 +93,21 @@
             box-sizing: border-box !important;
             margin: 0 !important;
             gap: 4px !important;
+            flex-wrap: nowrap !important;
         }
 
         /* Column layout resizing — handles only show up in edit mode, so
-           the header row looks completely normal otherwise. */
+           the header row looks completely normal otherwise. Positioned
+           via JS (left, set in repositionTsColumnResizers()) relative to
+           .frozen-grid itself, not nested inside the column they resize —
+           see the comment on initTsColumnResizers() for why. */
         .ts-col-resizer {
             display: none;
             position: absolute;
-            top: 0; right: -5px;
+            top: 0;
             width: 10px; height: 100%;
             cursor: col-resize;
-            z-index: 5;
+            z-index: 20;
         }
         body.ts-layout-edit-mode .ts-col-resizer {
             display: block;
@@ -1154,7 +1158,7 @@ function applyColumnConfig() {
         // in actual rendered width — the two earlier approaches (percent-
         // of-container, then fixed pixels) both assumed they were exactly
         // equal, which is what kept drifting.
-        if (col.width) css += `[data-col="${col.id}"] { flex: ${col.width} 1 0% !important; width: auto !important; max-width: none !important; min-width: 0 !important; }\n`;
+        if (col.width) css += `[data-col="${col.id}"] { flex: ${col.width} 1 0% !important; width: auto !important; max-width: none !important; min-width: 40px !important; }\n`;
     });
     styleEl.innerHTML = css;
 }
@@ -1217,18 +1221,30 @@ async function saveTamperSealLayout() {
 // every time edit mode is entered, since the header row is static HTML
 // that never gets rebuilt (unlike the schedule's rows, this doesn't need
 // re-running after every render).
+// Handles are attached to .frozen-grid itself, positioned by computed
+// pixel coordinates — NOT nested inside the header cell they control.
+// The earlier version put each handle inside its own column, which meant
+// a column that had shrunk very small dragged its own handle down to an
+// equally tiny, barely-clickable sliver along with it. A handle anchored
+// to the grid is always a full, fixed-size, independently-clickable
+// target no matter how narrow either neighboring column gets — and since
+// positions are recalculated after every drag movement (repositionTsColumnResizers),
+// they stay lined up with the current column boundaries as things resize.
 function initTsColumnResizers() {
-    if (document.querySelector('.ts-col-resizer')) return; // already set up
+    const grid = document.querySelector('.frozen-grid');
+    if (!grid) return;
+    grid.style.position = 'relative';
+    grid.querySelectorAll('.ts-col-resizer').forEach(h => h.remove());
 
-    const headerCells = Array.from(document.querySelectorAll('.frozen-grid [data-col]'))
+    const headerCells = Array.from(grid.querySelectorAll('[data-col]'))
         .filter(el => el.dataset.col !== 'checkbox');
 
-    headerCells.forEach(cell => {
-        cell.style.position = 'relative';
+    headerCells.forEach((cell, i) => {
+        if (i === headerCells.length - 1) return; // last column has nothing to its right
         const handle = document.createElement('div');
         handle.className = 'ts-col-resizer';
         handle.dataset.col = cell.dataset.col;
-        cell.appendChild(handle);
+        grid.appendChild(handle);
 
         handle.addEventListener('mousedown', (e) => {
             e.preventDefault();
@@ -1239,8 +1255,12 @@ function initTsColumnResizers() {
             // Which column is actually next to this one, by CURRENT visual
             // order (CSS `order`, set by applyColumnConfig()) — not static
             // HTML position, since columns can be reordered independently
-            // via the Column Settings drag-and-drop list.
-            const visibleIds = columnConfig.filter(c => c.visible).map(c => c.id);
+            // via the Column Settings drag-and-drop list. Only columns
+            // actually rendered right now (offsetParent !== null excludes
+            // anything display:none, like Asset Name/Location outside row
+            // edit mode) count as a real neighbor to resize against.
+            const visibleCells = headerCells.filter(c => c.offsetParent !== null);
+            const visibleIds = visibleCells.map(c => c.dataset.col);
             const myIndex = visibleIds.indexOf(colId);
             const nextId = visibleIds[myIndex + 1];
             if (!nextId) return; // last visible column has nothing to its right
@@ -1259,7 +1279,7 @@ function initTsColumnResizers() {
             // about their absolute value matters afterward, only their
             // ratio to each other.
             if (!col1.width || !col2.width) {
-                const nextCell = document.querySelector(`.frozen-grid [data-col="${nextId}"]`);
+                const nextCell = grid.querySelector(`[data-col="${nextId}"]`);
                 col1.width = cell.getBoundingClientRect().width;
                 col2.width = nextCell.getBoundingClientRect().width;
             }
@@ -1276,7 +1296,7 @@ function initTsColumnResizers() {
                 // this keeps drag sensitivity feeling 1:1 with the mouse
                 // without needing to know the grid's total flexible width.
                 const deltaPx = e2.clientX - startX;
-                const minWeight = 40; // don't let a column shrink to nothing
+                const minWeight = 40; // matches the min-width floor in applyColumnConfig()
                 let newWidth1 = origWidth1 + deltaPx;
                 let newWidth2 = origWidth2 - deltaPx;
                 if (newWidth1 < minWeight) { newWidth2 -= (minWeight - newWidth1); newWidth1 = minWeight; }
@@ -1284,6 +1304,7 @@ function initTsColumnResizers() {
                 col1.width = newWidth1;
                 col2.width = newWidth2;
                 applyColumnConfig();
+                repositionTsColumnResizers();
             }
 
             function onMouseUp() {
@@ -1295,6 +1316,26 @@ function initTsColumnResizers() {
             document.addEventListener('mousemove', onMouseMove);
             document.addEventListener('mouseup', onMouseUp);
         });
+    });
+
+    repositionTsColumnResizers();
+}
+
+// Moves every handle to sit at the right edge of the header cell it
+// controls, based on current actual rendered positions — called once at
+// setup and again after every drag movement, since resizing shifts every
+// column to its right.
+function repositionTsColumnResizers() {
+    const grid = document.querySelector('.frozen-grid');
+    if (!grid) return;
+    const gridRect = grid.getBoundingClientRect();
+
+    grid.querySelectorAll('.ts-col-resizer').forEach(handle => {
+        const cell = grid.querySelector(`[data-col="${handle.dataset.col}"]`);
+        if (!cell || cell.offsetParent === null) { handle.style.display = 'none'; return; }
+        handle.style.display = '';
+        const cellRect = cell.getBoundingClientRect();
+        handle.style.left = (cellRect.right - gridRect.left - 5) + 'px';
     });
 }
 
