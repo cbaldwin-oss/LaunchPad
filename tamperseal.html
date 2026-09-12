@@ -621,7 +621,6 @@ input:not([type="checkbox"]), textarea, select {
     
     <button id="deleteBtn" class="tool-btn" style="display:none; border-color:#d32f2f; color:#d32f2f; margin-right:10px;" onclick="deleteSelected()">Delete Selected</button>
     <button id="exportBtn" class="tool-btn" onclick="showExportOptions()">Export</button>
-    <button class="tool-btn" style="border-color:#1565c0; color:#1565c0; margin-right: 10px;" onclick="enterTsLayoutEditMode()">📐 Edit Layout</button>
     </div>
     <div id="ts-layout-edit-toolbar">
         <span style="font-size:13px; color:#555; margin-right:6px;">Drag the edges of a column header to resize it.</span>
@@ -711,6 +710,11 @@ input:not([type="checkbox"]), textarea, select {
         <div id="ts-panel-columns">
             <p style="color:#666; font-size:13px; margin-top:-8px;">Drag to reorder, uncheck to hide. Saved for everyone on this project.</p>
             <div id="col-settings-list" style="display:flex; flex-direction:column; gap:8px; max-height:360px; overflow-y:auto; margin-bottom:16px;"></div>
+            <div style="border-top:1px dashed #ccc; padding-top:14px;">
+                <div style="font-size:12px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:4px;">Column Widths</div>
+                <p style="color:#888; font-size:12px; margin:0 0 8px;">Closes this window and lets you drag the edges of a column header on the live log to resize it.</p>
+                <button class="btn btn-add" onclick="startColumnWidthEditing()">📐 Edit Column Widths</button>
+            </div>
         </div>
 
         <div id="ts-panel-statusflow" style="display:none;">
@@ -1127,7 +1131,18 @@ function applyColumnConfig() {
         // Only columns that have actually been resized get an explicit
         // width — everything else keeps behaving exactly as it always has
         // (equal flex:1 sizing) until someone drags it via Edit Layout.
-        if (col.width) css += `[data-col="${col.id}"] { flex: 0 0 ${col.width}%; }\n`;
+        // Pixels, not a percentage — the header row (.frozen-grid, fixed/
+        // sticky, no scrollbar of its own) and each data row (.cell-row,
+        // inside the scrolling body) are two DIFFERENT flex containers
+        // that aren't guaranteed to be exactly the same width — most
+        // commonly because the scrollable body's vertical scrollbar eats
+        // a few pixels the frozen header never loses. A percentage-based
+        // flex-basis resolves against each container's own width, so the
+        // same percentage produced a slightly different pixel width in
+        // each — small at first, compounding further right across more
+        // columns, which is exactly the drift that showed up. A pixel
+        // value is identical in both regardless of that difference.
+        if (col.width) css += `[data-col="${col.id}"] { flex: 0 0 ${col.width}px; }\n`;
     });
     styleEl.innerHTML = css;
 }
@@ -1135,6 +1150,14 @@ function applyColumnConfig() {
 // ===== COLUMN LAYOUT RESIZING (widths saved to Supabase, same as the
 // Schedule's Edit Layout feature in index.html) =====
 let tsLayoutConfigSnapshot = null;
+
+// Entry point lives in Setup Config > Columns (not the main toolbar) —
+// resizing happens by dragging directly on the live log though, so this
+// closes the settings modal out of the way first.
+function startColumnWidthEditing() {
+    closeColumnSettingsModal();
+    enterTsLayoutEditMode();
+}
 
 function enterTsLayoutEditMode() {
     // Snapshot so Cancel can restore exactly what was on screen before —
@@ -1199,8 +1222,6 @@ function initTsColumnResizers() {
             e.preventDefault();
             e.stopPropagation();
 
-            const grid = document.querySelector('.frozen-grid');
-            const gridWidth = grid.getBoundingClientRect().width;
             const colId = cell.dataset.col;
 
             // Which column is actually next to this one, by CURRENT visual
@@ -1216,16 +1237,16 @@ function initTsColumnResizers() {
             const col2 = columnConfig.find(c => c.id === nextId);
 
             // First-ever resize: neither column has an explicit width yet
-            // (both still just flex:1) — capture their actual current
-            // rendered share of the grid as the starting point, so the
+            // (both still just flex:1) — capture the HEADER's actual
+            // current rendered width (in px) as the starting point, so the
             // drag adjusts from what's already on screen instead of
-            // jumping to some arbitrary default.
+            // jumping to some arbitrary default. Deliberately reading from
+            // the header specifically (not a data row) — see the note in
+            // applyColumnConfig() on why the two can differ in width.
             if (!col1.width || !col2.width) {
-                const startWidth1 = (cell.getBoundingClientRect().width / gridWidth) * 100;
                 const nextCell = document.querySelector(`.frozen-grid [data-col="${nextId}"]`);
-                const startWidth2 = (nextCell.getBoundingClientRect().width / gridWidth) * 100;
-                col1.width = startWidth1;
-                col2.width = startWidth2;
+                col1.width = cell.getBoundingClientRect().width;
+                col2.width = nextCell.getBoundingClientRect().width;
             }
 
             const startX = e.clientX;
@@ -1235,10 +1256,9 @@ function initTsColumnResizers() {
 
             function onMouseMove(e2) {
                 const deltaPx = e2.clientX - startX;
-                const deltaPct = (deltaPx / gridWidth) * 100;
-                const minWidth = 4; // don't let a column disappear entirely
-                let newWidth1 = origWidth1 + deltaPct;
-                let newWidth2 = origWidth2 - deltaPct;
+                const minWidth = 40; // don't let a column disappear entirely
+                let newWidth1 = origWidth1 + deltaPx;
+                let newWidth2 = origWidth2 - deltaPx;
                 if (newWidth1 < minWidth) { newWidth2 -= (minWidth - newWidth1); newWidth1 = minWidth; }
                 if (newWidth2 < minWidth) { newWidth1 -= (minWidth - newWidth2); newWidth2 = minWidth; }
                 col1.width = newWidth1;
