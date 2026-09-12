@@ -947,6 +947,23 @@ function getAllUniqueStatusesAcrossWorkflows() {
     });
 }
 
+// Triggers live inside a specific workflow, and their from/to fields are
+// status IDs that only resolve within THAT workflow's own statuses array
+// (see getActiveTransitions() in seal-form.html) — so the Triggers editor
+// showing every status from every workflow (not just the one currently
+// being edited) needs a status picked from elsewhere to actually become
+// real, locally-resolvable status in this workflow the moment it's used
+// in a trigger, not just a display-only option. Matches by name
+// (case-insensitive); returns the existing local status if there's
+// already one with that name, otherwise creates and returns a new one.
+function ensureStatusInWorkflow(wf, statusName, statusColor) {
+    const existing = wf.statuses.find(s => s.name.toLowerCase() === statusName.toLowerCase());
+    if (existing) return existing;
+    const newStatus = { id: 'status_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7), name: statusName, color: statusColor || '#e0e0e0' };
+    wf.statuses.push(newStatus);
+    return newStatus;
+}
+
 // Singular — used only for UI defaulting (which workflow the Settings
 // editor opens to first), not for anything that determines real behavior.
 function getActiveWorkflow() {
@@ -1436,23 +1453,33 @@ function renderTriggersList() {
     const container = document.getElementById('triggers-list');
     if (!container) return;
 
-    if (wf.statuses.length < 2) {
+    const allStatuses = getAllUniqueStatusesAcrossWorkflows();
+    if (allStatuses.length < 2) {
         container.innerHTML = '<p style="color:#bbb; font-size:12px; padding:8px 0;">Add at least two statuses above first.</p>';
         return;
     }
 
+    // Picking a status here that only exists in some OTHER workflow adds
+    // it into this workflow's own status list the moment it's actually
+    // used (see ensureStatusInWorkflow) — until then, it just shows as an
+    // available, unchecked option so every workflow's triggers can be
+    // built from the same full set of statuses instead of only the ones
+    // already added to whichever workflow you happen to be editing.
     container.innerHTML = wf.transitions.map(t => `
         <div style="border:1px solid #ddd; border-radius:8px; padding:12px; background:#fafafa; margin-bottom:10px;">
             <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px;">
                 <div style="flex:1;">
                     <div style="font-size:11px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:6px;">Previous Status(es)</div>
                     <div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:10px;">
-                        ${wf.statuses.map(s => `
+                        ${allStatuses.map(s => {
+                            const local = wf.statuses.find(ls => ls.name.toLowerCase() === s.name.toLowerCase());
+                            const isChecked = local ? t.from.includes(local.id) : false;
+                            return `
                             <label style="display:flex; align-items:center; gap:5px; font-size:13px; cursor:pointer;">
-                                <input type="checkbox" ${t.from.includes(s.id) ? 'checked' : ''} onchange="toggleTriggerFromStatus('${t.id}', '${s.id}', this.checked)">
+                                <input type="checkbox" ${isChecked ? 'checked' : ''} onchange="toggleTriggerFromStatus('${t.id}', '${s.id}', this.checked)">
                                 ${s.name}
                             </label>
-                        `).join('')}
+                        `; }).join('')}
                     </div>
 
                     <div style="display:flex; gap:16px; flex-wrap:wrap; align-items:center;">
@@ -1460,7 +1487,11 @@ function renderTriggersList() {
                             <label style="display:block; font-size:11px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:4px;">Resulting Status</label>
                             <select onchange="setTriggerTo('${t.id}', this.value)" style="font-size:13px; padding:6px 8px; border:1px solid #ddd; border-radius:4px;">
                                 <option value="">Select...</option>
-                                ${wf.statuses.map(s => `<option value="${s.id}" ${t.to === s.id ? 'selected' : ''}>${s.name}</option>`).join('')}
+                                ${allStatuses.map(s => {
+                                    const local = wf.statuses.find(ls => ls.name.toLowerCase() === s.name.toLowerCase());
+                                    const isSelected = local ? t.to === local.id : false;
+                                    return `<option value="${s.id}" ${isSelected ? 'selected' : ''}>${s.name}</option>`;
+                                }).join('')}
                             </select>
                         </div>
                         <div>
@@ -1501,19 +1532,32 @@ function removeTrigger(id) {
     renderSectionFilterList('work-completed');
 }
 
-function toggleTriggerFromStatus(triggerId, statusId, checked) {
+function toggleTriggerFromStatus(triggerId, globalStatusId, checked) {
     const wf = getEditingWorkflow();
     const t = wf.transitions.find(t => t.id === triggerId);
     if (!t) return;
-    if (checked && !t.from.includes(statusId)) t.from.push(statusId);
-    else if (!checked) t.from = t.from.filter(id => id !== statusId);
-    renderReinspectionFilterList();
+    const globalStatus = getAllUniqueStatusesAcrossWorkflows().find(s => s.id === globalStatusId);
+    if (!globalStatus) return;
+    const localStatus = ensureStatusInWorkflow(wf, globalStatus.name, globalStatus.color);
+    if (checked && !t.from.includes(localStatus.id)) t.from.push(localStatus.id);
+    else if (!checked) t.from = t.from.filter(id => id !== localStatus.id);
+    // Re-render the whole panel, not just the triggers list — picking a
+    // status from another workflow may have just added a brand new status
+    // to this one, which the Statuses editor above and the Preview diagram
+    // both need to pick up too.
+    renderStatusFlowEditor();
 }
 
-function setTriggerTo(triggerId, statusId) {
+function setTriggerTo(triggerId, globalStatusId) {
     const wf = getEditingWorkflow();
     const t = wf.transitions.find(t => t.id === triggerId);
-    if (t) t.to = statusId;
+    if (!t) return;
+    if (!globalStatusId) { t.to = ''; renderStatusFlowEditor(); return; }
+    const globalStatus = getAllUniqueStatusesAcrossWorkflows().find(s => s.id === globalStatusId);
+    if (!globalStatus) return;
+    const localStatus = ensureStatusInWorkflow(wf, globalStatus.name, globalStatus.color);
+    t.to = localStatus.id;
+    renderStatusFlowEditor();
 }
 
 function setTriggerFormTrigger(triggerId, formTrigger) {
