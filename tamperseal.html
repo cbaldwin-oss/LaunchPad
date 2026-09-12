@@ -82,6 +82,32 @@
         .header-cell { flex: 1; text-align: center; font-size: 11px; font-weight: bold; text-transform: uppercase; border-right: 1px solid rgba(255,255,255,0.5); padding: 4px 0; box-sizing: border-box; }
         .header-cell:last-of-type { border-right: none; }
 
+        /* Column layout resizing — handles only show up in edit mode, so
+           the header row looks completely normal otherwise. */
+        .ts-col-resizer {
+            display: none;
+            position: absolute;
+            top: 0; right: -5px;
+            width: 10px; height: 100%;
+            cursor: col-resize;
+            z-index: 5;
+        }
+        body.ts-layout-edit-mode .ts-col-resizer {
+            display: block;
+        }
+        body.ts-layout-edit-mode .ts-col-resizer:hover,
+        body.ts-layout-edit-mode .ts-col-resizer.ts-active-drag {
+            background: rgba(46, 125, 50, 0.35);
+        }
+        body.ts-layout-edit-mode .header-cell,
+        body.ts-layout-edit-mode .edit-only-header {
+            outline: 1px dashed rgba(255,255,255,0.6);
+            outline-offset: -2px;
+        }
+        #ts-layout-edit-toolbar { display: none; align-items: center; gap: 8px; }
+        body.ts-layout-edit-mode #ts-layout-edit-toolbar { display: flex; }
+        body.ts-layout-edit-mode #ts-normal-toolbar-buttons { display: none; }
+
         /* ASSET ACCORDION STYLES */
         .asset-container { margin: 20px auto; width: 95%; border: 2px solid #d6445a; border-radius: 8px; background: #ffffff; overflow: hidden; }
         .asset-header { 
@@ -585,6 +611,7 @@ input:not([type="checkbox"]), textarea, select {
     </div>
 
     <div>
+    <div id="ts-normal-toolbar-buttons" style="display:inline;">
     <button class="tool-btn" style="background-color: #ffffff; color: rgb(0, 0, 0); border-color: #1b5e20; margin-right: 10px;" onclick="fetchHierarchyData(true)">Refresh</button>
     <button id="duplicateBtn" class="tool-btn" style="background-color: #ffffff; color: #d32f2f; border-color: #d32f2f; margin-right: 10px;" onclick="findDuplicates()">Find Duplicates</button>
     <button id="addBtn" class="tool-btn" style="background-color: #1b5e20; color: white; border-color: #1b5e20; margin-right: 10px;" onclick="showAddModal()">+ Add Seals</button>
@@ -594,6 +621,13 @@ input:not([type="checkbox"]), textarea, select {
     
     <button id="deleteBtn" class="tool-btn" style="display:none; border-color:#d32f2f; color:#d32f2f; margin-right:10px;" onclick="deleteSelected()">Delete Selected</button>
     <button id="exportBtn" class="tool-btn" onclick="showExportOptions()">Export</button>
+    <button class="tool-btn" style="border-color:#1565c0; color:#1565c0; margin-right: 10px;" onclick="enterTsLayoutEditMode()">📐 Edit Layout</button>
+    </div>
+    <div id="ts-layout-edit-toolbar">
+        <span style="font-size:13px; color:#555; margin-right:6px;">Drag the edges of a column header to resize it.</span>
+        <button class="tool-btn" style="background:#1565c0; color:white; border-color:#1565c0;" onclick="saveTamperSealLayout()">💾 Save Layout</button>
+        <button class="tool-btn" style="border-color:#757575; color:#757575;" onclick="cancelTsLayoutEditMode()">Cancel</button>
+    </div>
     <span id="saveIndicator">Synced</span>
 </div>
 </div>
@@ -999,9 +1033,8 @@ let accessToken = null;
 
 let isPreviewMode = false; 
 
-// Update initApp (around line 420)
-// ===== COLUMN SETTINGS (show/hide + reorder, saved to the project's Google
-// Sheet via the same Apps Script Equipment Tracker/Schedule use) =====
+// ===== COLUMN SETTINGS (show/hide, reorder, and now width — saved to
+// Supabase, same as the rest of this file's settings) =====
 // Both order and visibility are applied via one dynamically-generated
 // stylesheet keyed off each cell's data-col attribute, rather than
 // reordering the actual DOM — the table is already display:flex for both
@@ -1091,8 +1124,138 @@ function applyColumnConfig() {
     columnConfig.forEach((col, index) => {
         css += `[data-col="${col.id}"] { order: ${index}; }\n`;
         if (!col.visible) css += `[data-col="${col.id}"] { display: none !important; }\n`;
+        // Only columns that have actually been resized get an explicit
+        // width — everything else keeps behaving exactly as it always has
+        // (equal flex:1 sizing) until someone drags it via Edit Layout.
+        if (col.width) css += `[data-col="${col.id}"] { flex: 0 0 ${col.width}%; }\n`;
     });
     styleEl.innerHTML = css;
+}
+
+// ===== COLUMN LAYOUT RESIZING (widths saved to Supabase, same as the
+// Schedule's Edit Layout feature in index.html) =====
+let tsLayoutConfigSnapshot = null;
+
+function enterTsLayoutEditMode() {
+    // Snapshot so Cancel can restore exactly what was on screen before —
+    // deep copy since columnConfig objects get mutated in place while dragging.
+    tsLayoutConfigSnapshot = JSON.parse(JSON.stringify(columnConfig));
+    document.body.classList.add('ts-layout-edit-mode');
+    initTsColumnResizers();
+}
+
+function cancelTsLayoutEditMode() {
+    if (tsLayoutConfigSnapshot) {
+        columnConfig = tsLayoutConfigSnapshot;
+        applyColumnConfig();
+    }
+    document.body.classList.remove('ts-layout-edit-mode');
+}
+
+async function saveTamperSealLayout() {
+    const btn = document.querySelector('#ts-layout-edit-toolbar button:nth-child(2)');
+    if (btn) { btn.innerText = 'Saving...'; btn.disabled = true; }
+    try {
+        const { error } = await _supabase.from('launchpad_tamperseal_config').upsert({
+            project_key: PROJECT_KEY,
+            config: {
+                columnConfig: columnConfig,
+                workflows: workflows,
+                globalStatusOrder: globalStatusOrder,
+                reinspectionFilterStatuses: reinspectionFilterStatuses,
+                breakRequestFilterStatuses: breakRequestFilterStatuses,
+                breakSealsFilterStatuses: breakSealsFilterStatuses,
+                workCompletedFilterStatuses: workCompletedFilterStatuses
+            },
+            updated_by: USER_EMAIL || null
+        }, { onConflict: 'project_key' });
+        if (error) throw error;
+        document.body.classList.remove('ts-layout-edit-mode');
+    } catch (e) {
+        alert('There was an issue saving the layout: ' + e.message);
+        if (btn) { btn.innerText = '💾 Save Layout'; btn.disabled = false; }
+    }
+}
+
+// Sets up one resize handle per (non-checkbox) header cell, appended as a
+// child positioned at that cell's right edge. Idempotent — safe to call
+// every time edit mode is entered, since the header row is static HTML
+// that never gets rebuilt (unlike the schedule's rows, this doesn't need
+// re-running after every render).
+function initTsColumnResizers() {
+    if (document.querySelector('.ts-col-resizer')) return; // already set up
+
+    const headerCells = Array.from(document.querySelectorAll('.frozen-grid [data-col]'))
+        .filter(el => el.dataset.col !== 'checkbox');
+
+    headerCells.forEach(cell => {
+        cell.style.position = 'relative';
+        const handle = document.createElement('div');
+        handle.className = 'ts-col-resizer';
+        handle.dataset.col = cell.dataset.col;
+        cell.appendChild(handle);
+
+        handle.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+
+            const grid = document.querySelector('.frozen-grid');
+            const gridWidth = grid.getBoundingClientRect().width;
+            const colId = cell.dataset.col;
+
+            // Which column is actually next to this one, by CURRENT visual
+            // order (CSS `order`, set by applyColumnConfig()) — not static
+            // HTML position, since columns can be reordered independently
+            // via the Column Settings drag-and-drop list.
+            const visibleIds = columnConfig.filter(c => c.visible).map(c => c.id);
+            const myIndex = visibleIds.indexOf(colId);
+            const nextId = visibleIds[myIndex + 1];
+            if (!nextId) return; // last visible column has nothing to its right
+
+            const col1 = columnConfig.find(c => c.id === colId);
+            const col2 = columnConfig.find(c => c.id === nextId);
+
+            // First-ever resize: neither column has an explicit width yet
+            // (both still just flex:1) — capture their actual current
+            // rendered share of the grid as the starting point, so the
+            // drag adjusts from what's already on screen instead of
+            // jumping to some arbitrary default.
+            if (!col1.width || !col2.width) {
+                const startWidth1 = (cell.getBoundingClientRect().width / gridWidth) * 100;
+                const nextCell = document.querySelector(`.frozen-grid [data-col="${nextId}"]`);
+                const startWidth2 = (nextCell.getBoundingClientRect().width / gridWidth) * 100;
+                col1.width = startWidth1;
+                col2.width = startWidth2;
+            }
+
+            const startX = e.clientX;
+            const origWidth1 = col1.width;
+            const origWidth2 = col2.width;
+            handle.classList.add('ts-active-drag');
+
+            function onMouseMove(e2) {
+                const deltaPx = e2.clientX - startX;
+                const deltaPct = (deltaPx / gridWidth) * 100;
+                const minWidth = 4; // don't let a column disappear entirely
+                let newWidth1 = origWidth1 + deltaPct;
+                let newWidth2 = origWidth2 - deltaPct;
+                if (newWidth1 < minWidth) { newWidth2 -= (minWidth - newWidth1); newWidth1 = minWidth; }
+                if (newWidth2 < minWidth) { newWidth1 -= (minWidth - newWidth2); newWidth2 = minWidth; }
+                col1.width = newWidth1;
+                col2.width = newWidth2;
+                applyColumnConfig();
+            }
+
+            function onMouseUp() {
+                handle.classList.remove('ts-active-drag');
+                document.removeEventListener('mousemove', onMouseMove);
+                document.removeEventListener('mouseup', onMouseUp);
+            }
+
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('mouseup', onMouseUp);
+        });
+    });
 }
 
 function openColumnSettingsModal() {

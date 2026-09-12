@@ -651,21 +651,16 @@
             if (skipped.length > 0) {
                 console.warn('No matching transition found for seal(s), status left unchanged:', skipped.join(', '));
             }
-
-            // Explicit, blocking prompt showing exactly what happened for
-            // every selected seal — added specifically so this can't be
-            // missed or mistaken for a clean success when it isn't one.
-            let alertMsg = '';
             if (moved.length > 0) {
-                alertMsg += `MOVED:\n${moved.join('\n')}\n\n`;
+                console.log('Status transition(s) applied:', moved.join(' | '));
             }
-            if (skipped.length > 0) {
-                alertMsg += `NOT MOVED — no trigger matches their current status for this form:\n${skipped.join(', ')}\n\n`;
-            }
-            if (blocked.length > 0) {
-                alertMsg += `NOT MOVED — database rejected the update:\n${blocked.join(', ')}\n\n`;
-            }
-            if (alertMsg) alert(alertMsg.trim());
+            // No blocking alert here on purpose — the field user submitting
+            // this form doesn't need a raw dump of LaunchPad's internal
+            // status bookkeeping ("Seal #123: 'Intact' → 'Broken'") before
+            // they can move on. The screen shown right after submitting
+            // (via buildResultMessage()/showSuccess() in each of the three
+            // submit*() functions below) already tells them plainly whether
+            // it went through, using these same skipped/blocked results.
 
             return { anyUpdated: updatedCount > 0, updatedCount, skipped, blocked };
         }
