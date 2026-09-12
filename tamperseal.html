@@ -125,12 +125,24 @@
         body.ts-layout-edit-mode #ts-layout-edit-toolbar { display: flex; }
         body.ts-layout-edit-mode #ts-normal-toolbar-buttons { display: none; }
 
-        /* ASSET ACCORDION STYLES */
-        .asset-container { margin: 20px auto; width: 95%; border: 2px solid #d6445a; border-radius: 8px; background: #ffffff; overflow: hidden; }
+        /* ASSET ACCORDION STYLES — matches the Schedule's day-row style
+           (.section-container/.date-header in index.html) exactly: no
+           width%, no margin, no colored border/radius of its own. The
+           Schedule's day boxes stay perfectly aligned with their header
+           precisely because they add NO width layer of their own — they
+           just inherit 100% of whatever width the one outer container
+           (.week-container there, .area-container here) already
+           established. Every earlier alignment issue in this file came
+           from asset-container adding its own extra width/margin/border
+           on top of area-container's — removing that layer here instead
+           of trying to match its numbers more precisely. */
+        .asset-container { margin-bottom: 10px; border-bottom: 1px solid #ddd; }
         .asset-header { 
-            background-color: #dee6de; color: rgb(0, 0, 0); padding: 15px 25px; 
-            cursor: pointer; display: flex; justify-content: space-between; font-weight: bold; font-size: 22px; 
+            background-color: #f1f3f4; color: #2e7d32; padding: 10px 30px; 
+            cursor: pointer; display: flex; justify-content: space-between; align-items: center; font-weight: bold;
+            border-top: 1px solid #ddd;
         }
+        .asset-header:hover { background-color: #e8eaed; }
         
         .rows-container { padding: 10px 20px; display: block; }
         .rows-container.hidden { display: none; }
@@ -211,7 +223,7 @@
 .header-center {
     display: none;
 }
-/* Styling for the Asset | Location text in the green bar */
+/* Styling for the Asset name text in the header bar */
 .asset-header span:first-child {
     white-space: nowrap;
     overflow: hidden;
@@ -262,10 +274,13 @@
     height: 100%;            /* Ensure it fills the centered row */
 }
 
-/* Update main containers from 95% to a fixed 1240px (centered) */
+/* Update main containers from 95% to a fixed 1240px (centered).
+   .asset-container deliberately removed from this list — it no longer
+   has its own width at all now (see the ASSET ACCORDION STYLES comment
+   above), and this rule's !important would have silently overridden that
+   right back to a 95%-width box. */
 .frozen-bar, 
-.area-container, 
-.asset-container {
+.area-container {
     width: 95% !important; /* Restores the full-screen desktop look */
     min-width: 1240px !important; /* Prevents squishing on iPad */
     margin: 20px auto; 
@@ -294,27 +309,22 @@
 }
 
 .area-content { 
-    padding: 10px; 
+    padding: 0; /* was 10px — the Schedule's equivalent (.week-content) has
+        no padding of its own either; .rows-container's own 10px 20px
+        padding (already an exact match to the Schedule's) is what
+        provides the visual indent, so this was adding a second, extra
+        inset on top of that. */
 }
 
 .area-content.hidden { 
     display: none; 
 }
 
-/* Ensure Asset headers look like sub-items */
-.asset-container { 
-    margin: 10px auto; 
-    width: 99.5%; /* was 98% — .area-content's own 10px padding already
-        insets this from .area-container, so this only needed to close a
-        few more pixels of gap against the header, not add a second
-        matching indent on top of that padding. */
-    border: 1px solid #d6445a; 
-}
-
-.asset-header { 
-    font-size: 18px; 
-    padding: 10px 20px; 
-}
+/* Asset container/header styling now lives in one place, near the top of
+   this stylesheet, matching the Schedule's day-row pattern — see the
+   comment there. This block used to re-override width/margin/border/
+   font-size here, which is exactly the kind of duplicate, drifting
+   definition that caused the alignment problems in the first place. */
 
 /* The two filter groups (Locations, Statuses) now fill the header
    horizontally instead of stacking on the right — there's no logo/title
