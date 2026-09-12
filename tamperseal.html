@@ -703,7 +703,7 @@ input:not([type="checkbox"]), textarea, select {
 
             <div style="margin-top:16px; border-top:1px dashed #ccc; padding-top:14px;">
                 <div style="font-size:12px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:4px;">Break Request Eligibility</div>
-                <p style="color:#888; font-size:12px; margin:0 0 8px;">Which statuses should show up when filtering seals on the field Break Request form. Separate from Triggers — only controls which seals appear, not what they transition to. Unchecked until you configure it here means every status is currently allowed.</p>
+                <p style="color:#888; font-size:12px; margin:0 0 8px;">Which statuses should show up when filtering seals on the field Break Request form. Checking a status here shows it even without a matching Trigger below (flagged with a warning) — submitting will just report that seal as not moved. Until you check/uncheck anything here, every status is shown, matching current behavior.</p>
                 <div id="break-request-filter-list" style="max-height:200px; overflow-y:auto;"></div>
             </div>
 

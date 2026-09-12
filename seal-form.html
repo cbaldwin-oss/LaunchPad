@@ -184,17 +184,22 @@
 
         function isEligibleForSection(seal, section) {
             const current = effectiveStatusName(seal).toLowerCase();
-            const hasTransition = getActiveTransitions().some(t => t.fromName.toLowerCase() === current && t.formTrigger === section);
-            if (!hasTransition) return false;
-
-            // Admin-configured allow-list of statuses for this specific
-            // section (Setup Config > Status Flow > "<Section> Eligibility").
-            // null means it's never been configured, so every status that
-            // already passed the trigger check above is shown — an actual
-            // array (even an empty one) is a deliberate admin choice to
-            // restrict this section to only those statuses.
             const allowList = sectionFilterStatuses[section];
-            if (allowList === null || allowList === undefined) return true;
+
+            if (allowList === null || allowList === undefined) {
+                // Never configured for this section — fall back to the
+                // original behavior: a seal shows up only if there's an
+                // active trigger away from its current status for this form.
+                return getActiveTransitions().some(t => t.fromName.toLowerCase() === current && t.formTrigger === section);
+            }
+
+            // Configured: the admin's checklist in Setup Config is
+            // authoritative for whether a seal appears at all — a status
+            // can be checked there even without a matching trigger (that's
+            // exactly what the "⚠ No matching trigger" warning next to it
+            // is flagging). Someone can still select and submit that seal;
+            // applyStatusTransitions() already reports "NOT MOVED — no
+            // trigger matches" rather than silently failing or crashing.
             return allowList.includes(current);
         }
 
