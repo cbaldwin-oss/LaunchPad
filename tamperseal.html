@@ -1142,7 +1142,15 @@ function applyColumnConfig() {
         // each — small at first, compounding further right across more
         // columns, which is exactly the drift that showed up. A pixel
         // value is identical in both regardless of that difference.
-        if (col.width) css += `[data-col="${col.id}"] { flex: 0 0 ${col.width}px; }\n`;
+        // !important is required here — .cell-row select/textarea/
+        // .status-cell (a class + element-type selector, further down
+        // this same stylesheet) is MORE SPECIFIC than a bare [data-col]
+        // attribute selector, so without it this rule was silently losing
+        // to that one for every actual data row (while "winning" for
+        // headers purely because .header-cell ties with [data-col] on
+        // specificity and this is injected later) — which is exactly why
+        // dragging visibly resized the header but never the cells below it.
+        if (col.width) css += `[data-col="${col.id}"] { flex: 0 0 ${col.width}px !important; }\n`;
     });
     styleEl.innerHTML = css;
 }
