@@ -304,7 +304,10 @@
 /* Ensure Asset headers look like sub-items */
 .asset-container { 
     margin: 10px auto; 
-    width: 98%; 
+    width: 99.5%; /* was 98% — .area-content's own 10px padding already
+        insets this from .area-container, so this only needed to close a
+        few more pixels of gap against the header, not add a second
+        matching indent on top of that padding. */
     border: 1px solid #d6445a; 
 }
 
