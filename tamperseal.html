@@ -82,6 +82,19 @@
         .header-cell { flex: 1; text-align: center; font-size: 11px; font-weight: bold; text-transform: uppercase; border-right: 1px solid rgba(255,255,255,0.5); padding: 4px 0; box-sizing: border-box; }
         .header-cell:last-of-type { border-right: none; }
 
+        /* Forces the header row and every data row to agree on the exact
+           same box model — same technique the Schedule (index.html) uses
+           for its own column resizing, added here after the earlier
+           percentage/pixel-based attempts still wouldn't line up. Without
+           this, .frozen-grid and .cell-row can each resolve gap/margin
+           slightly differently even when their CSS looks like it should
+           match, which is enough to throw off exact column alignment. */
+        .frozen-grid, .cell-row {
+            box-sizing: border-box !important;
+            margin: 0 !important;
+            gap: 4px !important;
+        }
+
         /* Column layout resizing — handles only show up in edit mode, so
            the header row looks completely normal otherwise. */
         .ts-col-resizer {
@@ -1131,26 +1144,17 @@ function applyColumnConfig() {
         // Only columns that have actually been resized get an explicit
         // width — everything else keeps behaving exactly as it always has
         // (equal flex:1 sizing) until someone drags it via Edit Layout.
-        // Pixels, not a percentage — the header row (.frozen-grid, fixed/
-        // sticky, no scrollbar of its own) and each data row (.cell-row,
-        // inside the scrolling body) are two DIFFERENT flex containers
-        // that aren't guaranteed to be exactly the same width — most
-        // commonly because the scrollable body's vertical scrollbar eats
-        // a few pixels the frozen header never loses. A percentage-based
-        // flex-basis resolves against each container's own width, so the
-        // same percentage produced a slightly different pixel width in
-        // each — small at first, compounding further right across more
-        // columns, which is exactly the drift that showed up. A pixel
-        // value is identical in both regardless of that difference.
-        // !important is required here — .cell-row select/textarea/
-        // .status-cell (a class + element-type selector, further down
-        // this same stylesheet) is MORE SPECIFIC than a bare [data-col]
-        // attribute selector, so without it this rule was silently losing
-        // to that one for every actual data row (while "winning" for
-        // headers purely because .header-cell ties with [data-col] on
-        // specificity and this is injected later) — which is exactly why
-        // dragging visibly resized the header but never the cells below it.
-        if (col.width) css += `[data-col="${col.id}"] { flex: 0 0 ${col.width}px !important; }\n`;
+        // `flex: weight 1 0%` — a proportional GROWTH WEIGHT with
+        // flex-basis:0%, exactly like the Schedule's own column resizing
+        // in index.html — not a fixed percentage or pixel width. With
+        // flex-basis:0%, each container (the header vs. any given data
+        // row) independently distributes 100% of ITS OWN available space
+        // according to these weight ratios, so it doesn't matter if
+        // .frozen-grid and .cell-row ever end up a few pixels different
+        // in actual rendered width — the two earlier approaches (percent-
+        // of-container, then fixed pixels) both assumed they were exactly
+        // equal, which is what kept drifting.
+        if (col.width) css += `[data-col="${col.id}"] { flex: ${col.width} 1 0% !important; width: auto !important; max-width: none !important; min-width: 0 !important; }\n`;
     });
     styleEl.innerHTML = css;
 }
@@ -1244,13 +1248,16 @@ function initTsColumnResizers() {
             const col1 = columnConfig.find(c => c.id === colId);
             const col2 = columnConfig.find(c => c.id === nextId);
 
-            // First-ever resize: neither column has an explicit width yet
-            // (both still just flex:1) — capture the HEADER's actual
-            // current rendered width (in px) as the starting point, so the
-            // drag adjusts from what's already on screen instead of
-            // jumping to some arbitrary default. Deliberately reading from
-            // the header specifically (not a data row) — see the note in
-            // applyColumnConfig() on why the two can differ in width.
+            // First-ever resize: neither column has an explicit weight yet
+            // (both still just flex:1) — seed both from the HEADER's
+            // actual current rendered pixel width, so the drag adjusts
+            // from what's already on screen instead of jumping to some
+            // arbitrary default. These become flex-grow WEIGHTS going
+            // forward (see applyColumnConfig()), not literal pixel sizes —
+            // starting them at their current pixel width just gives a
+            // sensible, correctly-proportioned starting scale; nothing
+            // about their absolute value matters afterward, only their
+            // ratio to each other.
             if (!col1.width || !col2.width) {
                 const nextCell = document.querySelector(`.frozen-grid [data-col="${nextId}"]`);
                 col1.width = cell.getBoundingClientRect().width;
@@ -1263,12 +1270,17 @@ function initTsColumnResizers() {
             handle.classList.add('ts-active-drag');
 
             function onMouseMove(e2) {
+                // Adjusting the weight by the raw pixel delta (rather than
+                // converting to a percentage first) is intentional — since
+                // both weights were seeded from real pixel widths above,
+                // this keeps drag sensitivity feeling 1:1 with the mouse
+                // without needing to know the grid's total flexible width.
                 const deltaPx = e2.clientX - startX;
-                const minWidth = 40; // don't let a column disappear entirely
+                const minWeight = 40; // don't let a column shrink to nothing
                 let newWidth1 = origWidth1 + deltaPx;
                 let newWidth2 = origWidth2 - deltaPx;
-                if (newWidth1 < minWidth) { newWidth2 -= (minWidth - newWidth1); newWidth1 = minWidth; }
-                if (newWidth2 < minWidth) { newWidth1 -= (minWidth - newWidth2); newWidth2 = minWidth; }
+                if (newWidth1 < minWeight) { newWidth2 -= (minWeight - newWidth1); newWidth1 = minWeight; }
+                if (newWidth2 < minWeight) { newWidth1 -= (minWeight - newWidth2); newWidth2 = minWeight; }
                 col1.width = newWidth1;
                 col2.width = newWidth2;
                 applyColumnConfig();
