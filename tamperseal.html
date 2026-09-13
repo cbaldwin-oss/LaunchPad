@@ -1193,6 +1193,10 @@ function enterTsLayoutEditMode() {
     tsLayoutConfigSnapshot = JSON.parse(JSON.stringify(columnConfig));
     document.body.classList.add('ts-layout-edit-mode');
     initTsColumnResizers();
+    // The toolbar swaps to Save/Cancel here, which can shift the overall
+    // page width slightly (e.g. a scrollbar appearing/disappearing) —
+    // resync after the browser's had a moment to actually reflow.
+    setTimeout(syncHeaderWidthToAssetRows, 50);
 }
 
 function cancelTsLayoutEditMode() {
@@ -2725,7 +2729,49 @@ function prevMatch() {
     if (scrollPos > 0) {
         window.scrollTo(0, scrollPos);
     }
+    syncHeaderWidthToAssetRows();
 }
+
+// The header (.frozen-grid, inside .frozen-bar) and the actual asset rows
+// (.area-container, inside #main-content-area) are two independently-
+// calculated 95%-width boxes under different parent elements — in theory
+// that should produce identical pixel widths, but in practice kept
+// leaving a small, hard-to-pin-down gap no amount of CSS percentage/
+// box-model tuning fully closed. Rather than keep guessing at why two
+// separate calculations don't quite agree, this just reads the real,
+// already-rendered width and position of an actual asset row and forces
+// the header to match it exactly, pixel for pixel — sidestepping the
+// question of why they'd ever differ in the first place.
+function syncHeaderWidthToAssetRows() {
+    const grid = document.querySelector('.frozen-grid');
+    const bar = document.querySelector('.frozen-bar');
+    const reference = document.querySelector('.area-container');
+    if (!grid || !bar) return;
+
+    if (!reference) {
+        // Nothing loaded yet (empty log, or filtered down to nothing) —
+        // release any previous override so the header falls back to its
+        // own default CSS width instead of freezing at a stale value.
+        grid.style.width = '';
+        grid.style.marginLeft = '';
+        grid.style.marginRight = '';
+        return;
+    }
+
+    const refRect = reference.getBoundingClientRect();
+    const barRect = bar.getBoundingClientRect();
+    grid.style.width = refRect.width + 'px';
+    grid.style.marginLeft = (refRect.left - barRect.left) + 'px';
+    grid.style.marginRight = 'auto';
+}
+
+// Percentage-based widths shift on resize — keep the header locked to the
+// actual asset rows' width as the window changes, not just at load time.
+let __syncHeaderWidthResizeTimer = null;
+window.addEventListener('resize', () => {
+    clearTimeout(__syncHeaderWidthResizeTimer);
+    __syncHeaderWidthResizeTimer = setTimeout(syncHeaderWidthToAssetRows, 100);
+});
 
 async function toggleAsset(header, assetName) {
     const rowsDiv = header.nextElementSibling;
