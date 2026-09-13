@@ -819,7 +819,6 @@ input:not([type="checkbox"]), textarea, select {
         <div class="header-cell" data-col="breakDate">Break Date</div>
         <div class="header-cell" data-col="responsibleParty">Responsible Party</div>
         <div class="header-cell" data-col="breakReason">Break Reason</div>
-        <div class="spacer"></div>
     </div>
 </div>
 
@@ -1249,8 +1248,17 @@ function initTsColumnResizers() {
     grid.style.position = 'relative';
     grid.querySelectorAll('.ts-col-resizer').forEach(h => h.remove());
 
+    // Only currently-visible columns get a handle at all — Asset Name/
+    // Location are display:none outside row-edit mode, and a handle
+    // created for a hidden column has no reliable reason to stay out of
+    // the way of the genuinely visible columns around it. This is also
+    // exactly why the leftmost VISIBLE column (normally "Sub Area") could
+    // fail to resize — a handle for the hidden "Location" column right
+    // before it existed in the DOM even though nobody could see or click
+    // it directly, and was only hidden reactively (by repositionTsColumnResizers,
+    // after the fact) rather than never created in the first place.
     const headerCells = Array.from(grid.querySelectorAll('[data-col]'))
-        .filter(el => el.dataset.col !== 'checkbox');
+        .filter(el => el.dataset.col !== 'checkbox' && el.offsetParent !== null);
 
     headerCells.forEach((cell, i) => {
         if (i === headerCells.length - 1) return; // last column has nothing to its right
