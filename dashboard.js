@@ -354,7 +354,7 @@ export class CriticalArcDashboard {
   // by the time someone opens this tab, but this guards against any race).
   async waitForProjectConfig_(timeoutMs = 5000) {
     const start = Date.now();
-    while (!(window.LP_CONFIG && window.LP_CONFIG.googleScriptUrl)) {
+    while (!(window.LP_CONFIG && window.LP_CONFIG.projectKey)) {
       if (Date.now() - start > timeoutMs) return null;
       await new Promise(r => setTimeout(r, 150));
     }
@@ -364,7 +364,7 @@ export class CriticalArcDashboard {
   async init() {
     try {
       const cfg = await this.waitForProjectConfig_();
-      if (!cfg) throw new Error('No project is loaded yet (window.LP_CONFIG.googleScriptUrl is missing).');
+      if (!cfg) throw new Error('No project is loaded yet (window.LP_CONFIG.projectKey is missing).');
       const label = this.q('ca-connectedProject');
       if (label) label.textContent = cfg.clientName || cfg.projectKey || 'Connected project';
       await this.loadProject();
@@ -381,13 +381,25 @@ export class CriticalArcDashboard {
 
     try {
       const cfg = window.LP_CONFIG;
-      const scriptUrl = cfg && cfg.googleScriptUrl;
-      if (!scriptUrl) {
-        throw new Error('This project has no google_script_url set in launchpad_projects yet.');
+      const projectKey = cfg && cfg.projectKey;
+      if (!projectKey) {
+        throw new Error('No project is loaded yet (window.LP_CONFIG.projectKey is missing).');
       }
-      const resp = await fetch(`${scriptUrl}?action=getDashboardData`);
-      if (!resp.ok) throw new Error(`Request failed: ${resp.status} ${resp.statusText}`);
-      const data = await resp.json();
+      // Reads a periodically-synced snapshot from Supabase instead of
+      // calling the Google Apps Script endpoint live on every load — the
+      // Sheets-backed dashboard data is pushed into launchpad_dashboard_data
+      // on a timer (see .github/workflows/sync-equipment-tracker-data.yml
+      // and sync/sync-equipment-data.mjs), so this read is as fast as
+      // everything else in the app instead of waiting on Apps Script's
+      // cold-start + Sheets-read latency on every visit.
+      const supa = window.launchpadSupabaseClient;
+      if (!supa) throw new Error('No Supabase client available yet.');
+      const { data: row, error } = await supa.from('launchpad_dashboard_data')
+        .select('data, synced_at')
+        .eq('project_key', projectKey)
+        .maybeSingle();
+      if (error) throw error;
+      const data = (row && row.data) || {};
       if (data && data.error) throw new Error(data.error);
 
       // Defensive: the Apps Script endpoint (buildDashboardJson_) always

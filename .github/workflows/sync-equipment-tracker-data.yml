@@ -1,0 +1,24 @@
+name: Sync Equipment Tracker & Dashboard Data
+
+# Pulls fresh data from each project's Google Apps Script endpoint (the
+# same one the app used to call live) and caches it in Supabase, so
+# Equipment Tracker and the Dashboard read a fast, recent snapshot instead
+# of waiting on Apps Script's cold-start + Sheets-read latency on every
+# page load. See sync/sync-equipment-data.mjs for the actual logic.
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Sync Google Sheets data into Supabase
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: node sync/sync-equipment-data.mjs

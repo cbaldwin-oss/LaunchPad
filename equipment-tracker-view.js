@@ -1353,27 +1353,27 @@ export class EquipmentTrackerView extends HTMLElement {
                 this.$('sync-status').innerText = 'Syncing...';
             }
 
-            let fetchOptions = { method: 'GET', mode: 'cors', cache: 'no-cache' };
-            const [response, supabaseConfig] = await Promise.all([
-                fetch(this.API_URL, fetchOptions),
+            // Reads a periodically-synced snapshot from Supabase instead of
+            // calling the Google Apps Script endpoint live on every load.
+            // The Sheets-backed source data + Phase Rules (still Sheet-
+            // maintained, per the comment below) are pushed into
+            // launchpad_equipment_tracker_data on a timer — see
+            // .github/workflows/sync-equipment-tracker-data.yml and
+            // sync/sync-equipment-data.mjs — so this read is as fast as
+            // everything else in the app instead of waiting on Apps
+            // Script's cold-start + Sheets-read latency on every visit.
+            const [{ data: syncedRow, error: syncedError }, supabaseConfig] = await Promise.all([
+                this._supabase.from('launchpad_equipment_tracker_data')
+                    .select('data, phase_rules, synced_at')
+                    .eq('project_key', this.PROJECT_KEY)
+                    .maybeSingle(),
                 this.fetchTrackerConfig()
             ]);
-            const payload = await response.json();
-
-            // Backend diagnostics used to be dumped wholesale to the console
-            // here on every single fetch (including the silent 60s
-            // background poll) — that meant all the raw equipment status
-            // data was effectively always sitting in F12. Removed; if you
-            // need to debug the backend, temporarily re-add a console.warn
-            // loop over payload.debug.
-            if (payload.error) {
-                console.error("Backend Error:", payload.error);
-                this.$('sync-status').innerText = 'Sync Error: Check Backend 🔴';
-                this.$('loading-status-text').innerText = 'Sync Failed 🔴';
-                this.$('loading-status-text').style.color = '#d32f2f';
-                this.shadowRoot.querySelector('.loading-subtext').innerText = 'Please refresh the page or check the console.';
-                return;
-            }
+            if (syncedError) throw syncedError;
+            const payload = {
+                data: (syncedRow && syncedRow.data) || [],
+                config: { phaseRules: (syncedRow && syncedRow.phase_rules) || [] }
+            };
 
             const rows = payload.data || [];
             // Phase Rules stay Google-Sheets-backed by request — everything
