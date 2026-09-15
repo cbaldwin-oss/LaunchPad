@@ -1,8 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <script src="https://unpkg.com/html5-qrcode"></script>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LaunchPad</title>
@@ -1549,18 +1547,9 @@ body.dark-mode .phase-row {
 
 <div id="launchpad-dashboard-container" style="height: 100%;"></div>
 
-<!-- 2. Import Plotly natively so the script can access it -->
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
-
-<!-- 3. Mount the Module -->
-<script type="module">
-  // Import the class we just created
-  import { CriticalArcDashboard } from './dashboard.js'; 
-  
-// Store the instance globally, but DO NOT mount it on load
-  window.caDashboardInstance = new CriticalArcDashboard('launchpad-dashboard-container');
-  window.caDashboardMounted = false;
-</script>
+<!-- Plotly (~3.5MB) and the dashboard module are lazy-loaded on first visit
+     to this tab by ensureDashboardMounted() in the main script below, so
+     they never cost anything on initial page load. -->
 </div>
 <div id="equipment-tracker-view" style="display: none; height: 100%; width: 100%; position: relative;">
     <div class="iframe-loading-overlay" id="equipment-tracker-iframe-loading">
@@ -2003,7 +1992,6 @@ const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
     <table id="grid"></table>
 
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="settings.js"></script>
 
 <script>
@@ -2462,6 +2450,41 @@ const IFRAME_VIEW_MAP = {
     sealform: 'sealform-iframe'
 };
 
+// Lazy-load helper: fetches a <script src> only once, caching the promise
+// so repeated calls (e.g. switching tabs back and forth) reuse the same
+// load instead of re-requesting it. Used to keep heavy, feature-specific
+// libraries (Plotly, html5-qrcode) off the critical path on startup.
+function loadScriptOnce(src) {
+    window.__loadedScripts = window.__loadedScripts || {};
+    if (!window.__loadedScripts[src]) {
+        window.__loadedScripts[src] = new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = src;
+            s.onload = () => resolve();
+            s.onerror = () => reject(new Error('Failed to load ' + src));
+            document.head.appendChild(s);
+        });
+    }
+    return window.__loadedScripts[src];
+}
+
+let _dashboardMountPromise = null;
+function ensureDashboardMounted() {
+    if (!_dashboardMountPromise) {
+        _dashboardMountPromise = loadScriptOnce('https://cdn.plot.ly/plotly-2.35.2.min.js')
+            .then(() => import('./dashboard.js'))
+            .then(({ CriticalArcDashboard }) => {
+                window.caDashboardInstance = new CriticalArcDashboard('launchpad-dashboard-container');
+                return window.caDashboardInstance.mount();
+            })
+            .catch(err => {
+                _dashboardMountPromise = null; // allow retry on next tab switch
+                console.error("Dashboard error:", err);
+            });
+    }
+    return _dashboardMountPromise;
+}
+
 function switchMainView(viewType, btn) {
     // Tear down whichever iframe-based tab is being LEFT (not the one being
     // entered) — resetting its src to '' fully destroys that iframe's JS
@@ -2531,13 +2554,10 @@ function switchMainView(viewType, btn) {
     // Route view choice
     if (viewType === 'dashboard') {
         if (dash) dash.style.display = 'block';
-        if (appBody) appBody.style.width = 'calc(100% - 36px)'; 
-        // NEW: Lazy load the dashboard only when clicked
-        if (window.caDashboardInstance && !window.caDashboardMounted) {
-            window.caDashboardMounted = true;
-            window.caDashboardInstance.mount().catch(err => console.error("Dashboard error:", err));
-        }
-    } else if (viewType === 'equipment') { 
+        if (appBody) appBody.style.width = 'calc(100% - 36px)';
+        // Lazy load Plotly + the dashboard module only when this tab is opened
+        ensureDashboardMounted();
+    } else if (viewType === 'equipment') {
         if (equipmentView) equipmentView.style.display = 'block'; 
         if (appBody) appBody.style.width = 'calc(100% - 36px)'; 
         loadIframeIfNeeded('equipment-tracker-iframe');
@@ -2975,28 +2995,38 @@ function startQRScanner(assetName, groupName) { // --- NEW: Accepts groupName --
     const viewport = document.getElementById('scanner-viewport');
     viewport.innerHTML = `
         <div id="qr-reader" style="width: 100%; border-radius: 8px; overflow: hidden; background: #000; min-height: 250px;"></div>
-        <p style="text-align: center; font-size: 13px; color: #666; margin-top: 10px;">Align QR code inside the box.</p>
+        <p style="text-align: center; font-size: 13px; color: #666; margin-top: 10px;">Loading scanner…</p>
         <button onclick="stopScanner()" style="width:100%; padding:10px; background:#f5f5f5; border:1px solid #ddd; border-radius:4px; font-weight:bold; cursor:pointer; margin-top:10px;">Cancel</button>
     `;
 
-    window.html5Qrcode = new Html5Qrcode("qr-reader");
+    loadScriptOnce('https://unpkg.com/html5-qrcode').then(() => {
+        // The modal may have been cancelled while the library was loading.
+        if (document.getElementById('scanner-modal').style.display === 'none') return;
+        const hint = viewport.querySelector('p');
+        if (hint) hint.textContent = 'Align QR code inside the box.';
 
-    window.html5Qrcode.start(
-        { facingMode: "environment" },
-        { fps: 10, qrbox: { width: 250, height: 250 } },
-        (decodedText) => {
-            if (window.html5Qrcode) {
-                window.html5Qrcode.stop().then(() => {
-                    window.html5Qrcode.clear();
-                    window.html5Qrcode = null;
-                    showQRMappingUI(decodedText);
-                }).catch(e => console.log(e));
-            }
-        },
-        (err) => { /* ignore frame errors */ }
-    ).catch((err) => {
-        console.error("Camera access error:", err);
-        viewport.innerHTML = `<p style="color: #d32f2f; padding: 20px; text-align: center;">Camera access denied or unavailable.</p>`;
+        window.html5Qrcode = new Html5Qrcode("qr-reader");
+
+        window.html5Qrcode.start(
+            { facingMode: "environment" },
+            { fps: 10, qrbox: { width: 250, height: 250 } },
+            (decodedText) => {
+                if (window.html5Qrcode) {
+                    window.html5Qrcode.stop().then(() => {
+                        window.html5Qrcode.clear();
+                        window.html5Qrcode = null;
+                        showQRMappingUI(decodedText);
+                    }).catch(e => console.log(e));
+                }
+            },
+            (err) => { /* ignore frame errors */ }
+        ).catch((err) => {
+            console.error("Camera access error:", err);
+            viewport.innerHTML = `<p style="color: #d32f2f; padding: 20px; text-align: center;">Camera access denied or unavailable.</p>`;
+        });
+    }).catch((err) => {
+        console.error("Scanner library failed to load:", err);
+        viewport.innerHTML = `<p style="color: #d32f2f; padding: 20px; text-align: center;">Could not load scanner — check your connection.</p>`;
     });
 }
 

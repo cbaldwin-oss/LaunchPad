@@ -6,8 +6,9 @@
     <title>Asset Tamper Seal Log</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='48' fill='%23d32f2f'/%3E%3Crect x='20' y='40' width='60' height='20' rx='10' fill='white' transform='rotate(-45 50 50)'/%3E%3Ccircle cx='35' cy='50' r='2' fill='%23d32f2f' transform='rotate(-45 50 50)'/%3E%3Ccircle cx='45' cy='50' r='2' fill='%23d32f2f' transform='rotate(-45 50 50)'/%3E%3Ccircle cx='55' cy='50' r='2' fill='%23d32f2f' transform='rotate(-45 50 50)'/%3E%3Ccircle cx='65' cy='50' r='2' fill='%23d32f2f' transform='rotate(-45 50 50)'/%3E%3C/svg%3E">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js"></script>
+    <!-- jsPDF + autotable (PDF export) are lazy-loaded on first use of the
+         "PDF Report" export button via ensureJsPdf() below, since most
+         sessions never touch that feature. -->
     <style>
         /* MATCHING LAUNCHPAD STYLING */
         body { 
@@ -832,6 +833,29 @@ input:not([type="checkbox"]), textarea, select {
 // shared dropdownoptions table instead (see fetchLookupData()).
 const SUPABASE_URL = 'https://rcnxetcomdrlxvlarqoc.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJjbnhldGNvbWRybHh2bGFycW9jIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY0NDIyMjksImV4cCI6MjA5MjAxODIyOX0.gP37sT5OrCOVRZXekMrBZHm5mtfnr6JrC2YGflWsDQU';
+
+// Lazy-load jsPDF + autotable only when the PDF export is actually used.
+function loadScriptOnce(src) {
+    window.__loadedScripts = window.__loadedScripts || {};
+    if (!window.__loadedScripts[src]) {
+        window.__loadedScripts[src] = new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = src;
+            s.onload = () => resolve();
+            s.onerror = () => reject(new Error('Failed to load ' + src));
+            document.head.appendChild(s);
+        });
+    }
+    return window.__loadedScripts[src];
+}
+let _jsPdfReady = null;
+function ensureJsPdf() {
+    if (!_jsPdfReady) {
+        _jsPdfReady = loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js')
+            .then(() => loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js'));
+    }
+    return _jsPdfReady;
+}
 
 // The current user's role/email, passed in by the LaunchPad shell
 // (index.html). Defaults to editor/no-email so this still behaves
@@ -2431,7 +2455,8 @@ function runExport(type) {
 /**
  * Generates a PDF report using jsPDF and AutoTable
  */
-function exportToPDF() {
+async function exportToPDF() {
+    await ensureJsPdf();
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF('l', 'pt', 'a4'); 
 

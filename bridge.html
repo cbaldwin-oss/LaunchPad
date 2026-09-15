@@ -6,19 +6,19 @@
 <title>Pull Plan Scheduler</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📋</text></svg>">
 
-<!-- Supabase client -->
+<!-- Supabase client (needed immediately to load data) -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
-<!-- PDF rendering / parsing -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-<!-- OCR fallback for scanned/image baseline PDFs -->
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-<!-- PDF export -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
-<!-- XLSX export -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Google Sheets sync (OAuth via Google Identity Services) -->
 <script src="https://accounts.google.com/gsi/client" async defer></script>
+<!--
+  PDF rendering/parsing (pdf.js), OCR (tesseract.js), PDF export (jsPDF +
+  autotable), and XLSX export (SheetJS) are all multi-hundred-KB to
+  multi-MB libraries used by only one feature each. Loading them eagerly
+  here would block first paint on every visit, even for users who never
+  touch those features — expensive on low-bandwidth connections. They are
+  now lazy-loaded on first use via ensurePdfJs()/ensureTesseract()/
+  ensureJsPdf()/ensureXlsx() defined in the main script below.
+-->
 
 <style>
 :root{
@@ -761,6 +761,54 @@ const SUPABASE_CONFIGURED = !SUPABASE_URL.includes("YOUR-PROJECT-REF") && !SUPAB
 let supabaseClient = null;
 if (SUPABASE_CONFIGURED && window.supabase) {
     supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+}
+
+/* ---------- Lazy-loaded, feature-gated libraries ----------
+   Each of these is only fetched the first time the feature that needs it
+   is actually used, and cached so repeat uses don't re-fetch. */
+function loadScriptOnce(src) {
+    window.__loadedScripts = window.__loadedScripts || {};
+    if (!window.__loadedScripts[src]) {
+        window.__loadedScripts[src] = new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = src;
+            s.onload = () => resolve();
+            s.onerror = () => reject(new Error('Failed to load ' + src));
+            document.head.appendChild(s);
+        });
+    }
+    return window.__loadedScripts[src];
+}
+
+let _pdfjsReady = null;
+function ensurePdfJs() {
+    if (!_pdfjsReady) {
+        _pdfjsReady = loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js').then(() => {
+            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        });
+    }
+    return _pdfjsReady;
+}
+
+let _tesseractReady = null;
+function ensureTesseract() {
+    if (!_tesseractReady) _tesseractReady = loadScriptOnce('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js');
+    return _tesseractReady;
+}
+
+let _jsPdfReady = null;
+function ensureJsPdf() {
+    if (!_jsPdfReady) {
+        _jsPdfReady = loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js')
+            .then(() => loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js'));
+    }
+    return _jsPdfReady;
+}
+
+let _xlsxReady = null;
+function ensureXlsx() {
+    if (!_xlsxReady) _xlsxReady = loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+    return _xlsxReady;
 }
 
 // The project prefix, passed in via ?project=XXX by the LaunchPad shell
@@ -3355,18 +3403,16 @@ function afterListChange() {
    Zones/Areas the user can add with one click.
    ========================================================================= */
 
-if (window['pdfjsLib']) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-}
-
 async function handleBaselineFile(file) {
     if (!file) return;
     const statusEl = document.getElementById('baselineStatus');
     const canvasWrap = document.getElementById('baselineCanvasWrap');
-    statusEl.textContent = 'Loading PDF...';
+    statusEl.textContent = 'Loading PDF reader...';
     canvasWrap.innerHTML = '';
     baselineDetectedTokens = [];
 
+    await ensurePdfJs();
+    statusEl.textContent = 'Loading PDF...';
     const buf = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
     const page = await pdf.getPage(1);
@@ -3381,8 +3427,10 @@ async function handleBaselineFile(file) {
     let tokens = textContent.items.map(t => t.str.trim()).filter(s => s && s.length > 1 && s.length < 30 && !/^\d+$/.test(s));
 
     if (tokens.length < 3) {
-        statusEl.textContent = 'No embedded text found — running OCR (this can take a few seconds)...';
+        statusEl.textContent = 'No embedded text found — loading OCR engine...';
         try {
+            await ensureTesseract();
+            statusEl.textContent = 'Running OCR (this can take a few seconds)...';
             const { data } = await Tesseract.recognize(canvas, 'eng');
             tokens = data.text.split(/\n|,/).map(s => s.trim()).filter(s => s && s.length > 1 && s.length < 30 && !/^\d+$/.test(s));
             statusEl.textContent = `OCR complete — ${tokens.length} candidate label(s) found.`;
@@ -4022,9 +4070,10 @@ function exportRowsForReport() {
         }));
 }
 
-function exportPDF() {
+async function exportPDF() {
     const rows = exportRowsForReport();
     if (!rows.length) { toast('No items to export with the current filters.'); return; }
+    await ensureJsPdf();
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ orientation: 'landscape' });
     doc.setFontSize(16);
@@ -4046,9 +4095,10 @@ function exportPDF() {
     toast('PDF exported');
 }
 
-function exportXLSX() {
+async function exportXLSX() {
     const rows = exportRowsForReport();
     if (!rows.length) { toast('No items to export with the current filters.'); return; }
+    await ensureXlsx();
     const ws = XLSX.utils.json_to_sheet(rows);
     ws['!cols'] = Object.keys(rows[0]).map(k => ({ wch: Math.max(10, k.length + 2) }));
     const wb = XLSX.utils.book_new();
@@ -4110,6 +4160,7 @@ async function exportCompletionPlan(format) {
     };
 
     if (format === 'xlsx') {
+        await ensureXlsx();
         const rows = [];
         const statusUrls = [];
         assignees.forEach(assignee => {
@@ -4141,6 +4192,7 @@ async function exportCompletionPlan(format) {
         XLSX.utils.book_append_sheet(wb, ws, 'Completion Plan');
         XLSX.writeFile(wb, `completion-plan-${startVal}-to-${endVal}.xlsx`);
     } else {
+        await ensureJsPdf();
         const { jsPDF } = window.jspdf;
         const doc = new jsPDF({ orientation: 'landscape' });
         doc.setFontSize(16); doc.setTextColor(46, 125, 50);
