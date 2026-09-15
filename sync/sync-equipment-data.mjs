@@ -44,6 +44,36 @@ async function supabaseRequest(path, options = {}) {
     return res;
 }
 
+// Google Apps Script web apps occasionally return a transient
+// platform-level error — a raw non-200 status, or an HTML error page
+// instead of JSON — before the script itself even runs (confirmed: these
+// failures never show up in that project's Apps Script Executions log,
+// which only logs actual script invocations). A genuinely broken
+// deployment fails the same way every time; a transient platform hiccup
+// usually succeeds moments later, so a short retry clears most of these up.
+async function fetchAppsScriptJson(url, attempts = 3, delayMs = 3000) {
+    let lastError;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        try {
+            const res = await fetch(url);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const text = await res.text();
+            try {
+                return JSON.parse(text);
+            } catch (e) {
+                throw new Error(`Non-JSON response, likely a transient Apps Script platform error: ${text.slice(0, 80)}`);
+            }
+        } catch (e) {
+            lastError = e;
+            if (attempt < attempts) {
+                console.warn(`  (attempt ${attempt}/${attempts} failed: ${e.message} — retrying in ${delayMs}ms)`);
+                await new Promise(r => setTimeout(r, delayMs));
+            }
+        }
+    }
+    throw lastError;
+}
+
 async function getProjectsToSync() {
     const res = await supabaseRequest(
         `launchpad_projects?select=project_key,google_script_url&google_script_url=not.is.null`
@@ -67,9 +97,7 @@ async function syncEquipmentTracker(projectKey, scriptUrl) {
     // everything live on every single sync tick and could time out on
     // large projects. See getCachedEquipmentStatusResponse() in each
     // project's Apps Script.
-    const res = await fetch(`${scriptUrl}?action=getCachedEquipmentData`);
-    if (!res.ok) throw new Error(`Equipment tracker fetch failed (${res.status})`);
-    const payload = await res.json();
+    const payload = await fetchAppsScriptJson(`${scriptUrl}?action=getCachedEquipmentData`);
     if (payload.error) throw new Error(`Apps Script returned an error: ${payload.error}`);
 
     await supabaseRequest('launchpad_equipment_tracker_data', {
@@ -85,9 +113,7 @@ async function syncEquipmentTracker(projectKey, scriptUrl) {
 }
 
 async function syncDashboard(projectKey, scriptUrl) {
-    const res = await fetch(`${scriptUrl}?action=getDashboardData`);
-    if (!res.ok) throw new Error(`Dashboard fetch failed (${res.status})`);
-    const data = await res.json();
+    const data = await fetchAppsScriptJson(`${scriptUrl}?action=getDashboardData`);
     if (data.error) throw new Error(`Apps Script returned an error: ${data.error}`);
 
     await supabaseRequest('launchpad_dashboard_data', {
