@@ -8,7 +8,12 @@ name: Sync Equipment Tracker & Dashboard Data
 on:
   schedule:
     - cron: '*/15 * * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      project_key:
+        description: 'Sync only this one project_key (leave blank to sync all)'
+        required: false
+        default: ''
 
 jobs:
   sync:
@@ -21,4 +26,5 @@ jobs:
       - name: Sync Google Sheets data into Supabase
         env:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SYNC_ONLY_PROJECT: ${{ github.event.inputs.project_key }}
         run: node sync/sync-equipment-data.mjs

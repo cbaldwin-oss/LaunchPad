@@ -61,7 +61,13 @@ async function getProjectsToSync() {
 }
 
 async function syncEquipmentTracker(projectKey, scriptUrl) {
-    const res = await fetch(scriptUrl);
+    // Reads the pre-computed cache Apps Script's cacheEquipmentStatusData()
+    // writes (chained onto generateChecklistMatrix()'s existing schedule)
+    // instead of the old bare-URL default action, which recomputed
+    // everything live on every single sync tick and could time out on
+    // large projects. See getCachedEquipmentStatusResponse() in each
+    // project's Apps Script.
+    const res = await fetch(`${scriptUrl}?action=getCachedEquipmentData`);
     if (!res.ok) throw new Error(`Equipment tracker fetch failed (${res.status})`);
     const payload = await res.json();
     if (payload.error) throw new Error(`Apps Script returned an error: ${payload.error}`);
@@ -96,8 +102,23 @@ async function syncDashboard(projectKey, scriptUrl) {
 }
 
 async function main() {
-    const projects = await getProjectsToSync();
+    let projects = await getProjectsToSync();
     console.log(`Found ${projects.length} project(s) with a google_script_url set.`);
+
+    // Optional single-project filter, for testing one project (e.g. after
+    // an Apps Script change) without waiting on/affecting the other seven.
+    // Set via the workflow's "Run workflow" dialog (project_key input) or
+    // directly as an env var for a local run.
+    const onlyProjectKey = (process.env.SYNC_ONLY_PROJECT || '').trim();
+    if (onlyProjectKey) {
+        const totalFound = projects.length;
+        projects = projects.filter(p => p.project_key === onlyProjectKey);
+        console.log(`SYNC_ONLY_PROJECT set — restricting to '${onlyProjectKey}' (${projects.length} match(es)).`);
+        if (projects.length === 0) {
+            console.error(`No project with project_key='${onlyProjectKey}' found among the ${totalFound} with a google_script_url set.`);
+            process.exit(1);
+        }
+    }
 
     // Equipment tracker is the primary thing this pipeline exists for, so
     // its failures fail the whole run (so a real problem gets noticed).
