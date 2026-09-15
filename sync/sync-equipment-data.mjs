@@ -49,10 +49,15 @@ async function getProjectsToSync() {
         `launchpad_projects?select=project_key,google_script_url&google_script_url=not.is.null`
     );
     const rows = await res.json();
+    console.log(`Raw query returned ${rows.length} row(s): ${rows.map(p => `${p.project_key}(${p.google_script_url ? 'has url' : 'EMPTY'})`).join(', ') || '(none)'}`);
     // Belt-and-suspenders: also drop rows where the column is an empty
     // string rather than a real null (PostgREST's not.is.null only
     // excludes actual NULLs).
-    return rows.filter(p => p.project_key && p.google_script_url);
+    const filtered = rows.filter(p => p.project_key && p.google_script_url);
+    if (filtered.length !== rows.length) {
+        console.log(`Filtered out ${rows.length - filtered.length} row(s) with an empty (non-null) google_script_url.`);
+    }
+    return filtered;
 }
 
 async function syncEquipmentTracker(projectKey, scriptUrl) {
