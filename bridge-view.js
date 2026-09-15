@@ -1,0 +1,4388 @@
+// <bridge-view> — the Pull Plan Scheduler ("Bridge") drag/resize Gantt
+// tool, with dependency links, critical-path analysis, bulk add, baseline
+// PDF import, LaunchPad two-way sync, Google Sheets export, and PDF/XLSX
+// reports.
+//
+// Used two ways, same as the other three views:
+//   1. Standalone: bridge.html loads this module directly and the element
+//      reads ?project=&role=&email= from the page URL itself (dev/bookmark
+//      use — falls back to the STY4 project + 'editor' role this file was
+//      originally built for).
+//   2. Embedded: index.html dynamically imports this module and mounts
+//      <bridge-view project="..." role="..." email="..."> directly into
+//      the shell, passing its own already-authenticated Supabase client
+//      instead of letting this element create a second one.
+//
+// Two real layout differences from the old iframe version had to be fixed
+// here (not just mechanically converted) — an iframe has its OWN viewport,
+// so 100vh/position:fixed inside it already meant "fill the iframe's box".
+// A custom element shares the outer page's viewport, so the same rules
+// would instead cover the whole LaunchPad shell (header/sidebar included).
+// The modal overlays, the detail side panel, the toast, and the bottom
+// timeline-range bar all use position:absolute (not fixed) now, scoped to
+// this component's own box — see STYLE below, same reasoning as
+// equipment-tracker-view.js's modal/loading-overlay fix.
+//
+// This file also replaces a module-eval-time postMessage handshake
+// ('BRIDGE_VIEW_SHOWN', sent by the old iframe host once it un-hid the
+// iframe) with a plain public method, notifyVisible(), that the shell now
+// calls directly once it shows this tab — see the file-header comment on
+// notifyVisible() below for why a fresh render is needed at that point.
+
+const SUPABASE_URL = "https://rcnxetcomdrlxvlarqoc.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJjbnhldGNvbWRybHh2bGFycW9jIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY0NDIyMjksImV4cCI6MjA5MjAxODIyOX0.gP37sT5OrCOVRZXekMrBZHm5mtfnr6JrC2YGflWsDQU";
+const SUPABASE_CONFIGURED = !SUPABASE_URL.includes("YOUR-PROJECT-REF") && !SUPABASE_ANON_KEY.includes("YOUR-ANON-PUBLIC-KEY");
+
+// Table names. {PROJECT_KEY}schedule_items is the one table this app writes
+// the actual pull-plan data to. Everything else — the option lists that
+// populate dropdowns/checklists — is read from your existing
+// "{PROJECT_KEY}dropdownoptions" table, which uses one COLUMN per list
+// instead of one row-category per list: every non-null cell in a given
+// column is one option for that list. See README.md for the full
+// walkthrough and how to adjust this mapping. (TABLES/LAUNCHPAD_TABLE
+// themselves are built per-instance in _resolveParams(), once this.PROJECT_KEY
+// is known — they used to be module-level consts computed from a
+// module-level PROJECT_KEY read once at script-load time.)
+// Which column in {PROJECT_KEY}dropdownoptions backs each list. "types" (the
+// Mech/Elec/... legend + its colors) has no matching column in that table,
+// so it's kept as a small local list instead (see this.DB.fetchAll/insert/etc.
+// below) — edit DEFAULT_TYPE_COLORS further down to change the starting
+// set, or add a column to {PROJECT_KEY}dropdownoptions yourself and map it here.
+const DROPDOWN_COLUMN = {
+    assets: "Assets",
+    activities: "Activities",
+    contractors: "Trade_Partners",
+    zones: "Zone",
+    areas: "Places"
+    // "Times" and "Results" exist in the table but aren't used by the app
+    // yet — repurpose them by adding e.g. `shift: "Times"` here and wiring
+    // up a matching field, if you want them surfaced later.
+};
+
+const LOCAL_KEY = "pullplan_demo_v1";
+
+// Duration is entered/displayed in DAYS throughout the UI, but stored as
+// duration_hours internally (schema, CPM math, gantt pixel math all stay
+// hour-based — only the input/display layer converts). Change this if a
+// "day" should mean an 8-hour shift instead of a full 24-hour day.
+const HOURS_PER_DAY = 24;
+const TYPES_LOCAL_KEY = "pullplan_type_colors_v1";   // Types & Colors (no Supabase column — always local)
+const ZONE_ENDDATE_KEY = "pullplan_zone_enddates_v1"; // Zone target end dates (no Supabase column — always local)
+
+// ---- Google Sheets sync (optional) ----
+// 1. Create/select a project in Google Cloud Console, enable the "Google Sheets API"
+//    and "Google Drive API".
+// 2. Create an OAuth 2.0 Client ID (type: Web application) and add this page's
+//    origin under "Authorized JavaScript origins".
+// 3. Paste the client ID below. Leave GOOGLE_DRIVE_FOLDER_ID blank to save the
+//    sheet in the signed-in user's My Drive root, or paste a Drive folder ID
+//    (from its URL) to save it into a specific shared folder.
+const GOOGLE_CLIENT_ID = "YOUR-GOOGLE-OAUTH-CLIENT-ID.apps.googleusercontent.com";
+const GOOGLE_DRIVE_FOLDER_ID = ""; // optional
+const GOOGLE_CONFIGURED = !GOOGLE_CLIENT_ID.includes("YOUR-GOOGLE-OAUTH");
+
+// ---- Google Sheets sync + lazy-loaded feature libraries ----
+// Each of pdf.js / tesseract.js / jsPDF+autotable / xlsx is only fetched the
+// first time the feature that needs it is actually used, and cached so
+// repeat uses don't re-fetch. These stay plain module-scope functions (no
+// instance-state dependency) — call them as bare ensurePdfJs() etc. from
+// within instance methods, same pattern as equipment-tracker-view.js's
+// getContrastYIQ().
+function loadScriptOnce(src) {
+    window.__loadedScripts = window.__loadedScripts || {};
+    if (!window.__loadedScripts[src]) {
+        window.__loadedScripts[src] = new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = src;
+            s.onload = () => resolve();
+            s.onerror = () => reject(new Error('Failed to load ' + src));
+            document.head.appendChild(s);
+        });
+    }
+    return window.__loadedScripts[src];
+}
+
+let _pdfjsReady = null;
+function ensurePdfJs() {
+    if (!_pdfjsReady) {
+        _pdfjsReady = loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js').then(() => {
+            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        });
+    }
+    return _pdfjsReady;
+}
+
+let _tesseractReady = null;
+function ensureTesseract() {
+    if (!_tesseractReady) _tesseractReady = loadScriptOnce('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js');
+    return _tesseractReady;
+}
+
+let _jsPdfReady = null;
+function ensureJsPdf() {
+    if (!_jsPdfReady) {
+        _jsPdfReady = loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js')
+            .then(() => loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js'));
+    }
+    return _jsPdfReady;
+}
+
+let _xlsxReady = null;
+function ensureXlsx() {
+    if (!_xlsxReady) _xlsxReady = loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+    return _xlsxReady;
+}
+
+function hoursToDays(h) { return Math.round((h / HOURS_PER_DAY) * 100) / 100; }
+function daysToHours(d) { return Math.round(d * HOURS_PER_DAY * 100) / 100; }
+
+function uid() {
+    return 'id-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+
+const DEFAULT_TYPE_COLORS = [
+    { id: uid(), name: 'Mech' },
+    { id: uid(), name: 'Elec' },
+    { id: uid(), name: 'Plumb' },
+    { id: uid(), name: 'Civil' },
+    { id: uid(), name: 'Fire' },
+    { id: uid(), name: 'Finish' },
+    { id: uid(), name: 'Controls' },
+    { id: uid(), name: 'Other' }
+];
+
+// ---- Activity colors ----
+// Gantt bars are colored by ACTIVITY (e.g. "Set Equipment", "Pull Wire"),
+// not by Type/trade — Type stays a plain filterable attribute with no
+// color of its own. Every activity gets an automatically assigned color
+// the first time it's used (cycling through this palette), stored locally
+// so it's consistent across reloads; override any of them under Manage
+// Lists -> Activity Colors.
+const ACTIVITY_COLOR_PALETTE = [
+    '#90CAF9', '#FFE082', '#A5D6A7', '#BCAAA4', '#EF9A9A', '#CE93D8',
+    '#B0BEC5', '#9FA8DA', '#80DEEA', '#C5E1A5', '#FFCC80', '#F48FB1',
+    '#B39DDB', '#80CBC4', '#E6EE9C', '#FFAB91'
+];
+const ACTIVITY_COLORS_KEY = 'pullplan_activity_colors_v1';
+
+function escHtml(s) { return (s ?? '').toString().replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+function escAttr(s) { return escHtml(s); }
+
+const ITEM_GAP = 8, ROW_PAD_TOP = 10, ROW_PAD_BOTTOM = 10, ROW_MIN_H = 56;
+
+const LAUNCHPAD_SYNC_KEY = 'pullplan_launchpad_sync_enabled_v1';
+// Same Google Apps Script endpoint LaunchPad's own col5 (Status) lookup
+// uses — reused here read-only so items can show the same status without
+// duplicating whatever spreadsheet/logic backs it.
+const LAUNCHPAD_STATUS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxkJfxdnt3j9l_8EH0ZUmAc48PSVP2W53t1ps-9LH_RlGGwO41Uq6jbnt78JMinDIDN/exec';
+
+const FILTER_DEFS = [
+    { key: 'type', label: 'Type', field: 'type' },
+    { key: 'zone', label: 'Zone', field: 'zone' },
+    { key: 'asset_type', label: 'Asset Type', field: 'asset_type' },
+    { key: 'activity', label: 'Activity', field: 'activity_name' },
+    { key: 'area', label: 'Area', field: 'area' }
+];
+
+const STYLE = `
+<style>
+:host{
+    /* was :root's custom properties + body's own rules — merged since this
+       element's own box now plays the role the real <body> used to play
+       (an iframe had its own top-level document; a shadow-DOM custom
+       element does not). position:relative + height:100% (not 100vh) so
+       descendants positioned absolute/fixed-turned-absolute below resolve
+       against this component's own box instead of the whole browser
+       window — same reasoning as equipment-tracker-view.js's :host. */
+    display:flex; flex-direction:column; position:relative; height:100%; overflow:hidden;
+    margin:0;
+    font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    color:var(--text-dark);
+    background:#fafafa;
+    padding-bottom:52px; /* reserved for the timeline-range-bar, now position:absolute below */
+    --green:#2e7d32;
+    --green-dark:#1b5e20;
+    --green-light:#e8f5e9;
+    --grey-bg:#f1f3f4;
+    --grey-border:#dcdcdc;
+    --grey-border2:#ddd;
+    --text-dark:#2c2c2c;
+    --text-muted:#5f6368;
+    --red:#d32f2f;
+}
+*{box-sizing:border-box;}
+button{font-family:inherit;}
+input,select,textarea{font-family:inherit;}
+
+/* ===== HEADER ===== */
+.header{
+    height:72px;
+    background:#ffffff;
+    border-bottom:1px solid var(--grey-border);
+    display:flex;
+    align-items:center;
+    padding:0 24px;
+    box-shadow:0 2px 10px rgba(0,0,0,0.08);
+    position:sticky; top:0; z-index:500;
+    gap:20px;
+}
+.header-left{display:flex; align-items:center; gap:12px; flex:0 0 auto;}
+.header-left .logo-badge{
+    width:40px;height:40px;border-radius:8px;background:var(--green);
+    display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:18px;
+}
+.header-title{font-weight:800;font-size:22px;letter-spacing:-0.5px;color:var(--green-dark);white-space:nowrap;}
+.header-sub{font-size:11px;color:var(--text-muted);margin-top:-2px;}
+.header-mid{flex:1; display:flex; align-items:center; gap:8px;}
+.header-right{display:flex; align-items:center; gap:10px; flex:0 0 auto;}
+#saveIndicator{font-weight:600;color:var(--green);font-size:13px;white-space:nowrap;}
+#saveIndicator.dirty{color:#e8a33d;}
+#saveIndicator.error{color:var(--red);}
+
+.tool-btn{
+    background:#fff; border:1px solid var(--grey-border); color:var(--text-dark);
+    padding:8px 14px; border-radius:6px; cursor:pointer; font-size:13px; font-weight:600;
+    display:flex; align-items:center; gap:6px; white-space:nowrap; transition:all .15s;
+}
+.tool-btn:hover{background:var(--grey-bg); border-color:#bbb;}
+.tool-btn.primary{background:var(--green); color:#fff; border-color:var(--green);}
+.tool-btn.primary:hover{background:var(--green-dark);}
+.tool-btn.small{padding:5px 10px; font-size:12px;}
+
+/* ===== TOOLBAR / FILTER BAR ===== */
+.toolbar{
+    background:#fff; border-bottom:1px solid var(--grey-border2);
+    padding:10px 24px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    position:sticky; top:0; z-index:400;
+}
+.filter-chip{position:relative;}
+.filter-chip-btn{
+    background:var(--grey-bg); border:1px solid var(--grey-border); padding:7px 12px;
+    border-radius:16px; cursor:pointer; font-size:12.5px; font-weight:600; color:var(--text-dark);
+    display:flex; align-items:center; gap:6px;
+}
+.filter-chip-btn.active{background:var(--green-light); border-color:var(--green); color:var(--green-dark);}
+.filter-chip-btn .count-badge{background:var(--green); color:#fff; border-radius:10px; padding:1px 6px; font-size:10px;}
+.filter-dropdown{
+    display:none; position:absolute; top:calc(100% + 6px); left:0; background:#fff;
+    border:1px solid var(--grey-border); border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,0.15);
+    width:230px; max-height:320px; overflow-y:auto; z-index:600; padding:8px;
+}
+.filter-dropdown.open{display:block;}
+.filter-dropdown input.search{width:100%; padding:6px 8px; border:1px solid var(--grey-border2); border-radius:4px; font-size:12px; margin-bottom:6px;}
+.filter-option{display:flex; align-items:center; gap:8px; padding:5px 6px; border-radius:4px; font-size:12.5px; cursor:pointer;}
+.filter-option:hover{background:var(--grey-bg);}
+.filter-option.disabled{opacity:0.35; pointer-events:none;}
+.filter-option .swatch{width:10px;height:10px;border-radius:3px;flex:0 0 auto;}
+.filter-clear-all{font-size:11.5px; color:var(--text-muted); text-decoration:underline; cursor:pointer; background:none; border:none;}
+
+/* generic consolidated-action dropdown (Add / LaunchPad / Report buttons) */
+.menu-btn-wrap{position:relative; display:inline-block;}
+.menu-dropdown{
+    display:none; position:absolute; top:calc(100% + 6px); left:0; background:#fff;
+    border:1px solid var(--grey-border); border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,0.15);
+    min-width:230px; z-index:600; padding:6px;
+}
+.menu-dropdown.right{left:auto; right:0;}
+.menu-dropdown.open{display:block;}
+.menu-item{padding:9px 12px; border-radius:5px; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap; color:var(--text-dark);}
+.menu-item:hover{background:var(--grey-bg);}
+.menu-divider{height:1px; background:var(--grey-border2); margin:5px 2px;}
+.toolbar-spacer{flex:1;}
+.search-box{
+    padding:8px 12px; border:1px solid var(--grey-border); border-radius:6px; font-size:13px; width:220px;
+}
+
+/* ===== LEGEND ===== */
+.legend{display:flex; align-items:center; gap:12px; padding:6px 24px; background:#fcfcfc; border-bottom:1px solid var(--grey-border2); flex-wrap:wrap;}
+.legend-item{display:flex; align-items:center; gap:5px; font-size:11.5px; color:var(--text-muted); font-weight:600;}
+.legend-swatch{width:12px;height:12px;border-radius:3px;}
+
+/* ===== GANTT ===== */
+.gantt-wrap{overflow:auto; background:#fff; position:relative; flex:1 1 auto; min-height:0; padding-bottom:12px;}
+.gantt-scroll{position:relative;}
+.gantt-header{
+    display:flex; min-width:100%; position:sticky; top:0; z-index:300; background:#fff; border-bottom:2px solid var(--grey-border);
+}
+.gantt-rowlabel-col{
+    flex:0 0 200px; position:sticky; left:0; z-index:350; background:#f7f8f7;
+    border-right:2px solid var(--grey-border); display:flex; align-items:center;
+    padding:0 14px; font-weight:800; color:var(--green-dark); font-size:12.5px;
+    text-transform:uppercase; letter-spacing:.5px;
+}
+.gantt-day{
+    flex:0 0 var(--daywidth); border-right:1px solid var(--grey-border2); text-align:center;
+    padding:8px 4px; font-size:12px; font-weight:700; color:var(--text-dark); cursor:pointer;
+}
+.gantt-day:hover{background:var(--green-light);}
+.gantt-day.weekend{background:#f7f7f7; color:#aaa;}
+.gantt-day .dow{font-size:10px; font-weight:600; color:var(--text-muted); text-transform:uppercase;}
+.gantt-day.today{background:var(--green-light); color:var(--green-dark);}
+
+.gantt-body{position:relative;}
+.gantt-row{display:flex; min-width:100%; border-bottom:3px solid var(--grey-border); position:relative; transition:height .05s;}
+.gantt-row:nth-child(even) .gantt-row-bg{background:#fbfbfb;}
+.gantt-rowlabel{
+    flex:0 0 200px; position:sticky; left:0; z-index:200; background:#fff;
+    border-right:2px solid var(--grey-border); padding:10px 30px 10px 14px; font-size:12.5px; font-weight:700;
+    color:var(--text-dark); display:flex; align-items:flex-start; min-height:56px; position:sticky;
+}
+.row-expand-btn{
+    position:absolute; top:6px; right:6px; background:none; border:none; cursor:pointer;
+    font-size:15px; color:#bbb; padding:2px 4px; border-radius:4px; line-height:1;
+}
+.row-expand-btn:hover{color:var(--green); background:var(--green-light);}
+.row-resize-handle{
+    position:absolute; left:0; right:0; bottom:-3px; height:7px; cursor:ns-resize; z-index:220;
+}
+.row-resize-handle:hover, .row-resize-handle.active{background:rgba(46,125,50,0.25);}
+.gantt-track{position:relative; flex:0 0 auto; min-height:40px; overflow:visible;}
+.gantt-gridlines{position:absolute; top:0; left:0; bottom:0; display:flex; pointer-events:none;}
+.gantt-gridline{flex:0 0 var(--daywidth); border-right:1px solid #f0f0f0;}
+.gantt-gridline.weekend{background:rgba(0,0,0,0.02);}
+.gantt-gridline.today{background:rgba(46,125,50,0.06);}
+
+.gantt-item{
+    position:absolute; min-height:36px; height:auto; border-radius:6px; color:#fff; font-size:11.5px;
+    font-weight:700; padding:4px 8px; overflow:visible; cursor:grab; box-shadow:0 1px 3px rgba(0,0,0,0.18);
+    display:flex; flex-direction:column; justify-content:center; line-height:1.2; user-select:none;
+    border:1px solid rgba(0,0,0,0.15); z-index:110; text-shadow:0 1px 2px rgba(0,0,0,0.55);
+}
+.gantt-item:hover{filter:brightness(0.96); z-index:150;}
+.gantt-item.dragging{opacity:0.75; cursor:grabbing; z-index:250; box-shadow:0 6px 16px rgba(0,0,0,0.35);}
+.gantt-item.overdue{box-shadow:0 0 0 2px var(--red), 0 1px 3px rgba(0,0,0,0.25);}
+.gantt-item.focused{box-shadow:0 0 0 3px var(--green-dark), 0 2px 8px rgba(0,0,0,0.35); z-index:170;}
+.gantt-item.multiselected{outline:3px solid #1565c0; outline-offset:1px; z-index:175;}
+.gantt-item.multiselected.critical{outline-color:#1565c0;}
+.launchpad-badge{position:absolute; top:2px; right:2px; font-size:10px; line-height:1; opacity:0.85;}
+.gantt-item.not-ready{box-shadow:0 0 0 3px #d32f2f, 0 1px 3px rgba(0,0,0,0.25);}
+.gantt-item.not-ready.critical{box-shadow:0 0 0 3px #d32f2f, 0 0 0 5px #f57c00;}
+.gantt-item.dimmed{opacity:0.28; filter:grayscale(0.85); box-shadow:none; z-index:100;}
+.gantt-item.critical{border:3px solid #f57c00; box-shadow:0 0 0 1px rgba(245,124,0,0.35), 0 2px 8px rgba(0,0,0,0.3);}
+.gantt-item.critical.dimmed{border-color:rgba(245,124,0,0.4);}
+.gantt-item.critical.focused{box-shadow:0 0 0 3px var(--green-dark), 0 2px 8px rgba(0,0,0,0.35);}
+.gantt-item .gi-asset{font-weight:800; font-size:10.5px; white-space:normal; overflow-wrap:break-word; word-break:break-word; line-height:1.2;}
+.gantt-item .gi-activity{font-weight:500; opacity:0.9; white-space:normal; overflow-wrap:break-word; word-break:break-word; font-size:9.5px; line-height:1.2;}
+.gantt-item .resize-handle{position:absolute; right:0; top:0; bottom:0; width:8px; cursor:ew-resize;}
+.gantt-item .resize-handle.left{left:0; right:auto;}
+.gantt-item .resize-handle:hover{background:rgba(0,0,0,0.15);}
+.gantt-item .link-handle{
+    position:absolute; right:-6px; top:50%; transform:translateY(-50%); width:12px; height:12px;
+    border-radius:50%; background:#fff; border:2px solid rgba(0,0,0,0.4); cursor:crosshair;
+    opacity:0; transition:opacity .12s; z-index:160;
+}
+.gantt-item:hover .link-handle{opacity:1;}
+.gantt-item .link-handle:hover{background:var(--green); border-color:var(--green-dark); transform:translateY(-50%) scale(1.25);}
+
+/* connection lines overlay */
+.connections-svg{position:absolute; top:0; left:0; pointer-events:none; z-index:120;}
+.connections-svg path.conn-line{fill:none; stroke:#5f6368; stroke-width:1.6; pointer-events:stroke; cursor:pointer;}
+.connections-svg path.conn-line:hover{stroke:var(--red); stroke-width:2.4;}
+.connections-svg path.conn-temp{fill:none; stroke:var(--green); stroke-width:2; stroke-dasharray:4 3;}
+
+/* zone end-date deadline marker inside a track */
+.zone-end-marker{position:absolute; top:0; bottom:0; width:0; border-left:2px dashed var(--red); z-index:50;}
+.zone-end-flag{
+    position:absolute; top:-2px; left:4px; background:var(--red); color:#fff; font-size:9.5px; font-weight:700;
+    padding:1px 5px; border-radius:3px; white-space:nowrap;
+}
+
+/* predecessor chips in item modal */
+.pred-chip-list{display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; min-height:20px;}
+.pred-chip{
+    display:inline-flex; align-items:center; gap:5px; background:var(--grey-bg); border:1px solid var(--grey-border2);
+    border-radius:14px; padding:4px 8px 4px 10px; font-size:11.5px;
+}
+.pred-chip button{background:none; border:none; color:var(--red); cursor:pointer; font-size:12px; padding:0;}
+
+.empty-state{padding:60px 20px; text-align:center; color:var(--text-muted);}
+.empty-state .emoji{font-size:40px; margin-bottom:10px;}
+
+/* ===== MODALS ===== */
+.modal-overlay{
+    display:none; position:absolute; inset:0; background:rgba(0,0,0,0.5); z-index:2000;
+    align-items:center; justify-content:center; padding:20px;
+}
+.modal-overlay.open{display:flex;}
+.modal-box{
+    background:#fff; border-radius:10px; width:520px; max-width:100%; max-height:92%;
+    display:flex; flex-direction:column; box-shadow:0 20px 50px rgba(0,0,0,0.3);
+}
+.modal-box.wide{width:820px;}
+.modal-box.xwide{width:1040px;}
+.modal-head{
+    display:flex; justify-content:space-between; align-items:center; padding:18px 22px;
+    border-bottom:1px solid #eee;
+}
+.modal-head h2{margin:0; color:var(--green-dark); font-size:18px;}
+.modal-close{background:none;border:none;font-size:22px;cursor:pointer;color:#999; line-height:1;}
+.modal-body{padding:20px 22px; overflow-y:auto; flex:1;}
+.modal-foot{display:flex; justify-content:flex-end; gap:10px; padding:16px 22px; border-top:1px solid #eee;}
+
+.form-row{margin-bottom:14px;}
+.form-row label{display:block; font-weight:700; font-size:12.5px; color:#555; margin-bottom:5px;}
+.form-row .hint{font-weight:400; color:#999; font-size:11px;}
+.form-row input, .form-row select, .form-row textarea{
+    width:100%; padding:9px 10px; border:1px solid #ccc; border-radius:5px; font-size:13.5px;
+}
+.form-row input:focus, .form-row select:focus, .form-row textarea:focus{outline:2px solid var(--green-light); border-color:var(--green);}
+.form-grid{display:grid; grid-template-columns:1fr 1fr; gap:14px;}
+
+/* Combobox: text input with add-new-on-the-fly list */
+.combo-wrap{position:relative;}
+.combo-list{
+    display:none; position:absolute; top:calc(100% + 3px); left:0; right:0; background:#fff;
+    border:1px solid var(--grey-border); border-radius:6px; max-height:180px; overflow-y:auto; z-index:100;
+    box-shadow:0 8px 20px rgba(0,0,0,0.15);
+}
+.combo-list.open{display:block;}
+.combo-list .opt{padding:8px 10px; font-size:13px; cursor:pointer;}
+.combo-list .opt:hover{background:var(--grey-bg);}
+.combo-list .opt.add-new{color:var(--green-dark); font-weight:700; border-top:1px solid #eee;}
+
+/* Tabs */
+.tabs{display:flex; gap:2px; border-bottom:2px solid var(--grey-border2); margin-bottom:14px;}
+.tab-btn{
+    background:none; border:none; padding:9px 16px; font-weight:700; font-size:13px; cursor:pointer;
+    color:var(--text-muted); border-bottom:2px solid transparent; margin-bottom:-2px;
+}
+.tab-btn.active{color:var(--green); border-bottom-color:var(--green);}
+.tab-panel{display:none;}
+.tab-panel.active{display:block;}
+
+/* Simple list manager table */
+.list-mgr-row{display:flex; gap:8px; align-items:center; padding:8px 0; border-bottom:1px solid #f0f0f0;}
+.list-mgr-row input{flex:1; padding:7px 9px; border:1px solid #ddd; border-radius:4px; font-size:13px;}
+.list-mgr-row .swatch-input{flex:0 0 40px; padding:2px; height:32px;}
+.list-mgr-row button.del{background:none; border:none; color:var(--red); cursor:pointer; font-size:16px;}
+.list-mgr-add{display:flex; gap:8px; margin-top:10px; padding-top:10px; border-top:1px dashed var(--grey-border2);}
+.list-mgr-add input{flex:1; padding:8px; border:1px solid var(--green); border-radius:4px; font-size:13px;}
+
+/* Bulk add preview table */
+.preview-table{width:100%; border-collapse:collapse; font-size:12.5px;}
+.preview-table th{background:var(--grey-bg); text-align:left; padding:7px 8px; position:sticky; top:0;}
+.preview-table td{padding:6px 8px; border-bottom:1px solid #eee;}
+.preview-table tr:hover td{background:#fafafa;}
+.preview-remove{color:var(--red); cursor:pointer; background:none; border:none; font-size:14px;}
+
+.checkbox-scroll-list{border:1px solid var(--grey-border); border-radius:5px; max-height:150px; overflow-y:auto; padding:6px; background:#f9f9f9;}
+.checkbox-scroll-list label{display:flex; align-items:center; gap:6px; padding:4px 4px; font-size:12.5px; cursor:pointer;}
+.checkbox-scroll-list label:hover{background:#eee;}
+
+/* Baseline import panel */
+.baseline-canvas-wrap{border:1px solid var(--grey-border2); border-radius:6px; overflow:auto; max-height:360px; background:#f4f4f4; text-align:center;}
+.baseline-canvas-wrap canvas{max-width:100%;}
+.token-chip{
+    display:inline-flex; align-items:center; gap:6px; background:var(--grey-bg); border:1px solid var(--grey-border2);
+    border-radius:14px; padding:4px 10px; font-size:12px; margin:3px; cursor:pointer;
+}
+.token-chip.selected{background:var(--green-light); border-color:var(--green); color:var(--green-dark); font-weight:700;}
+
+/* Item detail panel (click item) */
+.detail-panel{
+    display:none; position:absolute; right:0; top:0; bottom:0; width:340px; background:#fff;
+    box-shadow:-6px 0 24px rgba(0,0,0,0.15); z-index:1500; padding:20px; overflow-y:auto;
+}
+.detail-panel.open{display:block;}
+
+/* Toast */
+#toast{
+    position:absolute; bottom:64px; left:50%; transform:translateX(-50%); background:#323232; color:#fff;
+    padding:12px 20px; border-radius:6px; font-size:13px; z-index:3000; display:none; box-shadow:0 6px 20px rgba(0,0,0,0.3);
+}
+
+/* Bottom timeline date-range bar */
+.timeline-range-bar{
+    position:absolute; bottom:0; left:0; right:0; background:#fff; border-top:1px solid var(--grey-border);
+    padding:10px 24px; display:flex; gap:20px; align-items:center; z-index:500;
+    box-shadow:0 -2px 10px rgba(0,0,0,0.08); font-size:12.5px; font-weight:700; color:#555;
+}
+.timeline-range-bar label{display:flex; align-items:center; gap:6px;}
+.timeline-range-bar input[type="date"]{padding:6px 8px; border:1px solid var(--grey-border); border-radius:5px; font-size:12.5px; font-weight:600; color:var(--text-dark);}
+.timeline-range-bar input[type="date"]:disabled{background:var(--grey-bg); color:#999;}
+
+/* Print */
+@media print{
+    .header, .toolbar, .legend, .filter-dropdown, .tool-btn, .no-print{display:none !important;}
+    body{background:#fff;}
+    .gantt-wrap{overflow:visible !important;}
+    .gantt-rowlabel-col, .gantt-rowlabel{position:static !important;}
+}
+
+::-webkit-scrollbar{height:10px; width:10px;}
+::-webkit-scrollbar-thumb{background:#ccc; border-radius:5px;}
+::-webkit-scrollbar-thumb:hover{background:#aaa;}
+
+/* ===== VIEWER ROLE LOCKDOWN =====
+   Was injected as a real <style> into document.head at module-eval time in
+   the original (gated on the module-level isViewerRole const, known before
+   any DOM even existed). Now that role is resolved per-instance from an
+   attribute/URL param in _resolveParams(), this has to be real CSS gated by
+   a class toggled on the host once the role is known — see
+   _setupViewerRoleGating(). */
+:host(.viewer-role-lockdown) #add-menu-wrap{display:none !important;}
+:host(.viewer-role-lockdown) .gantt-item{cursor:default !important;}
+:host(.viewer-role-lockdown) .resize-handle,
+:host(.viewer-role-lockdown) .link-handle{display:none !important;}
+</style>
+`;
+
+const MARKUP = `
+<!-- Title/logo removed per request. projectSubtitle kept (hidden) so initApp() has
+     somewhere to write its "Demo mode" / "Connected to Supabase" status without erroring. -->
+<span id="projectSubtitle" style="display:none;"></span>
+
+<!-- ===== FILTER TOOLBAR ===== -->
+<div class="toolbar" id="filterToolbar">
+    <!-- LEFT SIDE: filters + search -->
+    <!-- filter chips injected by JS immediately before Clear filters -->
+    <button class="filter-clear-all" id="clearAllFiltersBtn" onclick="this.getRootNode().host.clearAllFilters()">Clear filters</button>
+    <input type="text" class="search-box" id="globalSearch" placeholder="Search asset, activity, contractor..." oninput="this.getRootNode().host.debouncedRenderGantt()">
+
+    <div class="toolbar-spacer"></div>
+
+    <!-- RIGHT SIDE: everything else -->
+    <select class="tool-btn small" id="groupBySelect" onchange="this.getRootNode().host.renderGantt()" style="font-weight:600;">
+        <option value="overall" selected>Group: Overall</option>
+        <option value="zone">Group by Zone</option>
+        <option value="area">Group by Area</option>
+        <option value="asset_type">Group by Asset Type</option>
+        <option value="contractor">Group by Contractor</option>
+        <option value="type">Group by Type</option>
+    </select>
+    <select class="tool-btn small" id="dayWidthSelect" onchange="this.getRootNode().host.setDayWidth(this.value)" style="font-weight:600;" title="All zoom levels use day-based sizing — Wide just gives each day more horizontal room.">
+        <option value="120">Zoom: Compact</option>
+        <option value="220" selected>Zoom: Normal</option>
+        <option value="360">Zoom: Wide</option>
+    </select>
+    <button class="tool-btn small" id="expandToggleBtn" onclick="this.getRootNode().host.toggleExpandView()" title="Give every activity its own line, or collapse back to the packed view">⬍ Expand All Activities</button>
+    <label class="tool-btn small" style="cursor:pointer; gap:6px; border-color:#f57c0033;" title="Show only the zero-float activities from today forward — the chain(s) that directly control how soon everything finishes. Everything else, including past work, is hidden.">
+        <input type="checkbox" id="criticalPathToggle" onchange="this.getRootNode().host.toggleCriticalPath(this.checked)" style="margin:0;">
+        🔥 Critical Path
+    </label>
+    <span id="multiSelectIndicator" style="display:none; align-items:center; gap:8px; background:var(--green-light); border:1px solid var(--green); border-radius:16px; padding:6px 12px; font-size:12.5px; font-weight:700; color:var(--green-dark);" title="Ctrl/Cmd+click activities to select more, or Ctrl/Cmd+click a selected one to deselect it. Drag any selected activity to move the whole group together.">
+        <span class="count">0</span> selected — drag one to move them together
+        <button class="preview-remove" onclick="this.getRootNode().host.clearMultiSelect()" title="Clear selection" style="color:var(--green-dark);">✕</button>
+    </span>
+    <div class="menu-btn-wrap" id="add-menu-wrap">
+        <button class="tool-btn" onclick="this.getRootNode().host.toggleMenu('addMenu', event)">➕ Add ▾</button>
+        <div class="menu-dropdown right" id="addMenu">
+            <div class="menu-item" id="newItemMenuBtn" onclick="this.getRootNode().host.closeAllMenus(); this.getRootNode().host.openModal('itemModal')">➕ New Item</div>
+            <div class="menu-item" onclick="this.getRootNode().host.closeAllMenus(); this.getRootNode().host.openBulkAddModal()">📋 Bulk Add</div>
+            <div class="menu-item" onclick="this.getRootNode().host.closeAllMenus(); this.getRootNode().host.openModal('baselineModal')">📐 Import Baseline</div>
+        </div>
+    </div>
+    <span id="saveIndicator">Ready</span>
+    <div class="menu-btn-wrap">
+        <button class="tool-btn small" id="launchpadMenuBtn" onclick="this.getRootNode().host.toggleMenu('launchpadMenu', event)">📡 LaunchPad ▾</button>
+        <div class="menu-dropdown right" id="launchpadMenu">
+            <div class="menu-item" id="launchpadSyncMenuItem" onclick="this.getRootNode().host.toggleLaunchPadSync()">📡 Sync to LaunchPad: Off</div>
+            <div class="menu-item" onclick="this.getRootNode().host.closeAllMenus(); this.getRootNode().host.pullFromLaunchPad()">⬇️ Pull from LaunchPad</div>
+            <div class="menu-item" onclick="this.getRootNode().host.closeAllMenus(); this.getRootNode().host.refreshAllStatuses()">🔄 Refresh Status</div>
+        </div>
+    </div>
+    <a id="openSheetLink" href="#" target="_blank" style="display:none; font-size:12px; color:var(--green-dark); font-weight:600; text-decoration:none;">Open Sheet ↗</a>
+    <button class="tool-btn small" onclick="this.getRootNode().host.syncToGoogleSheet()">📤 Sync to Sheets</button>
+    <div class="menu-btn-wrap">
+        <button class="tool-btn small" onclick="this.getRootNode().host.toggleMenu('reportMenu', event)">📊 Report ▾</button>
+        <div class="menu-dropdown right" id="reportMenu">
+            <div class="menu-item" onclick="this.getRootNode().host.closeAllMenus(); this.getRootNode().host.exportPDF()">📄 PDF</div>
+            <div class="menu-item" onclick="this.getRootNode().host.closeAllMenus(); this.getRootNode().host.exportXLSX()">📊 XLSX</div>
+            <div class="menu-item" onclick="this.getRootNode().host.closeAllMenus(); this.getRootNode().host.openCompletionPlanModal()">📅 Completion Plan</div>
+        </div>
+    </div>
+</div>
+
+<!-- ===== TYPE COLOR LEGEND ===== -->
+<div class="legend" id="typeLegend"></div>
+
+<!-- ===== GANTT ===== -->
+<div class="gantt-wrap" id="ganttWrap">
+    <div class="gantt-scroll" id="ganttScroll">
+        <div class="gantt-header" id="ganttHeader"></div>
+        <div class="gantt-body" id="ganttBody"></div>
+    </div>
+</div>
+
+<!-- ===== NEW / EDIT ITEM MODAL ===== -->
+<div class="modal-overlay" id="itemModal">
+    <div class="modal-box">
+        <div class="modal-head">
+            <h2 id="itemModalTitle">New Schedule Item</h2>
+            <button class="modal-close" onclick="this.getRootNode().host.closeModal('itemModal')">×</button>
+        </div>
+        <div class="modal-body">
+            <input type="hidden" id="itemId">
+            <div class="form-row combo-wrap">
+                <label>Asset *</label>
+                <input type="text" id="itemAsset" placeholder="Type to search or add new asset..." autocomplete="off"
+                    oninput="this.getRootNode().host.filterCombo('itemAsset','itemAssetList', this.getRootNode().host.DATA.assets)" onfocus="this.getRootNode().host.filterCombo('itemAsset','itemAssetList', this.getRootNode().host.DATA.assets)"
+                    onblur="this.getRootNode().host.applyAssetLookup(this.value, 'itemZone', 'itemArea')">
+                <div class="combo-list" id="itemAssetList"></div>
+            </div>
+            <div class="form-row combo-wrap">
+                <label>Activity *</label>
+                <input type="text" id="itemActivity" placeholder="Type to search or add new activity..." autocomplete="off"
+                    oninput="this.getRootNode().host.filterCombo('itemActivity','itemActivityList', this.getRootNode().host.DATA.activities)" onfocus="this.getRootNode().host.filterCombo('itemActivity','itemActivityList', this.getRootNode().host.DATA.activities)">
+                <div class="combo-list" id="itemActivityList"></div>
+            </div>
+            <div class="form-grid">
+                <div class="form-row">
+                    <label>Duration (days) *</label>
+                    <input type="number" id="itemDuration" min="0.1" step="0.25" value="1">
+                </div>
+                <div class="form-row">
+                    <label>Start Date/Time *</label>
+                    <input type="datetime-local" id="itemStart">
+                </div>
+            </div>
+            <div class="form-row">
+                <label>Type *</label>
+                <select id="itemTypePicker"></select>
+            </div>
+            <div class="form-grid">
+                <div class="form-row">
+                    <label>Zone *</label>
+                    <select id="itemZone"></select>
+                </div>
+                <div class="form-row">
+                    <label>Area</label>
+                    <select id="itemArea"></select>
+                </div>
+            </div>
+            <div class="form-grid">
+                <div class="form-row">
+                    <label>Asset Type</label>
+                    <select id="itemAssetType"></select>
+                </div>
+                <div class="form-row combo-wrap">
+                    <label>Contractor <span class="hint">type to search or add new</span></label>
+                    <input type="text" id="itemContractor" placeholder="Type to search or add new contractor..." autocomplete="off"
+                        oninput="this.getRootNode().host.filterCombo('itemContractor','itemContractorList', this.getRootNode().host.DATA.contractors)" onfocus="this.getRootNode().host.filterCombo('itemContractor','itemContractorList', this.getRootNode().host.DATA.contractors)">
+                    <div class="combo-list" id="itemContractorList"></div>
+                </div>
+            </div>
+            <div class="form-row combo-wrap">
+                <label>Predecessors <span class="hint">this item can't start before these finish</span></label>
+                <div class="pred-chip-list" id="itemPredChips"></div>
+                <input type="text" id="itemPredSearch" placeholder="Search items to link as a predecessor..." autocomplete="off"
+                    oninput="this.getRootNode().host.filterPredCombo(this.value)" onfocus="this.getRootNode().host.filterPredCombo(this.value)">
+                <div class="combo-list" id="itemPredList"></div>
+            </div>
+            <div class="form-row">
+                <label>Notes <span class="hint">optional</span></label>
+                <textarea id="itemNotes" rows="2"></textarea>
+            </div>
+        </div>
+        <div class="modal-foot">
+            <button class="tool-btn" id="itemDeleteBtn" style="border-color:var(--red); color:var(--red); display:none;" onclick="this.getRootNode().host.deleteCurrentItem()">Delete</button>
+            <div style="flex:1;"></div>
+            <button class="tool-btn" onclick="this.getRootNode().host.closeModal('itemModal')">Cancel</button>
+            <button class="tool-btn primary" onclick="this.getRootNode().host.saveItemModal()">Save Item</button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== BULK ADD MODAL ===== -->
+<div class="modal-overlay" id="bulkModal">
+    <div class="modal-box xwide">
+        <div class="modal-head">
+            <h2>Bulk Add Schedule Items</h2>
+            <button class="modal-close" onclick="this.getRootNode().host.closeModal('bulkModal')">×</button>
+        </div>
+        <div class="modal-body">
+            <div id="bulkStep1">
+                <p style="color:#666; font-size:13px; margin-top:0;">Select multiple assets and activities to generate combinations, or paste rows from a spreadsheet (Asset, Activity, Duration in days, Type, Zone, Area, Start Date columns, tab or comma separated).</p>
+                <div class="tabs">
+                    <button class="tab-btn active" onclick="this.getRootNode().host.switchTab('bulkTab','combo')">Combination Builder</button>
+                    <button class="tab-btn" onclick="this.getRootNode().host.switchTab('bulkTab','paste')">Paste / CSV</button>
+                </div>
+                <div class="tab-panel active" id="bulkTab-combo">
+                    <div class="form-grid">
+                        <div>
+                            <label style="font-weight:700; font-size:12.5px; color:#555;">Assets</label>
+                            <input type="text" class="search" placeholder="Filter assets..." oninput="this.getRootNode().host.filterCheckList('bulkAssetList', this.value)">
+                            <div class="checkbox-scroll-list" id="bulkAssetList"></div>
+                        </div>
+                        <div>
+                            <label style="font-weight:700; font-size:12.5px; color:#555;">Activities</label>
+                            <input type="text" class="search" placeholder="Filter activities..." oninput="this.getRootNode().host.filterCheckList('bulkActivityList', this.value)">
+                            <div class="checkbox-scroll-list" id="bulkActivityList"></div>
+                            <label style="display:flex; align-items:center; gap:6px; margin-top:8px; font-size:12px; font-weight:600; color:#555; cursor:pointer;" title="For each asset, chains its activities in the order checked above — activity 2 can't start until activity 1 finishes, and so on.">
+                                <input type="checkbox" id="bulkAutoLink" style="margin:0;">
+                                🔗 Auto-link each asset's activities in order
+                            </label>
+                        </div>
+                    </div>
+                    <div class="form-grid" style="margin-top:14px;">
+                        <div class="form-row">
+                            <label>Type *</label>
+                            <select id="bulkTypePicker"></select>
+                        </div>
+                        <select id="bulkZone" style="display:none;"></select>
+                        <select id="bulkArea" style="display:none;"></select>
+                        <div class="form-row combo-wrap">
+                            <label>Contractor <span class="hint">optional, type to add new</span></label>
+                            <input type="text" id="bulkContractor" placeholder="Type to search or add new contractor..." autocomplete="off"
+                                oninput="this.getRootNode().host.filterCombo('bulkContractor','bulkContractorList', this.getRootNode().host.DATA.contractors)" onfocus="this.getRootNode().host.filterCombo('bulkContractor','bulkContractorList', this.getRootNode().host.DATA.contractors)">
+                            <div class="combo-list" id="bulkContractorList"></div>
+                        </div>
+                        <div class="form-row">
+                            <label>Duration (days)</label>
+                            <input type="number" id="bulkDuration" min="0.1" step="0.25" value="1">
+                        </div>
+                        <div class="form-row">
+                            <label>Start Date</label>
+                            <input type="date" id="bulkStartDate">
+                        </div>
+                        <div class="form-row" style="grid-column:1 / -1;">
+                            <label>Notes <span class="hint">optional, applied to every generated row</span></label>
+                            <input type="text" id="bulkNotes" placeholder="Optional notes...">
+                        </div>
+                    </div>
+                    <button class="tool-btn primary" onclick="this.getRootNode().host.generateBulkPreview('combo')">Generate Preview →</button>
+                </div>
+                <div class="tab-panel" id="bulkTab-paste">
+                    <textarea id="bulkPasteArea" rows="10" placeholder="Asset, Activity, Duration (days), Type, Zone, Area, Start Date (YYYY-MM-DD), Contractor, Notes
+Pump-101, Install Piping, 1, Mech, Zone A, Level 1, 2026-08-03, Apex Mechanical, Confirm crane access" style="width:100%; font-family:monospace; font-size:12.5px; padding:10px; border:1px solid #ccc; border-radius:5px;"></textarea>
+                    <button class="tool-btn primary" style="margin-top:10px;" onclick="this.getRootNode().host.generateBulkPreview('paste')">Generate Preview →</button>
+                </div>
+            </div>
+            <div id="bulkStep2" style="display:none;">
+                <p style="color:#666; font-size:13px; margin-top:0;"><strong id="bulkPreviewCount"></strong> — review before adding to the schedule. Every field is editable; remove any rows you don't want.</p>
+                <div style="max-height:340px; overflow:auto; border:1px solid #eee; border-radius:6px;">
+                    <table class="preview-table">
+                        <thead><tr><th>Asset</th><th>Activity</th><th>Dur (days)</th><th>Type</th><th>Zone</th><th>Area</th><th>Start</th><th>Contractor</th><th>Notes</th><th>Linked after</th><th></th></tr></thead>
+                        <tbody id="bulkPreviewBody"></tbody>
+                    </table>
+                </div>
+                <button class="tool-btn" style="margin-top:12px;" onclick="this.getRootNode().host.backToBulkStep1()">← Back</button>
+            </div>
+        </div>
+        <div class="modal-foot">
+            <button class="tool-btn" onclick="this.getRootNode().host.closeModal('bulkModal')">Cancel</button>
+            <button class="tool-btn primary" id="bulkCommitBtn" style="display:none;" onclick="this.getRootNode().host.commitBulkAdd()">Add to Schedule</button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== LISTS MANAGER MODAL (Asset / Activity / Contractor) ===== -->
+<div class="modal-overlay" id="listsModal">
+    <div class="modal-box wide">
+        <div class="modal-head">
+            <h2>Manage Lists</h2>
+            <button class="modal-close" onclick="this.getRootNode().host.closeModal('listsModal')">×</button>
+        </div>
+        <div class="modal-body">
+            <div class="tabs">
+                <button class="tab-btn active" onclick="this.getRootNode().host.switchTab('listsTab','assets')">Assets</button>
+                <button class="tab-btn" onclick="this.getRootNode().host.switchTab('listsTab','activities')">Activities</button>
+                <button class="tab-btn" onclick="this.getRootNode().host.switchTab('listsTab','contractors')">Contractors</button>
+                <button class="tab-btn" onclick="this.getRootNode().host.switchTab('listsTab','zones')">Zones / Areas</button>
+                <button class="tab-btn" onclick="this.getRootNode().host.switchTab('listsTab','types')">Types</button>
+                <button class="tab-btn" onclick="this.getRootNode().host.switchTab('listsTab','activitycolors')">Activity Colors</button>
+            </div>
+            <div class="tab-panel active" id="listsTab-assets">
+                <div id="assetListRows"></div>
+                <div class="list-mgr-add">
+                    <input type="text" id="newAssetName" placeholder="New asset name">
+                    <button class="tool-btn primary small" onclick="this.getRootNode().host.addListItem('assets')">Add</button>
+                </div>
+            </div>
+            <div class="tab-panel" id="listsTab-activities">
+                <div id="activityListRows"></div>
+                <div class="list-mgr-add">
+                    <input type="text" id="newActivityName" placeholder="New activity name">
+                    <button class="tool-btn primary small" onclick="this.getRootNode().host.addListItem('activities')">Add</button>
+                </div>
+            </div>
+            <div class="tab-panel" id="listsTab-contractors">
+                <div id="contractorListRows"></div>
+                <div class="list-mgr-add">
+                    <input type="text" id="newContractorName" placeholder="New contractor / trade partner name">
+                    <button class="tool-btn primary small" onclick="this.getRootNode().host.addListItem('contractors')">Add</button>
+                </div>
+            </div>
+            <div class="tab-panel" id="listsTab-zones">
+                <div class="form-grid">
+                    <div>
+                        <label style="font-weight:700; font-size:12.5px; color:#555;">Zones</label>
+                        <p style="font-size:11px; color:#999; margin:2px 0 6px;">End dates are stored in this browser only, keyed by zone name.</p>
+                        <div id="zoneListRows"></div>
+                        <div class="list-mgr-add">
+                            <input type="text" id="newZoneName" placeholder="New zone name">
+                            <input type="date" id="newZoneEndDate" title="Target end date (optional)" style="flex:0 0 140px;">
+                            <button class="tool-btn primary small" onclick="this.getRootNode().host.addListItem('zones')">Add</button>
+                        </div>
+                    </div>
+                    <div>
+                        <label style="font-weight:700; font-size:12.5px; color:#555;">Areas</label>
+                        <div id="areaListRows"></div>
+                        <div class="list-mgr-add">
+                            <input type="text" id="newAreaName" placeholder="New area name">
+                            <button class="tool-btn primary small" onclick="this.getRootNode().host.addListItem('areas')">Add</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="tab-panel" id="listsTab-types">
+                <p style="font-size:11.5px; color:#999; margin-top:0;">Types are stored in this browser only (no matching column in the shared Supabase table). This is a plain filterable attribute now — gantt bar colors come from Activity Colors instead.</p>
+                <div id="typeListRows"></div>
+                <div class="list-mgr-add">
+                    <input type="text" id="newTypeName" placeholder="New type name (e.g. Fire Protection)">
+                    <button class="tool-btn primary small" onclick="this.getRootNode().host.addListItem('types')">Add</button>
+                </div>
+            </div>
+            <div class="tab-panel" id="listsTab-activitycolors">
+                <p style="font-size:11.5px; color:#999; margin-top:0;">Every activity gets an automatically assigned color the first time it's used. Adjust any of them here — stored in this browser only.</p>
+                <div id="activityColorRows"></div>
+            </div>
+        </div>
+        <div class="modal-foot">
+            <button class="tool-btn primary" onclick="this.getRootNode().host.closeModal('listsModal')">Done</button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== BASELINE PDF IMPORT MODAL ===== -->
+<div class="modal-overlay" id="baselineModal">
+    <div class="modal-box wide">
+        <div class="modal-head">
+            <h2>Import Baseline PDF</h2>
+            <button class="modal-close" onclick="this.getRootNode().host.closeModal('baselineModal')">×</button>
+        </div>
+        <div class="modal-body">
+            <p style="color:#666; font-size:13px; margin-top:0;">Upload a baseline site plan or schedule PDF. Text (zone/area/asset labels) will be extracted automatically — if the PDF is a scanned image, OCR will run instead. Review the detected labels below and add the ones you want as Zones or Areas.</p>
+            <input type="file" id="baselineFileInput" accept="application/pdf" onchange="this.getRootNode().host.handleBaselineFile(this.files[0])">
+            <div style="margin-top:14px; display:flex; gap:16px;">
+                <div style="flex:1;">
+                    <div class="baseline-canvas-wrap" id="baselineCanvasWrap">
+                        <div style="padding:40px; color:#999;">No file loaded yet.</div>
+                    </div>
+                </div>
+                <div style="flex:1;">
+                    <div id="baselineStatus" style="font-size:12.5px; color:#666; margin-bottom:8px;"></div>
+                    <div style="font-weight:700; font-size:12.5px; color:#555; margin-bottom:6px;">Detected labels <span class="hint" style="font-weight:400;">(click to select)</span></div>
+                    <div id="baselineTokens" style="max-height:220px; overflow-y:auto; border:1px solid #eee; border-radius:6px; padding:8px;"></div>
+                    <div style="margin-top:12px; display:flex; gap:8px;">
+                        <button class="tool-btn small" onclick="this.getRootNode().host.commitBaselineTokens('zones')">Add Selected as Zones</button>
+                        <button class="tool-btn small" onclick="this.getRootNode().host.commitBaselineTokens('areas')">Add Selected as Areas</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="modal-foot">
+            <button class="tool-btn primary" onclick="this.getRootNode().host.closeModal('baselineModal')">Done</button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== ITEM DETAIL SIDE PANEL (click-to-view on gantt bar) ===== -->
+<div class="detail-panel" id="detailPanel"></div>
+
+
+<!-- ===== COMPLETION PLAN EXPORT MODAL ===== -->
+<div class="modal-overlay" id="completionPlanModal">
+    <div class="modal-box">
+        <div class="modal-head">
+            <h2>Export Completion Plan</h2>
+            <button class="modal-close" onclick="this.getRootNode().host.closeModal('completionPlanModal')">×</button>
+        </div>
+        <div class="modal-body">
+            <p style="color:#666; font-size:13px; margin-top:0;">Pick a date range — the export groups every activity in that window by assignee (contractor), in date order, so each trade partner can see exactly what they owe and when.</p>
+            <div class="form-grid">
+                <div class="form-row">
+                    <label>From</label>
+                    <input type="date" id="completionPlanStart">
+                </div>
+                <div class="form-row">
+                    <label>To</label>
+                    <input type="date" id="completionPlanEnd">
+                </div>
+            </div>
+            <p style="color:#999; font-size:11.5px; margin-top:10px;">Want an AI-generated plan instead of just grouping what's already scheduled? This file runs entirely in your browser with no server of its own, so it can't safely call an AI API directly (that would mean shipping an API key to everyone who opens it). If you've got a backend or an Apps Script endpoint that can call one, point me at it and I can wire this button up to send it your unscheduled activities and get suggested dates/assignments back.</p>
+        </div>
+        <div class="modal-foot">
+            <button class="tool-btn" onclick="this.getRootNode().host.closeModal('completionPlanModal')">Cancel</button>
+            <button class="tool-btn primary" onclick="this.getRootNode().host.exportCompletionPlan('xlsx')">📊 Export XLSX</button>
+            <button class="tool-btn primary" onclick="this.getRootNode().host.exportCompletionPlan('pdf')">📄 Export PDF</button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== DAY DETAIL MODAL ===== -->
+<div class="modal-overlay" id="dayDetailModal">
+    <div class="modal-box wide">
+        <div class="modal-head">
+            <h2 id="dayDetailTitle">Day</h2>
+            <button class="modal-close" onclick="this.getRootNode().host.closeModal('dayDetailModal')">×</button>
+        </div>
+        <div class="modal-body" id="dayDetailBody"></div>
+        <div class="modal-foot">
+            <button class="tool-btn primary" onclick="this.getRootNode().host.closeModal('dayDetailModal')">Done</button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== TIMELINE DATE RANGE BAR ===== -->
+<div class="timeline-range-bar">
+    <label>Start date <input type="date" id="rangeStartInput" onchange="this.getRootNode().host.applyTimelineRange()"></label>
+    <label>End date <input type="date" id="rangeEndInput" onchange="this.getRootNode().host.applyTimelineRange()"></label>
+    <label style="display:flex; align-items:center; gap:6px; font-weight:600;">
+        <input type="checkbox" id="useLastActivityEnd" onchange="this.getRootNode().host.applyTimelineRange()" style="margin:0;">
+        Use last activity as end date
+    </label>
+</div>
+
+<div id="toast"></div>
+`;
+
+export class BridgeView extends HTMLElement {
+    constructor() {
+        super();
+        this.attachShadow({ mode: 'open' });
+        this._outsideClickHandler = this._handleOutsideClick.bind(this);
+        this._keydownHandler = this._handleKeydown.bind(this);
+        // Stable bound references for the drag pointermove/pointerup pair —
+        // startDrag()/onDragEnd() add/remove these same two references, so
+        // the identity must stay constant across a whole drag gesture (and
+        // matching remove requires the exact reference used for add).
+        this._onDragMoveBound = this.onDragMove.bind(this);
+        this._onDragEndBound = this.onDragEnd.bind(this);
+
+        // ---- 3. GLOBAL STATE (was module-level let/const, now per-instance) ----
+        this.ZONE_END_DATES = this.loadZoneEndDates();
+        this.DATA_STORE = this.loadLocalStore() || {};
+        this.DATA = {
+            items: [],
+            assets: [],
+            activities: [],
+            contractors: [],
+            zones: [],
+            areas: [],
+            types: []
+        };
+        this.FILTERS = {
+            type: new Set(),
+            zone: new Set(),
+            asset_type: new Set(),
+            activity: new Set(),
+            area: new Set()
+        };
+        this.DAY_WIDTH = 220;
+        this.TIMELINE_START = null; // Date, midnight
+        this.TIMELINE_DAYS = 42;    // 6-week rolling window
+        this.dragCtx = null;
+        this.bulkPreviewRows = [];
+        this.baselineDetectedTokens = [];
+        this.ACTIVITY_COLORS = this.loadActivityColors();
+        this.ASSET_TO_ZONE_MAP = {};
+        this.ASSET_TO_AREA_MAP = {};
+        this.__resizeRerenderTimer = null;
+        this.connScrollScheduled = false;
+        this.rowHeightOverrides = {};  // groupKey -> manually set px height (auto if absent)
+        this.LAST_GROUPS = {};
+        this.LAST_GROUPBY = 'zone';
+        this.expandedView = false;   // true while "Expand All Activities" is active
+        this.linkDragCtx = null;
+        this.connectionFocusId = null;   // when set, only that item's own connector lines are drawn
+        this.multiSelectedIds = new Set(); // Ctrl/Cmd+click selection — dragging any member moves all of them together
+        this.focusChainSet = null;       // Set of item ids connected to connectionFocusId (dimmed = everything else)
+        this.showCriticalPath = false;   // toggle: highlight the zero-float chain(s)
+        this.criticalPathData = null;    // recomputed each render — { floatById, esById, efById, lsById, lfById }
+        this.__ganttSearchDebounceTimer = null;
+        this.autoScrollRAF = null;
+        this.autoScrollState = null;
+        this.currentItemPredecessors = [];
+        this.LAUNCHPAD_SYNC_ENABLED = this.loadLaunchPadSyncEnabled();
+        this.STATUS_CACHE = {}; // "asset|||activity" -> { result, url } | 'pending' | 'error'
+        this.RESULT_CACHE = {}; // launchpad_id -> result string | null, cached so repeated lookups (e.g. across several predecessors) don't re-fetch
+        this.statusRefreshInFlight = false;
+        this.googleTokenClient = null;
+        this.googleAccessToken = null;
+        this._toastTimer = null; // was a property hung off the module-level toast() function itself
+
+        // Mirrors LaunchPad's own assetToPlaceMap approach exactly: fetch
+        // every row of {PROJECT_KEY}dropdownoptions and, wherever an Asset
+        // and a Zone/Place appear together on the same row, remember that
+        // pairing — so picking an Asset elsewhere in the app can auto-fill
+        // its Zone/Area the same way LaunchPad does.
+        // (ASSET_TO_ZONE_MAP / ASSET_TO_AREA_MAP declared above.)
+
+        // ---- Data layer (CRUD wrappers for every table) ----
+        // Transparently uses Supabase when configured, otherwise falls back
+        // to an in-browser localStorage store so the tool is fully usable
+        // for evaluation before credentials are wired in. Kept as a
+        // self-contained object (own _reportError/fetchAll/insert/update/
+        // remove) closing over the outer instance via `self`, same shape
+        // as the original module-level DB const.
+        const self = this;
+        this.DB = {
+    // "types" never touches Supabase — there's no column for it in
+    // {PROJECT_KEY}dropdownoptions, so it's a small locally-persisted list.
+    _reportError(action, real, error) {
+        console.error(real, error);
+        self.setSaveIndicator('error', action === 'load' ? 'Supabase error' : action === 'delete' ? 'Delete failed' : 'Save failed');
+        const isRLS = error && (error.code === '42501' || /row-level security|permission denied/i.test(error.message || ''));
+        const verb = action === 'load' ? 'Loading' : action === 'delete' ? 'Deleting' : 'Saving';
+        self.toast(
+            isRLS
+                ? `${verb} from "${real}" was blocked by a Row Level Security policy — see README Troubleshooting.`
+                : `${verb} "${real}" failed — see the browser console for details.`,
+            5500
+        );
+    },
+    async fetchAll(table) {
+        if (table === 'types') {
+            return self.loadLocalTypes() || DEFAULT_TYPE_COLORS.map(t => ({ ...t }));
+        }
+        const column = DROPDOWN_COLUMN[table];
+        if (column && self._supabase) {
+            // one row per option, all packed into one column of the shared table
+            const { data, error } = await self._supabase
+                .from(self.TABLES.dropdowns)
+                .select(`id, "${column}"`)
+                .not(column, 'is', null)
+                .order(column, { ascending: true });
+            if (error) { this._reportError('load', self.TABLES.dropdowns, error); return []; }
+            return (data || []).map(r => ({ id: r.id, name: r[column] }));
+        }
+        if (!column && self._supabase) {
+            // items: query the real table directly
+            const { data, error } = await self._supabase.from(table).select('*').order('created_at', { ascending: true });
+            if (error) { this._reportError('load', table, error); return []; }
+            return data || [];
+        }
+        return (self.DATA_STORE[table] || []).slice();
+    },
+    async insert(table, row) {
+        row.created_at = row.created_at || new Date().toISOString();
+        if (table === 'types') {
+            row.id = row.id || uid();
+            const list = self.loadLocalTypes() || DEFAULT_TYPE_COLORS.map(t => ({ ...t }));
+            list.push(row);
+            self.saveLocalTypes(list);
+            return row;
+        }
+        const column = DROPDOWN_COLUMN[table];
+        if (column && self._supabase) {
+            // new option = a new row in the shared table with just this one column set
+            const { data, error } = await self._supabase.from(self.TABLES.dropdowns).insert({ [column]: row.name }).select();
+            if (error) { this._reportError('save', self.TABLES.dropdowns, error); return null; }
+            return { id: data[0].id, name: data[0][column] };
+        }
+        if (!column && self._supabase) {
+            // {PROJECT_KEY}schedule_items.id is a real Postgres uuid column with its own
+            // default (gen_random_uuid()) — never send our own client-side
+            // id string here, or Postgres rejects it (error 22P02, invalid
+            // uuid syntax). Let the database assign it and use what comes back.
+            const { id, ...rowWithoutId } = row;
+            const { data, error } = await self._supabase.from(table).insert(rowWithoutId).select();
+            if (error) { this._reportError('save', table, error); return null; }
+            return data[0];
+        }
+        row.id = row.id || uid();
+        self.DATA_STORE[table] = self.DATA_STORE[table] || [];
+        self.DATA_STORE[table].push(row);
+        self.saveLocalStore();
+        return row;
+    },
+    async update(table, id, patch) {
+        patch.updated_at = new Date().toISOString();
+        if (table === 'types') {
+            const list = self.loadLocalTypes() || DEFAULT_TYPE_COLORS.map(t => ({ ...t }));
+            const idx = list.findIndex(r => r.id === id);
+            if (idx > -1) { list[idx] = { ...list[idx], ...patch }; self.saveLocalTypes(list); return list[idx]; }
+            return null;
+        }
+        const column = DROPDOWN_COLUMN[table];
+        if (column && self._supabase) {
+            // renaming an option = updating that one column's value on its row
+            const { data, error } = await self._supabase.from(self.TABLES.dropdowns).update({ [column]: patch.name }).eq('id', id).select();
+            if (error) { this._reportError('save', self.TABLES.dropdowns, error); return null; }
+            return { id: data[0].id, name: data[0][column] };
+        }
+        if (!column && self._supabase) {
+            const { data, error } = await self._supabase.from(table).update(patch).eq('id', id).select();
+            if (error) { this._reportError('save', table, error); return null; }
+            return data[0];
+        }
+        const arr = self.DATA_STORE[table] || [];
+        const idx = arr.findIndex(r => r.id === id);
+        if (idx > -1) { arr[idx] = { ...arr[idx], ...patch }; self.saveLocalStore(); return arr[idx]; }
+        return null;
+    },
+    async remove(table, id) {
+        if (table === 'types') {
+            const list = (self.loadLocalTypes() || DEFAULT_TYPE_COLORS.map(t => ({ ...t }))).filter(r => r.id !== id);
+            self.saveLocalTypes(list);
+            return true;
+        }
+        const column = DROPDOWN_COLUMN[table];
+        const real = column ? self.TABLES.dropdowns : table;
+        if (self._supabase) {
+            // deleting an option removes its whole row — each row in the
+            // shared table only ever has the one relevant column populated
+            const { error } = await self._supabase.from(real).delete().eq('id', id);
+            if (error) { this._reportError('delete', real, error); return false; }
+            return true;
+        }
+        self.DATA_STORE[table] = (self.DATA_STORE[table] || []).filter(r => r.id !== id);
+        self.saveLocalStore();
+        return true;
+    }
+};
+    }
+
+    connectedCallback() {
+        if (this._mounted) return; // re-entrant connect (e.g. node moved) shouldn't re-init
+        this._mounted = true;
+        this._resolveParams();
+        this.shadowRoot.innerHTML = STYLE + MARKUP;
+        this._initSupabase();
+
+        document.addEventListener('click', this._outsideClickHandler);
+        document.addEventListener('keydown', this._keydownHandler);
+        this._resizeHandler = () => {
+            clearTimeout(this.__resizeRerenderTimer);
+            this.__resizeRerenderTimer = setTimeout(() => this.renderGantt(), 150);
+        };
+        window.addEventListener('resize', this._resizeHandler);
+
+        this._setupViewerRoleGating();
+
+        this.init();
+    }
+
+    disconnectedCallback() {
+        document.removeEventListener('click', this._outsideClickHandler);
+        document.removeEventListener('keydown', this._keydownHandler);
+        if (this._resizeHandler) window.removeEventListener('resize', this._resizeHandler);
+        this._teardownViewerRoleGating();
+        clearTimeout(this.__resizeRerenderTimer);
+        clearTimeout(this.__ganttSearchDebounceTimer);
+        clearTimeout(this._toastTimer);
+        this.stopAutoScroll();
+    }
+
+    _resolveParams() {
+        const qp = new URLSearchParams(window.location.search);
+        // Falls back to the prefix/defaults this file was originally built
+        // for, so it still works if opened directly without these params.
+        this.PROJECT_KEY = this.getAttribute('project') || qp.get('project') || 'STY4';
+        this.USER_ROLE = this.getAttribute('role') || qp.get('role') || 'editor';
+        this.USER_EMAIL = this.getAttribute('email') || qp.get('email') || '';
+        this.isViewerRole = this.USER_ROLE === 'viewer';
+        this.TABLES = {
+            items: `${this.PROJECT_KEY}schedule_items`,
+            dropdowns: `${this.PROJECT_KEY}dropdownoptions`,
+            assets: "assets",
+            activities: "activities",
+            contractors: "contractors",
+            zones: "zones",
+            areas: "areas",
+            types: "types"
+        };
+        // LaunchPad reads its schedule grid from its own
+        // "{PROJECT_KEY}BackEndData" table in this same Supabase project —
+        // see the LAUNCHPAD SYNC section below for the full field mapping.
+        this.LAUNCHPAD_TABLE = `${this.PROJECT_KEY}BackEndData`;
+    }
+
+    _initSupabase() {
+        const injected = this.supabaseClient || window.launchpadSupabaseClient;
+        this._supabase = injected || (SUPABASE_CONFIGURED && window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null);
+    }
+
+    // Shadow-scoped DOM helpers — replace the old document.getElementById /
+    // document.querySelectorAll so lookups can't collide with the shell's
+    // own ids or the other three views' shadow trees.
+    $(id) { return this.shadowRoot.getElementById(id); }
+    $$(sel) { return this.shadowRoot.querySelectorAll(sel); }
+
+    // A document-level listener sees `event.target` retargeted to this
+    // element itself (Shadow DOM retargeting) for anything that happened
+    // inside the shadow tree — composedPath() is the correct way to find
+    // the real originating element/ancestors from outside.
+    _pathMatches(e, selector) {
+        return e.composedPath().some(el => el.nodeType === 1 && el.matches && el.matches(selector));
+    }
+
+    init() {
+        this._setupGanttScrollListener();
+        this._setupNewItemMenuReset();
+        this.initApp();
+    }
+
+    // A document-level click listener sees `event.target` retargeted to this
+    // element itself for anything that happened inside the shadow tree —
+    // composedPath() (via _pathMatches()/composedPath().includes()) is used
+    // throughout instead of e.target.closest()/.contains() for that reason.
+    _handleOutsideClick(e) {
+        const path = e.composedPath();
+        this.$$('.filter-dropdown.open').forEach(dd => {
+            if (!path.includes(dd) && !this._pathMatches(e, '.filter-chip-btn')) dd.classList.remove('open');
+        });
+        this.$$('.combo-list.open').forEach(cl => {
+            if (!path.includes(cl) && !path.includes(cl.previousElementSibling)) cl.classList.remove('open');
+        });
+        this.$$('.menu-dropdown.open').forEach(md => {
+            if (!path.includes(md) && !this._pathMatches(e, '.menu-btn-wrap')) md.classList.remove('open');
+        });
+        // clicking empty gantt background (not an item, not the detail panel)
+        // clears the connection focus so lines don't stay "stuck" on
+        if (this.connectionFocusId && this._pathMatches(e, '#ganttWrap') &&
+            !this._pathMatches(e, '.gantt-item') && !this._pathMatches(e, '#detailPanel')) {
+            this.closeDetailPanel();
+        }
+    }
+
+    // Public method the LaunchPad shell calls directly once it shows this tab
+    // (replaces the old window.addEventListener('message', ...) listening for
+    // a BRIDGE_VIEW_SHOWN postMessage). See the class-level comment for why a
+    // fresh render is needed once this element actually becomes visible/sized.
+    notifyVisible() {
+        requestAnimationFrame(() => this.renderGantt());
+    }
+
+    // Defensive: re-measure and redraw connector lines on scroll, throttled to
+    // one recompute per animation frame. The SVG overlay is positioned to
+    // scroll naturally with its content, but forcing a fresh recompute here
+    // guarantees the lines can never visually drift from the boxes they
+    // connect, regardless of scroll position.
+    _setupGanttScrollListener() {
+        const wrap = this.$('ganttWrap');
+        if (!wrap) return;
+        wrap.addEventListener('scroll', () => {
+            if (this.connScrollScheduled) return;
+            this.connScrollScheduled = true;
+            requestAnimationFrame(() => {
+                this.connScrollScheduled = false;
+                // a full connections rebuild replaces the SVG's contents
+                // wholesale, which would wipe out the in-progress temp preview
+                // line of an active link-drag — skip it until the drag ends,
+                // since the real (saved) connections haven't changed anyway
+                if (!this.linkDragCtx) this.renderConnections();
+            });
+        }, { passive: true });
+    }
+
+    // reset modal to "new item" state whenever opened fresh — was gated behind
+    // DOMContentLoaded and found the button via a fragile onclick-attribute-text
+    // selector; now runs from init() (elements already exist in the shadow
+    // tree by then) and finds the button via its own id (see the markup).
+    _setupNewItemMenuReset() {
+        const btn = this.$('newItemMenuBtn');
+        if (!btn) return;
+        btn.addEventListener('click', () => {
+            this.$('itemModalTitle').textContent = 'New Schedule Item';
+            this.$('itemId').value = '';
+            this.$('itemAsset').value = '';
+            this.$('itemActivity').value = '';
+            this.$('itemDuration').value = 1;
+            this.$('itemStart').value = this.toLocalInputValue(new Date());
+            this.$('itemContractor').value = '';
+            this.$('itemNotes').value = '';
+            this.$('itemDeleteBtn').style.display = 'none';
+            this.populateSelect('itemZone', this.DATA.zones.map(z => z.name), true);
+            this.populateSelect('itemArea', this.DATA.areas.map(a => a.name), true);
+            this.populateSelect('itemAssetType', [...new Set(this.DATA.items.map(i => i.asset_type).filter(Boolean))], true);
+            if (this.DATA.types[0]) this.$('itemTypePicker').value = this.DATA.types[0].name;
+            this.currentItemPredecessors = [];
+            this.renderPredChips();
+        });
+    }
+
+    _handleKeydown(e) {
+        if (e.key === 'Escape' && this.multiSelectedIds.size) this.clearMultiSelect();
+    }
+
+    _setupViewerRoleGating() {
+        // A viewer can look at the schedule but can't drag/resize/edit items or
+        // trigger add/bulk-add actions. Capture-phase so it intercepts before
+        // the app's own drag/click handlers ever see the event. This used to
+        // run at module-eval time (isViewerRole was a module-level const known
+        // before any DOM existed) — now that role is resolved per-instance in
+        // _resolveParams(), it has to run from connectedCallback() instead.
+        if (!this.isViewerRole) return;
+
+        // Hide the Add menu (New Item / Bulk Add / Import Baseline) outright —
+        // a viewer shouldn't even see these options, not just be blocked from
+        // using them. Also visually mark items as non-interactive. This CSS
+        // used to be injected into the real document.head; it now lives in
+        // STYLE under :host(.viewer-role-lockdown), toggled by this class.
+        this.classList.add('viewer-role-lockdown');
+
+        this._viewerGatingHandlers = ['pointerdown', 'mousedown', 'click', 'dblclick'].map(evt => {
+            const handler = (e) => {
+                const editSurface = this._pathMatches(e, '.gantt-item, .resize-handle, .link-handle, .menu-btn-wrap .tool-btn, .menu-item');
+                // Filters/search/zoom/group-by and the "Clear filters" button stay
+                // usable — those are read-only conveniences, not edits.
+                const readOnlyOk = this._pathMatches(e, '#groupBySelect, #dayWidthSelect, #expandToggleBtn, #criticalPathToggle, #globalSearch, #clearAllFiltersBtn, .filter-chip');
+                if (editSurface && !readOnlyOk) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (evt === 'click') this.showBridgeViewerUpsell();
+                }
+            };
+            document.addEventListener(evt, handler, true);
+            return { evt, handler };
+        });
+    }
+
+    _teardownViewerRoleGating() {
+        if (this._viewerGatingHandlers) {
+            this._viewerGatingHandlers.forEach(({ evt, handler }) => document.removeEventListener(evt, handler, true));
+            this._viewerGatingHandlers = null;
+        }
+    }
+
+
+    /* ---------- 2. DATA LAYER ---------- */
+    /* Every function below transparently uses Supabase when configured,
+       otherwise falls back to an in-browser localStorage store so the tool
+       is fully usable for evaluation before credentials are wired in.
+       "types" and each zone's end date always use localStorage, Supabase or
+       not, since {PROJECT_KEY}dropdownoptions has no columns for them. */
+
+    loadLocalStore() {
+        try {
+            const raw = localStorage.getItem(LOCAL_KEY);
+            if (raw) return JSON.parse(raw);
+        } catch (e) {}
+        return null;
+    }
+    saveLocalStore() {
+        try { localStorage.setItem(LOCAL_KEY, JSON.stringify(this.DATA)); } catch (e) {}
+    }
+    loadLocalTypes() {
+        try {
+            const raw = localStorage.getItem(TYPES_LOCAL_KEY);
+            if (raw) return JSON.parse(raw);
+        } catch (e) {}
+        return null;
+    }
+    saveLocalTypes(list) {
+        try { localStorage.setItem(TYPES_LOCAL_KEY, JSON.stringify(list)); } catch (e) {}
+    }
+    loadZoneEndDates() {
+        try {
+            const raw = localStorage.getItem(ZONE_ENDDATE_KEY);
+            if (raw) return JSON.parse(raw);
+        } catch (e) {}
+        return {};
+    }
+    saveZoneEndDates(map) {
+        try { localStorage.setItem(ZONE_ENDDATE_KEY, JSON.stringify(map)); } catch (e) {}
+    }
+    getZoneEndDate(zoneName) { return this.ZONE_END_DATES[zoneName] || null; }
+    setZoneEndDate(zoneName, dateStr) {
+        if (dateStr) this.ZONE_END_DATES[zoneName] = dateStr; else delete this.ZONE_END_DATES[zoneName];
+        this.saveZoneEndDates(this.ZONE_END_DATES);
+    }
+
+
+
+
+
+    /* ---------- 3. GLOBAL STATE (now instance fields — see constructor) ---------- */
+    loadActivityColors() {
+        try {
+            const raw = localStorage.getItem(ACTIVITY_COLORS_KEY);
+            if (raw) return JSON.parse(raw);
+        } catch (e) {}
+        return {};
+    }
+    saveActivityColorsMap(map) {
+        try { localStorage.setItem(ACTIVITY_COLORS_KEY, JSON.stringify(map)); } catch (e) {}
+    }
+    activityColor(activityName) {
+        if (!activityName) return '#757575';
+        if (this.ACTIVITY_COLORS[activityName]) return this.ACTIVITY_COLORS[activityName];
+        const usedCount = Object.keys(this.ACTIVITY_COLORS).length;
+        const color = ACTIVITY_COLOR_PALETTE[usedCount % ACTIVITY_COLOR_PALETTE.length];
+        this.ACTIVITY_COLORS[activityName] = color;
+        this.saveActivityColorsMap(this.ACTIVITY_COLORS);
+        return color;
+    }
+    setActivityColor(activityName, color) {
+        this.ACTIVITY_COLORS[activityName] = color;
+        this.saveActivityColorsMap(this.ACTIVITY_COLORS);
+    }
+
+    seedDemoData() {
+        if (this.DATA_STORE.zones && this.DATA_STORE.zones.length) return; // already seeded
+        const today0 = new Date(); today0.setHours(0, 0, 0, 0);
+        const zoneEndDaysOut = [14, 18, 21, 25]; // demo target end dates, days from today
+        const zones = ['Zone A', 'Zone B', 'Zone C', 'Zone D'].map(n => ({ id: uid(), name: n, created_at: new Date().toISOString() }));
+        zones.forEach((z, i) => {
+            const d = new Date(today0); d.setDate(d.getDate() + zoneEndDaysOut[i]);
+            this.setZoneEndDate(z.name, d.toISOString().slice(0, 10));
+        });
+        const areas = ['Level 1', 'Level 2', 'Roof', 'Yard'].map(n => ({ id: uid(), name: n, created_at: new Date().toISOString() }));
+        const contractors = ['Apex Mechanical', 'Volt Electric', 'FlowRight Plumbing'].map(n => ({ id: uid(), name: n, created_at: new Date().toISOString() }));
+        const assets = ['AHU-101', 'Pump-201', 'Panel-A1', 'Chiller-01', 'Duct Run 3', 'Switchgear-2'].map(n => ({ id: uid(), name: n, created_at: new Date().toISOString() }));
+        const activities = ['Set Equipment', 'Rough-In Piping', 'Pull Wire', 'Terminate & Test', 'Insulate', 'Commission'].map(n => ({ id: uid(), name: n, created_at: new Date().toISOString() }));
+        const types = DEFAULT_TYPE_COLORS.map(t => ({ ...t, created_at: new Date().toISOString() }));
+        this.saveLocalTypes(types);
+
+        const today = new Date(); today.setHours(7, 0, 0, 0);
+        const items = [];
+        for (let i = 0; i < 10; i++) {
+            const start = new Date(today);
+            start.setDate(start.getDate() + Math.floor(i / 2));
+            start.setHours(7 + (i % 2) * 5, 0, 0, 0);
+            const t = types[i % types.length];
+            items.push({
+                id: uid(),
+                asset_id: assets[i % assets.length].id,
+                asset_name: assets[i % assets.length].name,
+                activity_id: activities[i % activities.length].id,
+                activity_name: activities[i % activities.length].name,
+                contractor_id: contractors[i % contractors.length].id,
+                contractor_name: contractors[i % contractors.length].name,
+                type: t.name,
+                zone: zones[i % zones.length].name,
+                area: areas[i % areas.length].name,
+                asset_type: 'Equipment',
+                start_ts: start.toISOString(),
+                duration_hours: [3, 4, 6, 8][i % 4],
+                notes: '',
+                predecessor_ids: [],
+                created_at: new Date().toISOString()
+            });
+        }
+        // demo dependency chain: item 0 -> item 2 -> item 4, so the sync/flow
+        // features have something to show out of the box
+        if (items[2]) items[2].predecessor_ids = [items[0].id];
+        if (items[4]) items[4].predecessor_ids = [items[2].id];
+
+        this.DATA_STORE = { items, assets, activities, contractors, zones, areas };
+        this.saveLocalStore();
+    }
+
+    /* ---------- 4. INIT ---------- */
+    async initApp() {
+        if (!this._supabase) {
+            this.seedDemoData();
+            this.$('projectSubtitle').textContent = 'Demo mode (local storage) — add Supabase URL/key in the script to go live';
+        } else {
+            this.$('projectSubtitle').textContent = 'Connected to Supabase';
+        }
+        await this.reloadAllData();
+        await this.fetchAssetLookupMaps();
+        this.initTimelineRangeInputs();
+        this.buildTypePicker('itemTypePicker');
+        this.buildTypePicker('bulkTypePicker');
+        this.populateSelect('itemZone', this.DATA.zones.map(z => z.name), true);
+        this.populateSelect('itemArea', this.DATA.areas.map(a => a.name), true);
+        this.populateSelect('itemAssetType', [...new Set(this.DATA.items.map(i => i.asset_type).filter(Boolean))], true);
+        this.populateSelect('bulkZone', this.DATA.zones.map(z => z.name), false);
+        this.renderFilterBar();
+        this.renderLegend();
+        this.renderGantt();
+        const existingSheetId = localStorage.getItem('pullplan_gsheet_id');
+        if (existingSheetId) {
+            const link = this.$('openSheetLink');
+            link.href = `https://docs.google.com/spreadsheets/d/${existingSheetId}/edit`;
+            link.style.display = 'inline';
+        }
+        this.updateLaunchPadSyncBtn();
+        this.setSaveIndicator('ready', 'Ready');
+        if (this._supabase) {
+            this.pullFromLaunchPad().catch(err => console.error('Background LaunchPad pull failed', err));
+            this.refreshAllStatuses().catch(err => console.error('Background status refresh failed', err));
+        }
+    }
+
+    // Mirrors LaunchPad's own assetToPlaceMap approach exactly: fetch every
+    // row of {PROJECT_KEY}dropdownoptions and, wherever an Asset and a Zone/Place
+    // appear together on the same row, remember that pairing — so picking an
+    // Asset elsewhere in the app can auto-fill its Zone/Area the same way
+    // LaunchPad does, instead of asking the user to pick them separately.
+    async fetchAssetLookupMaps() {
+        if (!this._supabase) { this.ASSET_TO_ZONE_MAP = {}; this.ASSET_TO_AREA_MAP = {}; return; }
+        const { data, error } = await this._supabase
+            .from(this.TABLES.dropdowns)
+            .select('Assets, Zone, Places')
+            .range(0, 1000);
+        if (error) { console.error('Asset lookup fetch failed', error); return; }
+        const zoneMap = {}, areaMap = {};
+        (data || []).forEach(row => {
+            const asset = row.Assets?.toString().trim();
+            const zone = row.Zone?.toString().trim();
+            const place = row.Places?.toString().trim();
+            if (asset && zone) zoneMap[asset] = zone;
+            if (asset && place) areaMap[asset] = place;
+        });
+        this.ASSET_TO_ZONE_MAP = zoneMap;
+        this.ASSET_TO_AREA_MAP = areaMap;
+    }
+
+    async reloadAllData() {
+        const [items, assets, activities, contractors, zones, areas, types] = await Promise.all([
+            this.DB.fetchAll(this.TABLES.items), this.DB.fetchAll(this.TABLES.assets), this.DB.fetchAll(this.TABLES.activities),
+            this.DB.fetchAll(this.TABLES.contractors), this.DB.fetchAll(this.TABLES.zones), this.DB.fetchAll(this.TABLES.areas), this.DB.fetchAll(this.TABLES.types)
+        ]);
+        // Supabase/PostgREST often serializes `numeric` columns as strings (to
+        // avoid float precision loss), which would silently turn every
+        // duration calculation into string concatenation instead of math.
+        // Coerce once here so every consumer downstream gets a real number.
+        items.forEach(it => {
+            it.duration_hours = parseFloat(it.duration_hours) || 4;
+            if (typeof it.predecessor_ids === 'string') {
+                try { it.predecessor_ids = JSON.parse(it.predecessor_ids); } catch (e) { it.predecessor_ids = []; }
+            }
+            if (!Array.isArray(it.predecessor_ids)) it.predecessor_ids = [];
+        });
+        this.DATA.items = items; this.DATA.assets = assets; this.DATA.activities = activities;
+        this.DATA.contractors = contractors; this.DATA.zones = zones; this.DATA.areas = areas;
+        this.DATA.types = types.length ? types : DEFAULT_TYPE_COLORS;
+    }
+
+    computeTimelineStart() {
+        const base = new Date();
+        base.setHours(0, 0, 0, 0);
+        return base;
+    }
+
+    // Timeline range — set explicitly via the start/end date bar at the
+    // bottom of the page instead of scrolling/jumping. "Use last activity"
+    // for the end date keeps it pinned to whatever the latest scheduled item
+    // currently is, updating automatically as the schedule changes.
+    latestActivityDate() {
+        let latest = null;
+        this.DATA.items.forEach(it => {
+            const end = new Date(new Date(it.start_ts).getTime() + it.duration_hours * 3600000);
+            if (!latest || end > latest) latest = end;
+        });
+        return latest;
+    }
+    applyTimelineRange() {
+        const startInput = this.$('rangeStartInput');
+        const endInput = this.$('rangeEndInput');
+        const useLast = this.$('useLastActivityEnd').checked;
+        endInput.disabled = useLast;
+        if (useLast) {
+            const latest = this.latestActivityDate();
+            if (latest) endInput.value = latest.toISOString().slice(0, 10);
+        }
+        const startVal = startInput.value, endVal = endInput.value;
+        if (!startVal || !endVal) return;
+        const start = new Date(startVal + 'T00:00');
+        const end = new Date(endVal + 'T00:00');
+        const days = Math.max(1, Math.round((end - start) / 86400000) + 1);
+        this.TIMELINE_START = start;
+        this.TIMELINE_DAYS = days;
+        this.renderGantt();
+    }
+    initTimelineRangeInputs() {
+        const start = this.computeTimelineStart();
+        const useLast = this.$('useLastActivityEnd');
+        const latest = this.latestActivityDate();
+        const end = latest ? new Date(latest) : new Date(start.getTime() + 41 * 86400000);
+        this.$('rangeStartInput').value = start.toISOString().slice(0, 10);
+        this.$('rangeEndInput').value = end.toISOString().slice(0, 10);
+        useLast.checked = !!latest;
+        this.$('rangeEndInput').disabled = !!latest;
+        this.applyTimelineRange();
+    }
+
+    /* ---- small UI helpers ---- */
+    setSaveIndicator(state, text) {
+        const el = this.$('saveIndicator');
+        el.textContent = text;
+        el.className = state === 'error' ? 'error' : (state === 'dirty' ? 'dirty' : '');
+    }
+    toast(msg, ms = 2600) {
+        const t = this.$('toast');
+        t.textContent = msg;
+        t.style.display = 'block';
+        clearTimeout(this._toastTimer);
+        this._toastTimer = setTimeout(() => t.style.display = 'none', ms);
+    }
+    openModal(id) { this.$(id).classList.add('open'); }
+    closeModal(id) { this.$(id).classList.remove('open'); }
+    switchTab(group, name) {
+        this.$$(`#${group === 'bulkTab' ? 'bulkModal' : (group === 'listsTab' ? 'listsModal' : '')} .tab-btn`).forEach(b => b.classList.remove('active'));
+        event.target.classList.add('active');
+        this.$$(`[id^="${group}-"]`).forEach(p => p.classList.remove('active'));
+        this.$(`${group}-${name}`).classList.add('active');
+        if (group === 'listsTab') this.renderListsManager();
+    }
+    populateSelect(id, values, allowBlank) {
+        const sel = this.$(id);
+        if (!sel) return;
+        const prev = sel.value;
+        sel.innerHTML = (allowBlank ? '<option value="">—</option>' : '') + values.map(v => `<option value="${escAttr(v)}">${escHtml(v)}</option>`).join('');
+        if (values.includes(prev)) sel.value = prev;
+    }
+
+
+    toggleMenu(id, ev) {
+        ev.stopPropagation();
+        const dd = this.$(id);
+        const wasOpen = dd.classList.contains('open');
+        this.closeAllMenus();
+        if (!wasOpen) dd.classList.add('open');
+    }
+    closeAllMenus() {
+        this.$$('.menu-dropdown.open').forEach(d => d.classList.remove('open'));
+    }
+
+
+
+    /* =========================================================================
+       5. FILTER BAR — drill-down faceted filtering
+       Selecting a value in one facet narrows the available options in the
+       others (classic faceted / drill-down search pattern).
+       ========================================================================= */
+
+    itemMatchesFilters(item, exceptKey) {
+        for (const def of FILTER_DEFS) {
+            if (def.key === exceptKey) continue;
+            const set = this.FILTERS[def.key];
+            if (set.size === 0) continue;
+            if (!set.has(item[def.field])) return false;
+        }
+        return true;
+    }
+
+    passesGlobalSearch(item) {
+        const q = (this.$('globalSearch')?.value || '').trim().toLowerCase();
+        if (!q) return true;
+        const hay = [item.asset_name, item.activity_name, item.contractor_name, item.zone, item.area, item.type, item.notes].join(' ').toLowerCase();
+        return hay.includes(q);
+    }
+
+    passesCriticalPathFilter(item) {
+        if (!this.showCriticalPath) return true;
+        if (!this.criticalPathData) return true; // computation unavailable this render — don't hide everything
+        const f = this.criticalPathData.floatById[item.id];
+        return f !== null && f !== undefined && f <= 0.01;
+    }
+
+    getFilteredItems() {
+        return this.DATA.items.filter(it => this.itemMatchesFilters(it, null) && this.passesGlobalSearch(it) && this.passesCriticalPathFilter(it));
+    }
+
+    renderFilterBar() {
+        const bar = this.$('filterToolbar');
+        // remove old chips (keep clear-all button + spacer + search + selects)
+        bar.querySelectorAll('.filter-chip').forEach(c => c.remove());
+        const clearBtn = this.$('clearAllFiltersBtn');
+
+        FILTER_DEFS.forEach(def => {
+            const chip = document.createElement('div');
+            chip.className = 'filter-chip';
+            const activeCount = this.FILTERS[def.key].size;
+            chip.innerHTML = `
+                <button class="filter-chip-btn ${activeCount ? 'active' : ''}" onclick="this.getRootNode().host.toggleFilterDropdown('${def.key}', event)">
+                    ${def.label} ${activeCount ? `<span class="count-badge">${activeCount}</span>` : '▾'}
+                </button>
+                <div class="filter-dropdown" id="dd-${def.key}"></div>`;
+            bar.insertBefore(chip, clearBtn);
+        });
+        this.renderAllDropdownContents();
+    }
+
+    toggleFilterDropdown(key, ev) {
+        ev.stopPropagation();
+        const dd = this.$(`dd-${key}`);
+        const wasOpen = dd.classList.contains('open');
+        this.$$('.filter-dropdown.open').forEach(d => d.classList.remove('open'));
+        if (!wasOpen) { this.renderDropdownContent(key); dd.classList.add('open'); }
+    }
+
+    renderAllDropdownContents() {
+        FILTER_DEFS.forEach(def => this.renderDropdownContent(def.key));
+    }
+
+    renderDropdownContent(key) {
+        const def = FILTER_DEFS.find(d => d.key === key);
+        const dd = this.$(`dd-${key}`);
+        if (!dd) return;
+
+        // Drill-down: available option set is derived from items that already
+        // match every OTHER active facet (so choosing Area narrows Zone, etc).
+        const candidatePool = this.DATA.items.filter(it => this.itemMatchesFilters(it, key));
+        const counts = {};
+        candidatePool.forEach(it => {
+            const v = it[def.field];
+            if (!v) return;
+            counts[v] = (counts[v] || 0) + 1;
+        });
+        // also include values that exist in the master list even if 0 in current pool, greyed out
+        let allValues = [];
+        if (key === 'type') allValues = this.DATA.types.map(t => t.name);
+        else if (key === 'zone') allValues = this.DATA.zones.map(z => z.name);
+        else if (key === 'area') allValues = this.DATA.areas.map(a => a.name);
+        else if (key === 'activity') allValues = this.DATA.activities.map(a => a.name);
+        else if (key === 'asset_type') allValues = [...new Set(this.DATA.items.map(i => i.asset_type).filter(Boolean))];
+        allValues = [...new Set([...allValues, ...Object.keys(counts)])].sort();
+
+        const searchId = `ddsearch-${key}`;
+        dd.innerHTML = `
+            <input class="search" placeholder="Search ${def.label.toLowerCase()}..." id="${searchId}" oninput="this.getRootNode().host.filterDropdownOptions('${key}', this.value)">
+            <div id="ddopts-${key}"></div>`;
+        this.renderDropdownOptions(key, allValues, counts);
+    }
+
+    renderDropdownOptions(key, allValues, counts) {
+        const holder = this.$(`ddopts-${key}`);
+        if (!holder) return;
+        holder.innerHTML = allValues.map(v => {
+            const c = counts[v] || 0;
+            const checked = this.FILTERS[key].has(v);
+            const disabled = c === 0 && !checked ? 'disabled' : '';
+            const swatch = key === 'activity' ? `<span class="swatch" style="background:${this.activityColor(v)}"></span>` : '';
+            return `<label class="filter-option ${disabled}">
+                <input type="checkbox" ${checked ? 'checked' : ''} onchange="this.getRootNode().host.toggleFilterValue('${key}','${escAttr(v).replace(/'/g, "\\'")}')">
+                ${swatch}<span style="flex:1;">${escHtml(v)}</span><span style="color:#999; font-size:11px;">${c}</span>
+            </label>`;
+        }).join('') || '<div style="padding:10px; color:#999; font-size:12px;">No options</div>';
+    }
+
+    filterDropdownOptions(key, query) {
+        const q = query.toLowerCase();
+        this.$$(`#ddopts-${key} .filter-option`).forEach(opt => {
+            opt.style.display = opt.textContent.toLowerCase().includes(q) ? 'flex' : 'none';
+        });
+    }
+
+    toggleFilterValue(key, value) {
+        if (this.FILTERS[key].has(value)) this.FILTERS[key].delete(value); else this.FILTERS[key].add(value);
+        this.renderFilterBar();
+        // reopen the dropdown that was just used
+        this.$(`dd-${key}`).classList.add('open');
+        this.renderGantt();
+    }
+
+    clearAllFilters() {
+        FILTER_DEFS.forEach(d => this.FILTERS[d.key].clear());
+        this.renderFilterBar();
+        this.renderGantt();
+    }
+
+    /* ---- Type legend + type swatch pickers (used in modals) ---- */
+    renderLegend() {
+        const el = this.$('typeLegend');
+        const activityNames = [...new Set(this.DATA.items.map(i => i.activity_name).filter(Boolean))].sort();
+        el.innerHTML = activityNames.map(name => `<span class="legend-item"><span class="legend-swatch" style="background:${this.activityColor(name)}"></span>${escHtml(name)}</span>`).join('')
+            || '<span style="color:#999; font-size:11.5px;">No activities scheduled yet</span>';
+    }
+
+    buildTypePicker(containerId) {
+        this.populateSelect(containerId, this.DATA.types.map(t => t.name), false);
+    }
+
+    /* =========================================================================
+       6. GANTT — horizontal timeline, grouped swim-lanes, draggable/resizable bars
+       Overlapping items within a row cascade vertically (stacked lanes) so
+       nothing is ever hidden behind another item. Rows can be manually resized
+       or expanded to a dedicated fullscreen view. Dependency links (predecessor
+       -> successor) are drawn as connector lines and enforced so a successor
+       can never sit ahead of its predecessor.
+       ========================================================================= */
+
+    setDayWidth(v) {
+        this.DAY_WIDTH = parseInt(v, 10);
+        this.style.setProperty('--daywidth', this.DAY_WIDTH + 'px');
+        this.renderGantt();
+    }
+
+    dayIndexForDate(d) {
+        const ms = d.setHours ? d - this.TIMELINE_START : new Date(d) - this.TIMELINE_START;
+        return ms / 86400000;
+    }
+    xForItem(item) {
+        return this.dayIndexForDate(new Date(item.start_ts)) * this.DAY_WIDTH;
+    }
+    widthForItem(item) {
+        return Math.max(24, (item.duration_hours / 24) * this.DAY_WIDTH);
+    }
+    itemEndMs(item) {
+        return new Date(item.start_ts).getTime() + item.duration_hours * 3600000;
+    }
+
+    /* At every zoom level except "Wide", activities fill the entire width of
+       the day they start on — the schedule reads as day-granularity blocks
+       rather than precise hour-slivers. The one exception: if an item shares
+       its calendar day with a linked predecessor/successor in the same lane,
+       the day is split evenly between them instead, so linked same-day work
+       still shows as distinct, side-by-side steps. */
+    isDayBlockMode() {
+        // day-block sizing (full-day-width bars, splitting only for same-day
+        // linked activities) now applies at every zoom level — duration is
+        // edited in days throughout the app, so there's no more "precise
+        // hours" mode to fall back to; "Wide" just means more pixels per day.
+        return true;
+    }
+    displayLeft(item) {
+        return this.isDayBlockMode() ? (item._blockLeft ?? this.xForItem(item)) : this.xForItem(item);
+    }
+    displayWidth(item) {
+        return this.isDayBlockMode() ? (item._blockWidth ?? this.widthForItem(item)) : this.widthForItem(item);
+    }
+    assignDayBlockPositions(items) {
+        const groups = {};
+        items.forEach(it => {
+            const dayIdx = Math.floor(this.dayIndexForDate(new Date(it.start_ts)));
+            const key = it._lane + ':' + dayIdx;
+            (groups[key] = groups[key] || []).push(it);
+        });
+        Object.values(groups).forEach(group => {
+            group.sort((a, b) => new Date(a.start_ts) - new Date(b.start_ts));
+            const dayIdx = Math.floor(this.dayIndexForDate(new Date(group[0].start_ts)));
+            if (group.length === 1) {
+                // no same-day conflict — size the block to its real duration,
+                // spanning as many day-columns as it actually needs instead of
+                // always being forced to exactly one day wide
+                const it = group[0];
+                it._blockLeft = dayIdx * this.DAY_WIDTH;
+                it._blockWidth = Math.max(24, (it.duration_hours / 24) * this.DAY_WIDTH);
+            } else {
+                // multiple activities sharing this one day in this lane split
+                // that day's width between them
+                const slotWidth = this.DAY_WIDTH / group.length;
+                group.forEach((it, idx) => {
+                    it._blockLeft = dayIdx * this.DAY_WIDTH + idx * slotWidth;
+                    it._blockWidth = Math.max(20, slotWidth - 2);
+                });
+            }
+        });
+    }
+
+    groupKeyFor(item, groupBy) {
+        if (groupBy === 'overall') return 'All Activities';
+        if (groupBy === 'contractor') return item.contractor_name || 'Unassigned';
+        return item[groupBy] || 'Unassigned';
+    }
+
+    /* Assign each item a vertical "lane" within its row. Items are processed
+       left to right by start time (required so the "is this lane free yet"
+       check is valid) but an item prefers to continue the lane its predecessor
+       used in this same row — so a connected chain reads as one clean
+       horizontal path instead of zig-zagging, and only falls back to the next
+       free lane when its preferred lane is unavailable or it has no linked
+       predecessor here. */
+    // Rough per-character pixel widths for our item fonts, used to estimate
+    // how many lines an item's asset/activity text will actually wrap to, so
+    // lane spacing can be sized to fit real content instead of guessing at
+    // one fixed height for every item regardless of name length.
+    estimateTextLines(text, widthPx, avgCharPx) {
+        const usable = Math.max(20, widthPx - 16); // minus horizontal padding
+        const charsPerLine = Math.max(4, Math.floor(usable / avgCharPx));
+        return Math.max(1, Math.ceil((text || '').length / charsPerLine));
+    }
+    estimateItemHeight(it, widthPx) {
+        const assetLines = this.estimateTextLines(it.asset_name, widthPx, 6.0);
+        const activityLines = this.estimateTextLines(it.activity_name, widthPx, 5.4);
+        const assetLineH = 10.5 * 1.2, activityLineH = 9.5 * 1.2;
+        return Math.max(36, 8 + assetLines * assetLineH + activityLines * activityLineH);
+    }
+
+    // After _lane (and _blockWidth, if day-block mode) are set on every item,
+    // works out each item's actual pixel _top from the tallest real content
+    // in each lane band — a lane with a long name gets more room without
+    // affecting any other lane's spacing or where connector lines land —
+    // and returns the row's total natural height.
+    computeLaneOffsets(sorted, laneCountHint) {
+        const laneMaxH = {};
+        sorted.forEach(it => {
+            const w = (it._blockWidth !== undefined) ? it._blockWidth : this.widthForItem(it);
+            const h = this.estimateItemHeight(it, w);
+            laneMaxH[it._lane] = Math.max(laneMaxH[it._lane] || 0, h);
+        });
+        const laneCount = laneCountHint || (Object.keys(laneMaxH).length ? Math.max(...Object.keys(laneMaxH).map(Number)) + 1 : 1);
+        const laneTop = {};
+        let cursor = ROW_PAD_TOP;
+        for (let l = 0; l < laneCount; l++) {
+            laneTop[l] = cursor;
+            cursor += (laneMaxH[l] || 36) + ITEM_GAP;
+        }
+        sorted.forEach(it => { it._top = laneTop[it._lane]; });
+        return Math.max(ROW_MIN_H, cursor - ITEM_GAP + ROW_PAD_BOTTOM);
+    }
+
+    // Presentation-only reordering: lanes that contain any today-or-future
+    // item float to the top of the row, and past-only lanes are pushed below
+    // them. The underlying collision-correct lane assignment above is
+    // unchanged — this only remaps which visual slot each lane displays in —
+    // so current work is never buried under a tall stack of space reserved
+    // for older history that's scrolled out of view.
+    floatCurrentLanesToTop(sorted) {
+        const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+        const todayMs = todayStart.getTime();
+        const laneItems = {};
+        sorted.forEach(it => { (laneItems[it._lane] = laneItems[it._lane] || []).push(it); });
+        const laneAllPast = {};
+        Object.keys(laneItems).forEach(l => {
+            laneAllPast[l] = laneItems[l].every(it => new Date(it.start_ts).getTime() < todayMs);
+        });
+        const usedLanes = [...new Set(sorted.map(it => it._lane))].sort((a, b) => a - b);
+        const currentLanes = usedLanes.filter(l => !laneAllPast[l]);
+        const pastLanes = usedLanes.filter(l => laneAllPast[l]);
+        const remap = {};
+        [...currentLanes, ...pastLanes].forEach((oldLane, idx) => { remap[oldLane] = idx; });
+        sorted.forEach(it => { it._lane = remap[it._lane]; });
+    }
+
+    layoutLanes(items) {
+        const sorted = items.slice().sort((a, b) => new Date(a.start_ts) - new Date(b.start_ts));
+
+        if (this.expandedView) {
+            // one activity per line, no packing at all — the clearest possible
+            // view, at the cost of vertical space. Chronological order already
+            // guarantees a predecessor never lands below its successor here.
+            sorted.forEach((it, idx) => { it._lane = idx; });
+            this.floatCurrentLanesToTop(sorted);
+            if (this.isDayBlockMode()) this.assignDayBlockPositions(sorted);
+            const totalHeight = this.computeLaneOffsets(sorted, sorted.length);
+            return { items: sorted, laneCount: Math.max(1, sorted.length), totalHeight };
+        }
+
+        const laneEndTimes = [];
+        const laneOfItem = {};
+        sorted.forEach(it => {
+            const start = new Date(it.start_ts).getTime();
+            const end = start + it.duration_hours * 3600000;
+            // an item can never sit above (a lower-index lane than) a linked
+            // predecessor in this same row — this keeps every chain cascading
+            // strictly downward so connector lines never have to double back
+            // up through other boxes to reach it.
+            let minLane = 0;
+            (it.predecessor_ids || []).forEach(pid => {
+                const lane = laneOfItem[pid];
+                if (lane !== undefined) minLane = Math.max(minLane, lane);
+            });
+            let lane = minLane;
+            while (laneEndTimes[lane] !== undefined && laneEndTimes[lane] > start) lane++;
+            laneEndTimes[lane] = end;
+            it._lane = lane;
+            laneOfItem[it.id] = lane;
+        });
+        this.floatCurrentLanesToTop(sorted);
+        if (this.isDayBlockMode()) this.assignDayBlockPositions(sorted);
+        const laneCount = Math.max(1, laneEndTimes.length);
+        const totalHeight = this.computeLaneOffsets(sorted, laneCount);
+        return { items: sorted, laneCount, totalHeight };
+    }
+
+    buildGanttHeaderHtml(groupBy, rowMinWidth) {
+        const todayStr = new Date().toDateString();
+        let headerHtml = `<div class="gantt-rowlabel-col">${this.labelForGroup(groupBy)}</div>`;
+        for (let i = 0; i < this.TIMELINE_DAYS; i++) {
+            const d = new Date(this.TIMELINE_START); d.setDate(d.getDate() + i);
+            const isWeekend = d.getDay() === 0 || d.getDay() === 6;
+            const isToday = d.toDateString() === todayStr;
+            const isoDate = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+            headerHtml += `<div class="gantt-day ${isWeekend ? 'weekend' : ''} ${isToday ? 'today' : ''}" onclick="this.getRootNode().host.openDayDetail('${isoDate}')" title="Click to see everything scheduled this day">
+                <div class="dow">${d.toLocaleDateString(undefined,{weekday:'short'})}</div>${d.getMonth()+1}/${d.getDate()}</div>`;
+        }
+        return headerHtml;
+    }
+
+    zoneEndMarkerHtml(gname, groupBy, height) {
+        if (groupBy !== 'zone') return '';
+        const endDate = this.getZoneEndDate(gname);
+        if (!endDate) return '';
+        const left = this.dayIndexForDate(new Date(endDate + 'T00:00')) * this.DAY_WIDTH;
+        if (left < 0 || left > this.TIMELINE_DAYS * this.DAY_WIDTH) return '';
+        return `<div class="zone-end-marker" style="left:${left}px; height:${height}px;">
+            <span class="zone-end-flag">Target ${new Date(endDate + 'T00:00').toLocaleDateString(undefined,{month:'numeric',day:'numeric'})}</span>
+        </div>`;
+    }
+
+    buildRowHtml(gname, laidOut, totalWidth, groupBy, opts) {
+        opts = opts || {};
+        const height = opts.forceNatural ? laidOut.totalHeight : (this.rowHeightOverrides[gname] || laidOut.totalHeight);
+        const rowMinWidth = opts.rowMinWidth || (totalWidth + 200);
+        return `<div class="gantt-row" data-group="${escAttr(gname)}" style="height:${height}px; min-width:${rowMinWidth}px;">
+            <div class="gantt-rowlabel" style="height:${height}px;">
+                <span>${escHtml(gname)} <span style="color:#aaa; font-weight:500; margin-left:2px;">(${laidOut.items.length})</span></span>
+                <button class="row-expand-btn" title="Show only this row (filters down to it, same as clicking its filter chip)" onclick="this.getRootNode().host.openRowFullscreen('${gname.replace(/'/g, "\\'")}')">⛶</button>
+                ${!opts.noResize ? `<div class="row-resize-handle" data-group="${escAttr(gname)}" title="Drag to resize"></div>` : ''}
+            </div>
+            <div class="gantt-track" style="width:${totalWidth}px; height:${height}px;">
+                <div class="gantt-gridlines" style="height:${height}px;">${this.gridlinesHtml()}</div>
+                ${this.zoneEndMarkerHtml(gname, groupBy, height)}
+                ${laidOut.items.map(it => this.itemBarHtml(it)).join('')}
+            </div>
+        </div>`;
+    }
+
+    // PERF FIX: debounce the search-driven re-render — this.renderGantt() rebuilds the
+    // header, every group's rows, and re-attaches drag/resize/link handlers, so
+    // running it on every keystroke while typing a search term is expensive.
+    // Waiting 220ms after typing pauses collapses that into a single render.
+    debouncedRenderGantt() {
+        clearTimeout(this.__ganttSearchDebounceTimer);
+        this.__ganttSearchDebounceTimer = setTimeout(() => this.renderGantt(), 220);
+    }
+
+    renderGantt() {
+        this.style.setProperty('--daywidth', this.DAY_WIDTH + 'px');
+        const groupBy = this.$('groupBySelect').value;
+        const totalWidth = this.TIMELINE_DAYS * this.DAY_WIDTH;
+        const wrapClientWidth = this.$('ganttWrap').clientWidth || 0;
+        const rowMinWidth = Math.max(totalWidth + 200, wrapClientWidth);
+
+        try {
+            this.criticalPathData = this.computeCriticalPath();
+        } catch (err) {
+            console.error('computeCriticalPath failed — critical path disabled for this render', err);
+            this.criticalPathData = null;
+        }
+
+        const items = this.getFilteredItems();
+
+        try {
+            this.focusChainSet = this.connectionFocusId ? this.getConnectedComponent(this.connectionFocusId) : null;
+        } catch (err) {
+            console.error('getConnectedComponent failed — focus/dim disabled for this render', err);
+            this.focusChainSet = null;
+        }
+
+        const headerEl = this.$('ganttHeader');
+        headerEl.innerHTML = this.buildGanttHeaderHtml(groupBy);
+        headerEl.style.minWidth = rowMinWidth + 'px';
+        this.renderLegend();
+
+        const bodyEl = this.$('ganttBody');
+        if (items.length === 0) {
+            bodyEl.innerHTML = this.showCriticalPath
+                ? `<div class="empty-state"><div class="emoji">🔥</div>No activities are on the critical path from today forward.<br>Turn off <strong>Critical Path</strong> to see the full schedule.</div>`
+                : `<div class="empty-state"><div class="emoji">🗓️</div>No schedule items match the current filters.<br>Use <strong>New Item</strong> or <strong>Bulk Add</strong> to get started.</div>`;
+            this.LAST_GROUPS = {}; this.LAST_GROUPBY = groupBy;
+            return;
+        }
+        const groups = {};
+        items.forEach(it => {
+            const k = this.groupKeyFor(it, groupBy);
+            (groups[k] = groups[k] || []).push(it);
+        });
+        this.LAST_GROUPS = groups; this.LAST_GROUPBY = groupBy;
+
+        const groupNames = Object.keys(groups).sort();
+
+        try {
+            let bodyHtml = '';
+            groupNames.forEach(gname => {
+                const laidOut = this.layoutLanes(groups[gname]);
+                bodyHtml += this.buildRowHtml(gname, laidOut, totalWidth, groupBy, { rowMinWidth });
+            });
+            bodyEl.innerHTML = bodyHtml;
+        } catch (err) {
+            console.error('renderGantt failed while building rows', err);
+            bodyEl.innerHTML = `<div class="empty-state"><div class="emoji">⚠️</div>Something went wrong drawing the schedule — see the browser console for details.</div>`;
+            return;
+        }
+
+        this.attachDragHandlers(bodyEl);
+        this.attachRowResizeHandlers(bodyEl);
+        this.attachLinkHandlers(bodyEl);
+        // wait for the browser to finish laying out this frame (item boxes can
+        // now grow taller than the grid assumes to fit wrapped text) before
+        // measuring positions for the connector lines, so they never end up
+        // drawn against stale/pre-reflow coordinates
+        requestAnimationFrame(() => this.renderConnections());
+        // defensive re-measure: clientWidth taken synchronously above can race
+        // with flex layout settling (particularly right after load), leaving
+        // rows sized to their own content instead of the full viewport — widen
+        // them again here once layout has actually committed, if needed
+        requestAnimationFrame(() => {
+            const freshWrapWidth = this.$('ganttWrap').clientWidth || 0;
+            const correctedWidth = Math.max(totalWidth + 200, freshWrapWidth);
+            if (correctedWidth > rowMinWidth) {
+                headerEl.style.minWidth = correctedWidth + 'px';
+                bodyEl.querySelectorAll('.gantt-row').forEach(r => { r.style.minWidth = correctedWidth + 'px'; });
+            }
+        });
+    }
+
+    /* ---- Fullscreen single-row view: always shows the row at its natural
+       full height (every item visible, no manual shrink) at a larger scale. ---- */
+    openRowFullscreen(gname) {
+        const groupBy = this.$('groupBySelect').value;
+        if (groupBy === 'overall') { this.toast('Already showing everything — switch to another grouping to filter down to one space.'); return; }
+        if (this.FILTERS[groupBy]) {
+            this.FILTERS[groupBy].clear();
+            this.FILTERS[groupBy].add(gname);
+        } else {
+            // groupings with no dedicated facet (e.g. Contractor) — approximate
+            // with the search box instead
+            this.$('globalSearch').value = gname;
+        }
+        this.renderFilterBar();
+        this.renderGantt();
+        this.toast(`Showing only "${gname}" — click "Clear filters" to see everything again.`, 3500);
+    }
+    /* ---- Manual row resize (drag the strip at the bottom edge of a row) ---- */
+    attachRowResizeHandlers(root) {
+        root.querySelectorAll('.row-resize-handle').forEach(handle => {
+            handle.addEventListener('pointerdown', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                const gname = handle.dataset.group;
+                const row = handle.closest('.gantt-row');
+                const startY = e.clientY;
+                const startHeight = row.getBoundingClientRect().height;
+                handle.classList.add('active');
+                function onMove(ev) {
+                    const h = Math.max(40, Math.round(startHeight + (ev.clientY - startY)));
+                    row.style.height = h + 'px';
+                    row.querySelector('.gantt-rowlabel').style.height = h + 'px';
+                    row.querySelector('.gantt-track').style.height = h + 'px';
+                    row.querySelector('.gantt-gridlines').style.height = h + 'px';
+                    this.renderConnections();
+                }
+                function onUp(ev) {
+                    window.removeEventListener('pointermove', onMove);
+                    window.removeEventListener('pointerup', onUp);
+                    handle.classList.remove('active');
+                    const h = Math.max(40, Math.round(startHeight + (ev.clientY - startY)));
+                    this.rowHeightOverrides[gname] = h;
+                    this.renderConnections();
+                }
+                window.addEventListener('pointermove', onMove);
+                window.addEventListener('pointerup', onUp);
+            });
+            handle.addEventListener('dblclick', () => {
+                delete this.rowHeightOverrides[handle.dataset.group];
+                this.renderGantt();
+            });
+        });
+    }
+
+    labelForGroup(g) {
+        return { overall: 'All Activities', zone: 'Zone', area: 'Area', asset_type: 'Asset Type', contractor: 'Contractor', type: 'Type' }[g] || 'Group';
+    }
+
+    gridlinesHtml() {
+        const todayStr = new Date().toDateString();
+        let html = '';
+        for (let i = 0; i < this.TIMELINE_DAYS; i++) {
+            const d = new Date(this.TIMELINE_START); d.setDate(d.getDate() + i);
+            const isWeekend = d.getDay() === 0 || d.getDay() === 6;
+            const isToday = d.toDateString() === todayStr;
+            html += `<div class="gantt-gridline ${isWeekend ? 'weekend' : ''} ${isToday ? 'today' : ''}"></div>`;
+        }
+        return html;
+    }
+
+    zoneEndDateMs(zoneName) {
+        const endDate = this.getZoneEndDate(zoneName);
+        if (!endDate) return null;
+        const d = new Date(endDate + 'T23:59:59');
+        return d.getTime();
+    }
+
+    itemBarHtml(it) {
+        const left = this.displayLeft(it);
+        const width = this.displayWidth(it);
+        const top = it._top !== undefined ? it._top : ROW_PAD_TOP;
+        const color = this.activityColor(it.activity_name);
+        const deadline = this.zoneEndDateMs(it.zone);
+        const overdue = deadline !== null && this.itemEndMs(it) > deadline;
+        const resizable = !this.isDayBlockMode();
+        const focused = this.connectionFocusId === it.id;
+        const dimmed = this.focusChainSet && !this.focusChainSet.has(it.id);
+        const critical = this.showCriticalPath && this.isCriticalItem(it.id);
+        const multiselected = this.multiSelectedIds.has(it.id);
+        const floatVal = this.criticalPathData ? this.criticalPathData.floatById[it.id] : null;
+        const floatTitle = floatVal !== null && floatVal !== undefined ? ` — float ${hoursToDays(floatVal)}d${floatVal <= 0.01 ? ' (critical path)' : ''}` : '';
+        const launchpadLinked = !!it.launchpad_id;
+        const notReady = this.isStatusNotReady(it.asset_name, it.activity_name);
+        return `<div class="gantt-item ${overdue ? 'overdue' : ''} ${focused ? 'focused' : ''} ${dimmed ? 'dimmed' : ''} ${critical ? 'critical' : ''} ${multiselected ? 'multiselected' : ''} ${notReady ? 'not-ready' : ''}" data-id="${it.id}" style="left:${left}px; width:${width}px; top:${top}px; background:${color};" title="${escAttr(it.asset_name)} — ${escAttr(it.activity_name)}${overdue ? ' (past zone target end date)' : ''}${floatTitle}${launchpadLinked ? ' — linked to LaunchPad' : ''}${notReady ? ' — NOT READY (status open/incomplete)' : ''}">
+            ${resizable ? `<div class="resize-handle left" data-id="${it.id}" data-edge="left"></div>` : ''}
+            ${launchpadLinked ? `<span class="launchpad-badge" title="Linked to a LaunchPad row">📡</span>` : ''}
+            <span class="gi-asset">${escHtml(it.asset_name)}</span>
+            <span class="gi-activity">${escHtml(it.activity_name)}</span>
+            ${resizable ? `<div class="resize-handle" data-id="${it.id}" data-edge="right"></div>` : ''}
+            <div class="link-handle" data-id="${it.id}" title="Drag to link a successor activity"></div>
+        </div>`;
+    }
+
+    /* =========================================================================
+       6b. DEPENDENCY LINKS — drag-to-connect, rendered connectors, and the
+       "can't start before its predecessor finishes" enforcement cascade.
+       ========================================================================= */
+
+    /* Auto-scrolls #ganttWrap while a drag (item move/resize, or a
+       connector-link drag) holds the pointer near its edge, so dragging an
+       item or a link past what's currently visible brings more of the
+       timeline into view instead of stopping dead at the viewport edge. */
+    updateAutoScroll(clientX, clientY, opts, onTick) {
+        opts = opts || {};
+        const wrap = this.$('ganttWrap');
+        const rect = wrap.getBoundingClientRect();
+        const EDGE = 60, SPEED = 16;
+        let dx = 0, dy = 0;
+        if (opts.horizontal !== false) {
+            if (clientX < rect.left + EDGE) dx = -SPEED * (1 - Math.max(0, clientX - rect.left) / EDGE);
+            else if (clientX > rect.right - EDGE) dx = SPEED * (1 - Math.max(0, rect.right - clientX) / EDGE);
+        }
+        if (opts.vertical !== false) {
+            if (clientY < rect.top + EDGE) dy = -SPEED * (1 - Math.max(0, clientY - rect.top) / EDGE);
+            else if (clientY > rect.bottom - EDGE) dy = SPEED * (1 - Math.max(0, rect.bottom - clientY) / EDGE);
+        }
+        this.autoScrollState = (dx || dy) ? { dx, dy } : null;
+        if (this.autoScrollState && !this.autoScrollRAF) {
+            const step = () => {
+                if (!this.autoScrollState) { this.autoScrollRAF = null; return; }
+                wrap.scrollLeft += this.autoScrollState.dx;
+                wrap.scrollTop += this.autoScrollState.dy;
+                if (onTick) onTick();
+                this.autoScrollRAF = requestAnimationFrame(step);
+            };
+            this.autoScrollRAF = requestAnimationFrame(step);
+        } else if (!this.autoScrollState && this.autoScrollRAF) {
+            cancelAnimationFrame(this.autoScrollRAF);
+            this.autoScrollRAF = null;
+        }
+    }
+    stopAutoScroll() {
+        this.autoScrollState = null;
+        if (this.autoScrollRAF) { cancelAnimationFrame(this.autoScrollRAF); this.autoScrollRAF = null; }
+    }
+
+    attachLinkHandlers(root) {
+        root.querySelectorAll('.link-handle').forEach(handle => {
+            handle.addEventListener('pointerdown', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                const sourceId = handle.dataset.id;
+                const svg = this.$('connectionsSvg');
+                const bodyEl = this.$('ganttBody');
+                const bodyRect = bodyEl.getBoundingClientRect();
+                const startRect = handle.getBoundingClientRect();
+                const x1 = startRect.left + startRect.width / 2 - bodyRect.left;
+                const y1 = startRect.top + startRect.height / 2 - bodyRect.top;
+                this.linkDragCtx = { sourceId, x1, y1 };
+
+                let tempPath = svg.querySelector('.conn-temp');
+                if (!tempPath) {
+                    tempPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                    tempPath.setAttribute('class', 'conn-temp');
+                    svg.appendChild(tempPath);
+                }
+                function onMove(ev) {
+                    this.updateAutoScroll(ev.clientX, ev.clientY, { horizontal: true, vertical: true }, () => onMove(ev));
+                    // re-measure fresh each time — bodyEl's position relative to
+                    // the viewport shifts as #ganttWrap auto-scrolls, so a
+                    // cached rect from drag-start would drift out of sync
+                    const freshBodyRect = bodyEl.getBoundingClientRect();
+                    const x2 = ev.clientX - freshBodyRect.left;
+                    const y2 = ev.clientY - freshBodyRect.top;
+                    tempPath.setAttribute('d', `M${x1},${y1} L${x2},${y2}`);
+                }
+                function onUp(ev) {
+                    window.removeEventListener('pointermove', onMove);
+                    window.removeEventListener('pointerup', onUp);
+                    this.stopAutoScroll();
+                    tempPath.remove();
+                    const targetEl = document.elementFromPoint(ev.clientX, ev.clientY);
+                    const targetItemEl = targetEl && targetEl.closest ? targetEl.closest('.gantt-item') : null;
+                    if (targetItemEl && targetItemEl.dataset.id !== sourceId) {
+                        this.addPredecessorLink(targetItemEl.dataset.id, sourceId);
+                    }
+                    this.linkDragCtx = null;
+                }
+                window.addEventListener('pointermove', onMove);
+                window.addEventListener('pointerup', onUp);
+            });
+        });
+    }
+
+    /* Two routing styles, matching how a hand-drawn pull-plan flow reads:
+       - Same lane (a chain simply continuing): a short direct line from the
+         predecessor's right edge into the successor's left edge.
+       - Different lane (branching to/from another row of work): a short
+         vertical "drop" straight out of the predecessor's own bottom edge
+         (always inside that box's own width, so the line is never visually
+         disconnected from it), then a horizontal jog over to a shared
+         vertical "trunk" column chosen to dodge other boxes, then down/up
+         and right into the successor's left edge — the same tree shape a
+         hand-drawn logic diagram uses. */
+    sameLaneConnectorPath(x1, y1, x2, y2) {
+        if (Math.abs(y1 - y2) < 1) return `M${x1},${y1} L${x2},${y2}`;
+        const midX = Math.max(x1, Math.min((x1 + x2) / 2, x2));
+        return `M${x1},${y1} L${midX},${y1} L${midX},${y2} L${x2},${y2}`;
+    }
+    branchConnectorPath(predLeftX, predRightX, predBottomY, trunkX, succLeftX, succMidY) {
+        // the drop point is always clamped inside the predecessor's own footprint
+        const dropX = Math.max(predLeftX + 4, Math.min(predLeftX + 10, predRightX - 4));
+        const clearY = predBottomY + 8; // small clearance below the box before jogging sideways
+        return `M${dropX},${predBottomY} L${dropX},${clearY} L${trunkX},${clearY} L${trunkX},${succMidY} L${succLeftX},${succMidY}`;
+    }
+
+    /* Find a trunk x-position that doesn't cut through any other item box
+       between the predecessor and the successor — sweeping right past
+       whatever it hits, on both the vertical run and the final horizontal
+       run into the successor. This column is independent of where the line
+       actually touches the predecessor, so obstacle avoidance never has to
+       compromise that attachment point. */
+    pickTrunkX(startX, topY, succLeftX, succMidY, obstacles) {
+        let x = startX;
+        let moved = true, guard = 0;
+        while (moved && guard < 40) {
+            moved = false; guard++;
+            for (const r of obstacles) {
+                const crossesVertical = x >= r.left - 1 && x <= r.right + 1 && r.top < succMidY && r.bottom > topY;
+                const crossesHorizontal = succMidY >= r.top - 1 && succMidY <= r.bottom + 1 && r.right > Math.min(x, succLeftX) && r.left < Math.max(x, succLeftX);
+                if (crossesVertical || crossesHorizontal) {
+                    const pushed = r.right + 10;
+                    if (pushed > x) { x = pushed; moved = true; }
+                }
+            }
+        }
+        return Math.min(x, succLeftX - 4);
+    }
+
+    /* All items reachable from a starting item by walking predecessor AND
+       successor edges in either direction — i.e. its whole logical chain,
+       not just direct neighbors. Used to grey out everything else when an
+       item is focused and "Show all connections" is off. */
+    getConnectedComponent(itemId) {
+        // PERF FIX: build lookup maps once (O(n)) up front instead of doing a
+        // this.DATA.items.find()/filter() full-array scan for every node visited in
+        // the BFS below — that pattern made this function O(n^2) on large
+        // schedules, and it re-runs on every render while a connection focus
+        // is active (including every keystroke if the user is also searching).
+        const byId = new Map();
+        const successorsOf = new Map();
+        this.DATA.items.forEach(i => {
+            byId.set(i.id, i);
+            successorsOf.set(i.id, []);
+        });
+        this.DATA.items.forEach(i => {
+            (i.predecessor_ids || []).forEach(pid => {
+                if (successorsOf.has(pid)) successorsOf.get(pid).push(i.id);
+            });
+        });
+
+        const visited = new Set([itemId]);
+        const queue = [itemId];
+        while (queue.length) {
+            const id = queue.shift();
+            const item = byId.get(id);
+            (item?.predecessor_ids || []).forEach(pid => { if (!visited.has(pid)) { visited.add(pid); queue.push(pid); } });
+            (successorsOf.get(id) || []).forEach(sid => { if (!visited.has(sid)) { visited.add(sid); queue.push(sid); } });
+        }
+        return visited;
+    }
+
+    /* =========================================================================
+       CRITICAL PATH (CPM) — standard forward/backward pass over the
+       predecessor/successor graph, using each activity's duration. This
+       answers "if every chain started as early as its dependencies allow,
+       which activities have zero slack (float) before they'd delay the
+       chain they belong to?" — computed per independent chain, since
+       unrelated chains shouldn't affect each other's float. Items with no
+       links at all (not part of any chain) are left out entirely; a lone
+       activity isn't meaningfully "critical."
+       ========================================================================= */
+    computeCriticalPath() {
+        const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+        const todayStartMs = todayStart.getTime();
+        // past activities are excluded from the analysis entirely (as if they
+        // don't exist) — a chain that passes through a completed activity
+        // just resumes fresh from its first current/future step, using that
+        // step's own scheduled start rather than inheriting timing from work
+        // that's already done and can't change.
+        const items = this.DATA.items.filter(i => new Date(i.start_ts).getTime() >= todayStartMs);
+        const byId = {};
+        items.forEach(i => byId[i.id] = i);
+        const successorsOf = {};
+        items.forEach(i => successorsOf[i.id] = []);
+        items.forEach(i => (i.predecessor_ids || []).forEach(pid => { if (successorsOf[pid]) successorsOf[pid].push(i.id); }));
+
+        // weakly-connected components (undirected reachability over the same edges)
+        const visited = new Set();
+        const components = [];
+        items.forEach(i => {
+            if (visited.has(i.id)) return;
+            const comp = [];
+            const queue = [i.id];
+            visited.add(i.id);
+            while (queue.length) {
+                const id = queue.shift();
+                comp.push(id);
+                const item = byId[id];
+                (item.predecessor_ids || []).forEach(pid => { if (byId[pid] && !visited.has(pid)) { visited.add(pid); queue.push(pid); } });
+                (successorsOf[id] || []).forEach(sid => { if (!visited.has(sid)) { visited.add(sid); queue.push(sid); } });
+            }
+            components.push(comp);
+        });
+
+        const floatById = {}, esById = {}, efById = {}, lsById = {}, lfById = {};
+
+        // ---- pass 1: forward (earliest start/finish) for every component ----
+        // A "beginning" activity (no predecessor in its component) starts on
+        // its own real scheduled date — not an arbitrary shared zero — so
+        // multiple independent starting points keep their real time
+        // relationship intact.
+        const compInfos = [];
+        components.forEach(comp => {
+            if (comp.length < 2) { comp.forEach(id => floatById[id] = null); return; } // isolated item — not part of any chain
+            const compSet = new Set(comp);
+
+            const inDegLive = {};
+            comp.forEach(id => inDegLive[id] = (byId[id].predecessor_ids || []).filter(p => compSet.has(p)).length);
+            const q = comp.filter(id => inDegLive[id] === 0);
+            const topoOrder = [];
+            while (q.length) {
+                const id = q.shift();
+                topoOrder.push(id);
+                (successorsOf[id] || []).filter(sid => compSet.has(sid)).forEach(sid => {
+                    inDegLive[sid]--;
+                    if (inDegLive[sid] === 0) q.push(sid);
+                });
+            }
+            if (topoOrder.length < comp.length) { comp.forEach(id => floatById[id] = null); return; } // shouldn't happen (cycles are blocked elsewhere), but bail out safely
+
+            topoOrder.forEach(id => {
+                const preds = (byId[id].predecessor_ids || []).filter(p => compSet.has(p));
+                const durMs = (parseFloat(byId[id].duration_hours) || 0) * 3600000;
+                const ownStartMs = new Date(byId[id].start_ts).getTime();
+                const es = preds.length ? Math.max(...preds.map(p => efById[p])) : ownStartMs;
+                esById[id] = es;
+                efById[id] = es + durMs;
+            });
+            compInfos.push({ comp, compSet, topoOrder });
+        });
+
+        // ---- shared "finish line" across the WHOLE schedule ----
+        // Two chains can be logically part of the same overall plan without a
+        // direct predecessor link tying them together. Without this, a
+        // shorter chain that doesn't happen to feed into anything else would
+        // be scored purely against its own tiny finish — a straight,
+        // unbranched chain always has zero internal slack by definition —
+        // instead of against how much later the SLOWEST chain in the entire
+        // schedule actually finishes. Every end (leaf) activity anchors to
+        // this one shared date; every beginning (root) activity already
+        // anchors to its own real scheduled date from the forward pass above
+        // — float is the gap between those two anchors.
+        let projectEnd = -Infinity;
+        compInfos.forEach(({ comp }) => {
+            comp.forEach(id => { if (efById[id] > projectEnd) projectEnd = efById[id]; });
+        });
+
+        // ---- pass 2: backward (latest start/finish) anchored to that shared finish ----
+        compInfos.forEach(({ comp, compSet, topoOrder }) => {
+            [...topoOrder].reverse().forEach(id => {
+                const durMs = (parseFloat(byId[id].duration_hours) || 0) * 3600000;
+                const succs = (successorsOf[id] || []).filter(sid => compSet.has(sid));
+                const lf = succs.length ? Math.min(...succs.map(sid => lsById[sid])) : projectEnd;
+                lfById[id] = lf;
+                lsById[id] = lf - durMs;
+            });
+            // float is a duration (late-start minus early-start), so convert
+            // back out of milliseconds into hours for display/storage.
+            comp.forEach(id => { floatById[id] = Math.round(((lsById[id] - esById[id]) / 3600000) * 100) / 100; });
+        });
+
+        return { floatById, esById, efById, lsById, lfById };
+    }
+    isCriticalItem(id) {
+        return !!(this.criticalPathData && this.criticalPathData.floatById[id] !== null && this.criticalPathData.floatById[id] !== undefined && this.criticalPathData.floatById[id] <= 0.01);
+    }
+    criticalPathFloatLabel(id) {
+        if (!this.criticalPathData) return '—';
+        const f = this.criticalPathData.floatById[id];
+        if (f === null || f === undefined) {
+            const it = this.DATA.items.find(i => i.id === id);
+            const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+            if (it && new Date(it.start_ts).getTime() < todayStart.getTime()) return 'In the past — not included in critical path analysis';
+            return 'Not linked to other activities';
+        }
+        if (f <= 0.01) return '0 days — on the critical path 🔥';
+        return `${hoursToDays(f)} days of slack`;
+    }
+    toggleCriticalPath(checked) {
+        this.showCriticalPath = checked;
+        this.renderGantt();
+    }
+
+    isAncestor(candidateId, startId, visited) {
+        visited = visited || new Set();
+        if (startId === candidateId) return true;
+        if (visited.has(startId)) return false;
+        visited.add(startId);
+        const item = this.DATA.items.find(i => i.id === startId);
+        if (!item || !item.predecessor_ids) return false;
+        return item.predecessor_ids.some(pid => this.isAncestor(candidateId, pid, visited));
+    }
+
+    async addPredecessorLink(targetId, sourceId) {
+        const target = this.DATA.items.find(i => i.id === targetId);
+        const source = this.DATA.items.find(i => i.id === sourceId);
+        if (!target || !source) return;
+        target.predecessor_ids = target.predecessor_ids || [];
+        if (target.predecessor_ids.includes(sourceId)) { this.toast('Already linked.'); return; }
+        if (this.isAncestor(targetId, sourceId)) { this.toast("Can't link — that would create a circular dependency."); return; }
+        target.predecessor_ids.push(sourceId);
+        await this.DB.update(this.TABLES.items, targetId, { predecessor_ids: target.predecessor_ids });
+        this.toast(`Linked: "${source.asset_name}" → "${target.asset_name}"`);
+        await this.enforceDependencies(sourceId);
+        // immediately focus the chain that was just created, so the grey-out
+        // effect is visible right away instead of waiting for a separate click
+        this.connectionFocusId = targetId;
+        this.renderGantt();
+    }
+
+    async removePredecessorLink(targetId, sourceId) {
+        const target = this.DATA.items.find(i => i.id === targetId);
+        if (!target) return;
+        target.predecessor_ids = (target.predecessor_ids || []).filter(id => id !== sourceId);
+        await this.DB.update(this.TABLES.items, targetId, { predecessor_ids: target.predecessor_ids });
+        this.renderGantt();
+    }
+
+    /* Draw a connector line for every predecessor -> successor pair currently
+       visible on screen. Positions are read straight from the rendered DOM so
+       they always match whatever lane/row layout is on screen. Pairs that
+       don't currently share the same row ("space") — because filtering or the
+       active group-by split them apart — are skipped entirely, since a line
+       crossing between unrelated swim-lanes reads as noise rather than signal. */
+    renderConnections(bodyEl, svgId) {
+        bodyEl = bodyEl || this.$('ganttBody');
+        svgId = svgId || 'connectionsSvg';
+        let svg = this.$(svgId);
+        if (!svg) {
+            svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.id = svgId;
+            svg.setAttribute('class', 'connections-svg');
+            svg.innerHTML = `<defs><marker id="arrowHead-${svgId}" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5f6368"/></marker></defs>`;
+            bodyEl.appendChild(svg);
+        }
+        const w = bodyEl.scrollWidth, h = bodyEl.scrollHeight;
+        svg.setAttribute('width', w);
+        svg.setAttribute('height', h);
+        svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+
+        const bodyRect = bodyEl.getBoundingClientRect();
+        const itemEls = bodyEl.querySelectorAll('.gantt-item');
+        const rectById = {}, groupById = {};
+        itemEls.forEach(el => {
+            const r = el.getBoundingClientRect();
+            rectById[el.dataset.id] = {
+                left: r.left - bodyRect.left, right: r.right - bodyRect.left,
+                top: r.top - bodyRect.top, bottom: r.bottom - bodyRect.top,
+                midY: r.top - bodyRect.top + r.height / 2
+            };
+            const rowEl = el.closest('.gantt-row');
+            groupById[el.dataset.id] = rowEl ? rowEl.dataset.group : null;
+        });
+
+        let paths = svg.querySelector('defs').outerHTML;
+        Object.keys(rectById).forEach(succId => {
+            const succItem = this.DATA.items.find(i => i.id === succId);
+            if (!succItem || !succItem.predecessor_ids) return;
+            succItem.predecessor_ids.forEach(predId => {
+                if (this.focusChainSet && !this.focusChainSet.has(predId) && !this.focusChainSet.has(succId)) return;
+                const predRect = rectById[predId];
+                const succRect = rectById[succId];
+                if (!predRect || !succRect) return;
+                // skip connections that cross between different spaces (rows) —
+                // both ends must currently be rendered in the same swim-lane
+                if (!groupById[predId] || groupById[predId] !== groupById[succId]) return;
+                const obstacles = Object.keys(rectById)
+                    .filter(id => id !== predId && id !== succId && groupById[id] === groupById[predId])
+                    .map(id => rectById[id]);
+
+                let d;
+                if (Math.abs(predRect.midY - succRect.midY) < 1) {
+                    // same lane — the chain just continues, draw a short direct line
+                    d = this.sameLaneConnectorPath(predRect.right, predRect.midY, succRect.left, succRect.midY);
+                } else {
+                    // different lane — branch down from the predecessor's bottom
+                    // edge through a shared vertical trunk into the successor
+                    const dropX = Math.max(predRect.left + 4, Math.min(predRect.left + 10, predRect.right - 4));
+                    const trunkX = this.pickTrunkX(dropX, predRect.bottom, succRect.left, succRect.midY, obstacles);
+                    d = this.branchConnectorPath(predRect.left, predRect.right, predRect.bottom, trunkX, succRect.left, succRect.midY);
+                }
+                paths += `<path class="conn-line" d="${d}" marker-end="url(#arrowHead-${svgId})" data-pred="${predId}" data-succ="${succId}" onclick="this.getRootNode().host.handleConnectorClick('${predId}','${succId}')"></path>`;
+            });
+        });
+        svg.innerHTML = paths;
+    }
+    handleConnectorClick(predId, succId) {
+        if (confirm('Remove this dependency link?')) this.removePredecessorLink(succId, predId);
+    }
+
+    /* Successors can never start before their predecessor finishes. If a move
+       or resize pushes a predecessor's end past a successor's start, the
+       successor snaps forward to begin the moment the predecessor finishes
+       (same-day alignment), and the shift cascades down the chain. */
+    async enforceDependencies(changedId, visited) {
+        visited = visited || new Set();
+        if (visited.has(changedId)) return;
+        visited.add(changedId);
+        const changed = this.DATA.items.find(i => i.id === changedId);
+        if (!changed) return;
+        const changedEnd = this.itemEndMs(changed);
+        const successors = this.DATA.items.filter(i => (i.predecessor_ids || []).includes(changedId));
+        for (const succ of successors) {
+            const succStart = new Date(succ.start_ts).getTime();
+            if (succStart < changedEnd) {
+                succ.start_ts = new Date(changedEnd).toISOString();
+                await this.DB.update(this.TABLES.items, succ.id, { start_ts: succ.start_ts });
+                // this successor's date just changed as a side effect of the
+                // cascade, not from being dragged directly — without this, its
+                // LaunchPad row would silently fall out of sync: it stays on
+                // its old day there while Pull Planner shows it on the new one
+                this.maybeSyncToLaunchPad(succ);
+                await this.enforceDependencies(succ.id, visited);
+            }
+        }
+    }
+
+    /* =========================================================================
+       6c. EXPAND / COLLAPSE — "Expand" gives every activity in every row its
+       own line (laneCount == item count, so nothing ever shares a lane and
+       there's zero ambiguity about what's overlapping what). "Collapse"
+       returns to the normal packed view, which still applies every rule from
+       this.layoutLanes() above — predecessor lanes never sit above their
+       successor's, and the obstacle-aware connector routing still keeps
+       arrows from cutting through other activities.
+       ========================================================================= */
+
+    toggleExpandView() {
+        this.expandedView = !this.expandedView;
+        const btn = this.$('expandToggleBtn');
+        btn.textContent = this.expandedView ? '⬆ Collapse' : '⬍ Expand All Activities';
+        btn.title = this.expandedView
+            ? 'Return to the packed view (still keeps linked chains cascading cleanly)'
+            : 'Give every activity its own line, or collapse back to the packed view';
+        this.renderGantt();
+    }
+
+    /* =========================================================================
+       MULTI-SELECT — Ctrl/Cmd+click toggles an activity in/out of the
+       selection; dragging any selected activity then moves the whole group
+       together, each keeping its own duration and relative offset.
+       ========================================================================= */
+    toggleMultiSelect(id) {
+        if (this.multiSelectedIds.has(id)) this.multiSelectedIds.delete(id);
+        else this.multiSelectedIds.add(id);
+        this.updateMultiSelectIndicator();
+        this.renderGantt();
+    }
+    clearMultiSelect() {
+        if (!this.multiSelectedIds.size) return;
+        this.multiSelectedIds.clear();
+        this.updateMultiSelectIndicator();
+        this.renderGantt();
+    }
+    updateMultiSelectIndicator() {
+        const el = this.$('multiSelectIndicator');
+        if (this.multiSelectedIds.size > 0) {
+            el.style.display = 'inline-flex';
+            el.querySelector('.count').textContent = this.multiSelectedIds.size;
+        } else {
+            el.style.display = 'none';
+        }
+    }
+
+
+    /* ---- Drag to move / resize to change duration ---- */
+    attachDragHandlers(root) {
+        root = root || document;
+        root.querySelectorAll('.gantt-item').forEach(el => {
+            el.addEventListener('pointerdown', (e) => {
+                if (e.target.classList.contains('resize-handle')) return; // handled separately
+                this.startDrag(e, el, 'move');
+            });
+            el.addEventListener('click', (e) => {
+                if (this.dragCtx && this.dragCtx.moved) return; // suppress click after a real drag
+                if (e.ctrlKey || e.metaKey) { this.toggleMultiSelect(el.dataset.id); return; }
+                this.openDetailPanel(el.dataset.id);
+            });
+        });
+        root.querySelectorAll('.resize-handle').forEach(h => {
+            h.addEventListener('pointerdown', (e) => {
+                e.stopPropagation();
+                this.startDrag(e, h.closest('.gantt-item'), h.dataset.edge === 'left' ? 'resize-left' : 'resize-right');
+            });
+        });
+    }
+
+    startDrag(e, el, mode) {
+        e.preventDefault();
+        const id = el.dataset.id;
+        const item = this.DATA.items.find(i => i.id === id);
+        if (!item) return;
+        // dragging a move-handle on a multi-selected item (with others also
+        // selected) moves the whole group together, each keeping its own
+        // duration and relative time offset from the others
+        const isGroupDrag = mode === 'move' && this.multiSelectedIds.has(id) && this.multiSelectedIds.size > 1;
+        const groupSnapshot = isGroupDrag
+            ? [...this.multiSelectedIds].map(mid => {
+                  const mItem = this.DATA.items.find(i => i.id === mid);
+                  const mEl = this.shadowRoot.querySelector(`.gantt-item[data-id="${mid}"]`);
+                  return mItem && mEl ? { id: mid, el: mEl, origLeft: this.displayLeft(mItem), origStart: new Date(mItem.start_ts) } : null;
+              }).filter(Boolean)
+            : null;
+        this.dragCtx = {
+            id, mode, moved: false,
+            startX: e.clientX,
+            startScrollLeft: this.$('ganttWrap').scrollLeft,
+            origLeft: this.displayLeft(item),
+            origWidth: this.displayWidth(item),
+            origStart: new Date(item.start_ts),
+            origDuration: item.duration_hours,
+            el,
+            isGroupDrag,
+            groupSnapshot
+        };
+        el.classList.add('dragging');
+        window.addEventListener('pointermove', this._onDragMoveBound);
+        window.addEventListener('pointerup', this._onDragEndBound);
+    }
+
+    snapHours(hoursFloat) {
+        // snap to nearest 15 minutes
+        return Math.round(hoursFloat * 4) / 4;
+    }
+
+    // Effective horizontal drag distance = raw pointer movement + however
+    // much #ganttWrap has scrolled since the drag started, so the dragged
+    // item keeps tracking correctly even while auto-scroll carries the
+    // timeline sideways underneath a pointer that isn't itself moving.
+    dragDx(clientX) {
+        const wrap = this.$('ganttWrap');
+        return (clientX - this.dragCtx.startX) + (wrap.scrollLeft - this.dragCtx.startScrollLeft);
+    }
+
+    applyDragPosition(clientX) {
+        if (!this.dragCtx) return;
+        const dx = this.dragDx(clientX);
+        if (Math.abs(dx) > 3) this.dragCtx.moved = true;
+        const el = this.dragCtx.el;
+        if (this.dragCtx.mode === 'move') {
+            if (this.dragCtx.isGroupDrag) {
+                this.dragCtx.groupSnapshot.forEach(snap => { snap.el.style.left = (snap.origLeft + dx) + 'px'; });
+            } else {
+                el.style.left = (this.dragCtx.origLeft + dx) + 'px';
+            }
+        } else if (this.dragCtx.mode === 'resize-right') {
+            el.style.width = Math.max(20, this.dragCtx.origWidth + dx) + 'px';
+        } else if (this.dragCtx.mode === 'resize-left') {
+            const newLeft = this.dragCtx.origLeft + dx;
+            const newWidth = Math.max(20, this.dragCtx.origWidth - dx);
+            el.style.left = newLeft + 'px';
+            el.style.width = newWidth + 'px';
+        }
+    }
+
+    onDragMove(e) {
+        if (!this.dragCtx) return;
+        this.updateAutoScroll(e.clientX, e.clientY, { horizontal: true, vertical: false }, () => this.applyDragPosition(e.clientX));
+        this.applyDragPosition(e.clientX);
+    }
+
+    async onDragEnd(e) {
+        window.removeEventListener('pointermove', this._onDragMoveBound);
+        window.removeEventListener('pointerup', this._onDragEndBound);
+        this.stopAutoScroll();
+        if (!this.dragCtx) return;
+        const { id, mode, el, moved, isGroupDrag } = this.dragCtx;
+        el.classList.remove('dragging');
+        if (!moved) { this.dragCtx = null; return; }
+
+        const dx = this.dragDx(e.clientX);
+
+        if (isGroupDrag) {
+            // one shared time-shift applied to every selected item's own
+            // original start, so the whole group moves together while each
+            // keeps its own duration and relative offset from the others
+            const dayDelta = dx / this.DAY_WIDTH;
+            const shiftMs = Math.round(dayDelta * 24 * 4) / 4 * 3600000;
+            this.setSaveIndicator('dirty', 'Saving...');
+            for (const snap of this.dragCtx.groupSnapshot) {
+                const item = this.DATA.items.find(i => i.id === snap.id);
+                if (!item) continue;
+                item.start_ts = new Date(snap.origStart.getTime() + shiftMs).toISOString();
+                if (item.predecessor_ids && item.predecessor_ids.length) {
+                    const predEnds = item.predecessor_ids.map(pid => this.DATA.items.find(i => i.id === pid)).filter(Boolean).map(x => this.itemEndMs(x));
+                    if (predEnds.length) {
+                        const minStart = Math.max(...predEnds);
+                        if (new Date(item.start_ts).getTime() < minStart) item.start_ts = new Date(minStart).toISOString();
+                    }
+                }
+                await this.DB.update(this.TABLES.items, item.id, { start_ts: item.start_ts });
+            }
+            for (const snap of this.dragCtx.groupSnapshot) await this.enforceDependencies(snap.id);
+            if (this.LAUNCHPAD_SYNC_ENABLED) {
+                for (const snap of this.dragCtx.groupSnapshot) this.maybeSyncToLaunchPad(this.DATA.items.find(i => i.id === snap.id));
+            }
+            this.setSaveIndicator('ready', 'Saved');
+            this.renderGantt();
+            this.dragCtx = null;
+            return;
+        }
+
+        const item = this.DATA.items.find(i => i.id === id);
+
+        if (mode === 'move') {
+            const dayDelta = (this.dragCtx.origLeft + dx) / this.DAY_WIDTH;
+            const newStart = new Date(this.TIMELINE_START.getTime() + Math.round(dayDelta * 24 * 4) / 4 * 3600000);
+            item.start_ts = newStart.toISOString();
+        } else if (mode === 'resize-right') {
+            const newWidthPx = Math.max(20, this.dragCtx.origWidth + dx);
+            item.duration_hours = Math.max(0.25, this.snapHours((newWidthPx / this.DAY_WIDTH) * 24));
+        } else if (mode === 'resize-left') {
+            const newLeftPx = this.dragCtx.origLeft + dx;
+            const newWidthPx = Math.max(20, this.dragCtx.origWidth - dx);
+            const dayDelta = newLeftPx / this.DAY_WIDTH;
+            const newStart = new Date(this.TIMELINE_START.getTime() + Math.round(dayDelta * 24 * 4) / 4 * 3600000);
+            item.start_ts = newStart.toISOString();
+            item.duration_hours = Math.max(0.25, this.snapHours((newWidthPx / this.DAY_WIDTH) * 24));
+        }
+
+        // an item can never sit behind its own predecessor — clamp forward if needed
+        if (item.predecessor_ids && item.predecessor_ids.length) {
+            const predEnds = item.predecessor_ids.map(pid => this.DATA.items.find(i => i.id === pid)).filter(Boolean).map(x => this.itemEndMs(x));
+            if (predEnds.length) {
+                const minStart = Math.max(...predEnds);
+                if (new Date(item.start_ts).getTime() < minStart) {
+                    item.start_ts = new Date(minStart).toISOString();
+                    this.toast("Snapped to predecessor's finish — can't start before it.");
+                }
+            }
+        }
+
+        this.setSaveIndicator('dirty', 'Saving...');
+        await this.DB.update(this.TABLES.items, id, { start_ts: item.start_ts, duration_hours: item.duration_hours });
+        await this.enforceDependencies(id);
+        this.maybeSyncToLaunchPad(item);
+        this.setSaveIndicator('ready', 'Saved');
+        this.renderGantt();
+        this.dragCtx = null;
+    }
+
+    /* =========================================================================
+       7. ITEM DETAIL PANEL / ADD-EDIT MODAL
+       ========================================================================= */
+
+    openDetailPanel(id) {
+        const it = this.DATA.items.find(i => i.id === id);
+        if (!it) return;
+        try { this.criticalPathData = this.computeCriticalPath(); } catch (err) { console.error('computeCriticalPath failed', err); }
+        const panel = this.$('detailPanel');
+        const start = new Date(it.start_ts);
+        panel.innerHTML = `
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+                <h3 style="margin:0; color:var(--green-dark);">Item Detail</h3>
+                <button class="modal-close" onclick="this.getRootNode().host.closeDetailPanel()">×</button>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px; margin-bottom:14px;">
+                <span class="legend-swatch" style="width:14px;height:14px;background:${this.activityColor(it.activity_name)};"></span>
+                <strong>${escHtml(it.activity_name)}</strong> <span style="color:#999; font-weight:500;">(${escHtml(it.type)})</span>
+            </div>
+            <div style="font-size:13px; line-height:2;">
+                <div><strong>Asset:</strong> ${escHtml(it.asset_name)}</div>
+                <div><strong>Activity:</strong> ${escHtml(it.activity_name)}</div>
+                <div><strong>Zone:</strong> ${escHtml(it.zone || '—')}</div>
+                <div><strong>Area:</strong> ${escHtml(it.area || '—')}</div>
+                <div><strong>Asset Type:</strong> ${escHtml(it.asset_type || '—')}</div>
+                <div><strong>Contractor:</strong> ${escHtml(it.contractor_name || '—')}</div>
+                <div><strong>Start:</strong> ${start.toLocaleString()}</div>
+                <div><strong>Duration:</strong> ${hoursToDays(it.duration_hours)} days</div>
+                <div><strong>Float:</strong> ${this.criticalPathFloatLabel(it.id)}</div>
+                <div><strong>Status (LaunchPad):</strong> <span id="detailStatusValue">Checking...</span></div>
+                ${this.isPastOrToday(it) ? `<div><strong>Result (Supabase):</strong> <span id="detailResultValue">Checking...</span></div>` : ''}
+                <div><strong>Constraints (predecessors):</strong> <span id="detailPredsValue">${(it.predecessor_ids||[]).length ? 'Checking...' : 'None'}</span></div>
+                <div><strong>Successors:</strong> ${this.DATA.items.filter(x=>(x.predecessor_ids||[]).includes(it.id)).map(x=>escHtml(x.asset_name+' — '+x.activity_name)).join(', ') || '—'}</div>
+                ${it.notes ? `<div style="margin-top:8px;"><strong>Notes:</strong><br>${escHtml(it.notes)}</div>` : ''}
+            </div>
+            <div style="margin-top:20px; display:flex; gap:8px;">
+                <button class="tool-btn primary small" onclick="this.getRootNode().host.editItem('${it.id}')">Edit</button>
+                <button class="tool-btn small" style="border-color:var(--red); color:var(--red);" onclick="this.getRootNode().host.deleteItemById('${it.id}')">Delete</button>
+            </div>`;
+        panel.classList.add('open');
+        this.fetchLaunchPadStatusInto(it.activity_name, it.asset_name, 'detailStatusValue');
+        if (this.isPastOrToday(it)) this.fetchSupabaseResultInto(it.launchpad_id, 'detailResultValue');
+        if ((it.predecessor_ids || []).length) {
+            this.unsatisfiedPredecessorsLabel(it).then(label => {
+                const el = this.$('detailPredsValue');
+                if (el) el.textContent = label;
+            });
+        }
+        this.connectionFocusId = id;
+        this.renderGantt();
+        const chainSize = this.focusChainSet ? this.focusChainSet.size : 1;
+        this.toast(chainSize > 1 ? `Highlighting this chain (${chainSize} linked activities) — click empty space to clear` : 'This activity has no links yet', 3200);
+    }
+    closeDetailPanel() {
+        this.$('detailPanel').classList.remove('open');
+        if (this.connectionFocusId) {
+            this.connectionFocusId = null;
+            this.renderGantt();
+        }
+    }
+
+    editItem(id) {
+        this.$('detailPanel').classList.remove('open');
+        const it = this.DATA.items.find(i => i.id === id);
+        if (!it) return;
+        this.$('itemModalTitle').textContent = 'Edit Schedule Item';
+        this.$('itemId').value = it.id;
+        this.$('itemAsset').value = it.asset_name;
+        this.$('itemActivity').value = it.activity_name;
+        this.$('itemDuration').value = hoursToDays(it.duration_hours);
+        this.$('itemStart').value = this.toLocalInputValue(new Date(it.start_ts));
+        this.$('itemTypePicker').value = it.type;
+        this.populateSelect('itemZone', this.DATA.zones.map(z => z.name), true);
+        this.populateSelect('itemArea', this.DATA.areas.map(a => a.name), true);
+        this.populateSelect('itemAssetType', [...new Set(this.DATA.items.map(i => i.asset_type).filter(Boolean))], true);
+        this.$('itemZone').value = it.zone || '';
+        this.$('itemArea').value = it.area || '';
+        this.$('itemAssetType').value = it.asset_type || '';
+        this.$('itemContractor').value = it.contractor_name || '';
+        this.$('itemNotes').value = it.notes || '';
+        this.$('itemDeleteBtn').style.display = 'inline-flex';
+        this.currentItemPredecessors = (it.predecessor_ids || []).slice();
+        this.renderPredChips();
+        this.openModal('itemModal');
+    }
+
+    toLocalInputValue(d) {
+        const pad = n => n.toString().padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
+    async deleteItemById(id) {
+        if (!confirm('Delete this schedule item?')) return;
+        const item = this.DATA.items.find(i => i.id === id);
+        await this.DB.remove(this.TABLES.items, id);
+        this.DATA.items = this.DATA.items.filter(i => i.id !== id);
+        this.multiSelectedIds.delete(id);
+        this.updateMultiSelectIndicator();
+        if (item && item.launchpad_id && this._supabase) {
+            const { error } = await this._supabase.from(this.LAUNCHPAD_TABLE).delete().eq('id', item.launchpad_id);
+            if (error) console.error('LaunchPad row delete failed', error);
+        }
+        // drop this item from any successor's predecessor list
+        for (const it of this.DATA.items) {
+            if (it.predecessor_ids && it.predecessor_ids.includes(id)) {
+                it.predecessor_ids = it.predecessor_ids.filter(pid => pid !== id);
+                await this.DB.update(this.TABLES.items, it.id, { predecessor_ids: it.predecessor_ids });
+            }
+        }
+        this.$('detailPanel').classList.remove('open');
+        if (this.connectionFocusId === id) this.connectionFocusId = null;
+        this.renderGantt();
+        this.toast('Item deleted');
+    }
+    deleteCurrentItem() {
+        const id = this.$('itemId').value;
+        if (id) this.deleteItemById(id);
+        this.closeModal('itemModal');
+    }
+
+
+
+    /* ---- predecessor chip picker (used inside the New/Edit Item modal) ---- */
+    renderPredChips() {
+        const holder = this.$('itemPredChips');
+        if (!this.currentItemPredecessors.length) {
+            holder.innerHTML = '<span style="color:#999; font-size:11.5px;">No predecessors linked yet.</span>';
+            return;
+        }
+        holder.innerHTML = this.currentItemPredecessors.map(pid => {
+            const p = this.DATA.items.find(i => i.id === pid);
+            const label = p ? `${p.asset_name} — ${p.activity_name}` : 'Unknown item';
+            return `<span class="pred-chip">${escHtml(label)}<button onclick="this.getRootNode().host.removePredFromPicker('${pid}')" title="Remove">✕</button></span>`;
+        }).join('');
+    }
+    removePredFromPicker(pid) {
+        this.currentItemPredecessors = this.currentItemPredecessors.filter(id => id !== pid);
+        this.renderPredChips();
+    }
+    filterPredCombo(query) {
+        const q = query.toLowerCase();
+        const currentId = this.$('itemId').value;
+        const list = this.$('itemPredList');
+        const matches = this.DATA.items
+            .filter(i => i.id !== currentId && !this.currentItemPredecessors.includes(i.id))
+            .filter(i => `${i.asset_name} ${i.activity_name} ${i.zone}`.toLowerCase().includes(q))
+            .slice(0, 30);
+        list.innerHTML = matches.map(i =>
+            `<div class="opt" onclick="this.getRootNode().host.pickPredFromCombo('${i.id}')">${escHtml(i.asset_name)} — ${escHtml(i.activity_name)} <span style="color:#999;">(${escHtml(i.zone||'')})</span></div>`
+        ).join('') || '<div class="opt" style="color:#999;">No matches</div>';
+        list.classList.add('open');
+    }
+    pickPredFromCombo(id) {
+        const currentId = this.$('itemId').value;
+        if (id === currentId) { this.toast("An item can't be its own predecessor."); return; }
+        if (currentId && this.isAncestor(currentId, id)) { this.toast("Can't link — that would create a circular dependency."); return; }
+        if (!this.currentItemPredecessors.includes(id)) this.currentItemPredecessors.push(id);
+        this.$('itemPredSearch').value = '';
+        this.$('itemPredList').classList.remove('open');
+        this.renderPredChips();
+    }
+
+    async saveItemModal() {
+        const id = this.$('itemId').value;
+        const assetName = this.$('itemAsset').value.trim();
+        const activityName = this.$('itemActivity').value.trim();
+        const durationDays = parseFloat(this.$('itemDuration').value);
+        const duration = daysToHours(durationDays);
+        const startVal = this.$('itemStart').value;
+        const type = this.$('itemTypePicker').value;
+        const zone = this.$('itemZone').value;
+
+        if (!assetName || !activityName || !duration || !startVal || !type || !zone) {
+            this.toast('Please fill in Asset, Activity, Duration, Start, Type and Zone.');
+            return;
+        }
+        await this.ensureListValue('assets', assetName);
+        await this.ensureListValue('activities', activityName);
+        const contractorName = this.$('itemContractor').value.trim();
+        if (contractorName) await this.ensureListValue('contractors', contractorName);
+
+        // an item can't start before any of its chosen predecessors finish
+        let startTs = new Date(startVal).toISOString();
+        const predItems = this.currentItemPredecessors.map(pid => this.DATA.items.find(i => i.id === pid)).filter(Boolean);
+        if (predItems.length) {
+            const minStart = Math.max(...predItems.map(x => this.itemEndMs(x)));
+            if (new Date(startTs).getTime() < minStart) {
+                startTs = new Date(minStart).toISOString();
+                this.toast("Start time adjusted — can't begin before its predecessor finishes.");
+            }
+        }
+
+        const payload = {
+            asset_name: assetName,
+            activity_name: activityName,
+            duration_hours: duration,
+            start_ts: startTs,
+            type, zone,
+            area: this.$('itemArea').value,
+            asset_type: this.$('itemAssetType').value,
+            contractor_name: contractorName,
+            notes: this.$('itemNotes').value,
+            predecessor_ids: this.currentItemPredecessors.slice()
+        };
+
+        this.setSaveIndicator('dirty', 'Saving...');
+        let savedId = id;
+        if (id) {
+            await this.DB.update(this.TABLES.items, id, payload);
+            const idx = this.DATA.items.findIndex(i => i.id === id);
+            if (idx > -1) this.DATA.items[idx] = { ...this.DATA.items[idx], ...payload };
+        } else {
+            const saved = await this.DB.insert(this.TABLES.items, payload);
+            savedId = saved ? saved.id : uid();
+            this.DATA.items.push(saved ? { ...saved, duration_hours: payload.duration_hours } : { id: savedId, ...payload });
+        }
+        await this.enforceDependencies(savedId);
+        this.maybeSyncToLaunchPad(this.DATA.items.find(i => i.id === savedId));
+        this.setSaveIndicator('ready', 'Saved');
+        this.closeModal('itemModal');
+        this.renderFilterBar();
+        this.renderGantt();
+        this.toast('Schedule item saved');
+    }
+
+    /* Add a new value to a master list if it doesn't already exist (used when
+       a user types a brand-new asset/activity name directly in the item form) */
+    async ensureListValue(table, name) {
+        const list = this.DATA[table];
+        if (list.some(x => x.name.toLowerCase() === name.toLowerCase())) return;
+        const row = await this.DB.insert(this.TABLES[table], { name });
+        list.push(row || { id: uid(), name });
+    }
+
+    /* ---- combobox behavior for Asset / Activity fields ---- */
+    filterCombo(inputId, listId, source) {
+        const typed = this.$(inputId).value;
+        const q = typed.toLowerCase();
+        const list = this.$(listId);
+        const matches = source.filter(s => s.name.toLowerCase().includes(q)).slice(0, 40);
+        let html = matches.map(s => `<div class="opt" onclick="this.getRootNode().host.pickCombo('${inputId}','${listId}','${s.name.replace(/'/g, "\\'")}')">${escHtml(s.name)}</div>`).join('');
+        if (q && !source.some(s => s.name.toLowerCase() === q)) {
+            html += `<div class="opt add-new" onclick="this.getRootNode().host.pickCombo('${inputId}','${listId}','${typed.replace(/'/g, "\\'")}')">➕ Add "${escHtml(typed)}"</div>`;
+        }
+        list.innerHTML = html || '<div class="opt" style="color:#999;">No matches</div>';
+        list.classList.add('open');
+    }
+    pickCombo(inputId, listId, value) {
+        this.$(inputId).value = value;
+        this.$(listId).classList.remove('open');
+        if (inputId === 'itemAsset') this.applyAssetLookup(value, 'itemZone', 'itemArea');
+    }
+
+    // Mirrors LaunchPad's own asset->place linking: if this asset has a known
+    // Zone/Area from {PROJECT_KEY}dropdownoptions, fill those fields in automatically
+    // instead of making the person look them up and pick manually.
+    applyAssetLookup(assetName, zoneSelectId, areaSelectId) {
+        const zone = this.ASSET_TO_ZONE_MAP[assetName];
+        const area = this.ASSET_TO_AREA_MAP[assetName];
+        if (zone && zoneSelectId) {
+            const sel = this.$(zoneSelectId);
+            if (sel && [...sel.options].some(o => o.value === zone)) sel.value = zone;
+        }
+        if (area && areaSelectId) {
+            const sel = this.$(areaSelectId);
+            if (sel && [...sel.options].some(o => o.value === area)) sel.value = area;
+        }
+    }
+
+    /* =========================================================================
+       8. BULK ADD — combination builder + paste/CSV, with preview before commit
+       ========================================================================= */
+
+    openBulkAddModal() {
+        this.$('bulkStep1').style.display = 'block';
+        this.$('bulkStep2').style.display = 'none';
+        this.$('bulkCommitBtn').style.display = 'none';
+        this.$('bulkAssetList').innerHTML = this.DATA.assets.map(a =>
+            `<label><input type="checkbox" value="${escAttr(a.name)}"> ${escHtml(a.name)}</label>`).join('');
+        this.$('bulkActivityList').innerHTML = this.DATA.activities.map(a =>
+            `<label><input type="checkbox" value="${escAttr(a.name)}"> ${escHtml(a.name)}</label>`).join('');
+        this.populateSelect('bulkZone', this.DATA.zones.map(z => z.name), false);
+        this.populateSelect('bulkArea', this.DATA.areas.map(a => a.name), true);
+        if (this.DATA.types[0]) this.$('bulkTypePicker').value = this.DATA.types[0].name;
+        this.$('bulkStartDate').value = new Date().toISOString().slice(0, 10);
+        this.$('bulkContractor').value = '';
+        this.$('bulkNotes').value = '';
+        this.$('bulkAutoLink').checked = false;
+        this.openModal('bulkModal');
+    }
+    filterCheckList(listId, q) {
+        q = q.toLowerCase();
+        this.$$(`#${listId} label`).forEach(l => l.style.display = l.textContent.toLowerCase().includes(q) ? 'flex' : 'none');
+    }
+
+    generateBulkPreview(mode) {
+        this.bulkPreviewRows = [];
+        if (mode === 'combo') {
+            const assets = [...this.$$('#bulkAssetList input:checked')].map(i => i.value);
+            const activities = [...this.$$('#bulkActivityList input:checked')].map(i => i.value);
+            const type = this.$('bulkTypePicker').value;
+            const contractor = this.$('bulkContractor').value.trim();
+            const notes = this.$('bulkNotes').value.trim();
+            const duration = parseFloat(this.$('bulkDuration').value) || 1;
+            const startDate = this.$('bulkStartDate').value;
+            if (!assets.length || !activities.length || !startDate) {
+                this.toast('Select at least one asset, one activity, and a start date.');
+                return;
+            }
+            const start = new Date(startDate + 'T07:00');
+            const autoLink = this.$('bulkAutoLink').checked;
+            assets.forEach(asset => {
+                // same asset->zone/area linking LaunchPad itself uses — each
+                // asset can pull in its own zone/area rather than everything
+                // in this batch being forced to share one
+                const zone = this.ASSET_TO_ZONE_MAP[asset] || (this.DATA.zones[0]?.name || '');
+                const area = this.ASSET_TO_AREA_MAP[asset] || '';
+                let prevRowIndex = null;
+                let cursor = new Date(start);
+                activities.forEach(activity => {
+                    const rowStart = autoLink ? new Date(cursor) : new Date(start);
+                    const row = { asset, activity, duration, type, zone, area, contractor, notes, start: rowStart.toISOString() };
+                    if (autoLink && prevRowIndex !== null) row.predLinkIndex = prevRowIndex;
+                    this.bulkPreviewRows.push(row);
+                    prevRowIndex = this.bulkPreviewRows.length - 1;
+                    if (autoLink) cursor = new Date(cursor.getTime() + daysToHours(duration) * 3600000);
+                });
+            });
+        } else {
+            const raw = this.$('bulkPasteArea').value.trim();
+            if (!raw) { this.toast('Paste some rows first.'); return; }
+            const lines = raw.split('\n').filter(l => l.trim());
+            lines.forEach((line, i) => {
+                if (i === 0 && /asset/i.test(line) && /activity/i.test(line)) return; // skip header row
+                const parts = line.split(/\t|,(?![^"]*")/).map(s => s.trim());
+                const [asset, activity, duration, type, zone, area, startDate, contractor, notes] = parts;
+                if (!asset || !activity) return;
+                const start = startDate ? new Date(startDate + 'T07:00') : new Date();
+                this.bulkPreviewRows.push({
+                    asset, activity,
+                    duration: parseFloat(duration) || 1,
+                    type: type || (this.DATA.types[0]?.name || 'Other'),
+                    zone: zone || this.ASSET_TO_ZONE_MAP[asset] || (this.DATA.zones[0]?.name || ''),
+                    area: area || this.ASSET_TO_AREA_MAP[asset] || '',
+                    contractor: contractor || '',
+                    notes: notes || '',
+                    start: start.toISOString()
+                });
+            });
+        }
+        if (!this.bulkPreviewRows.length) { this.toast('No valid rows to preview.'); return; }
+        this.renderBulkPreview();
+    }
+
+    /* build a dropdown's option list from a master-list array plus, if the row's
+       current value isn't already in that list (e.g. a brand-new name typed
+       into the paste box), an extra option so it isn't silently dropped */
+    selectOptionsHtml(masterValues, currentValue, allowBlank) {
+        let html = allowBlank ? `<option value="">—</option>` : '';
+        html += masterValues.map(v => `<option value="${escAttr(v)}" ${v === currentValue ? 'selected' : ''}>${escHtml(v)}</option>`).join('');
+        if (currentValue && !masterValues.includes(currentValue)) {
+            html += `<option value="${escAttr(currentValue)}" selected>${escHtml(currentValue)} (new)</option>`;
+        }
+        return html;
+    }
+
+    renderBulkPreview() {
+        this.$('bulkStep1').style.display = 'none';
+        this.$('bulkStep2').style.display = 'block';
+        this.$('bulkCommitBtn').style.display = 'inline-flex';
+        this.$('bulkPreviewCount').textContent = `${this.bulkPreviewRows.length} item(s) ready`;
+        const assetOpts = this.DATA.assets.map(a => a.name);
+        const activityOpts = this.DATA.activities.map(a => a.name);
+        const typeOpts = this.DATA.types.map(t => t.name);
+        const zoneOpts = this.DATA.zones.map(z => z.name);
+        const areaOpts = this.DATA.areas.map(a => a.name);
+        const contractorOpts = this.DATA.contractors.map(c => c.name);
+        this.$('bulkPreviewBody').innerHTML = this.bulkPreviewRows.map((r, i) => {
+            const dateVal = new Date(r.start).toISOString().slice(0, 10);
+            const linkOptions = this.bulkPreviewRows.map((other, j) => {
+                if (j === i) return '';
+                return `<option value="${j}" ${r.predLinkIndex === j ? 'selected' : ''}>${escHtml(other.asset)} — ${escHtml(other.activity)}</option>`;
+            }).join('');
+            return `
+            <tr>
+                <td><select style="width:120px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'asset',this.value)">${this.selectOptionsHtml(assetOpts, r.asset, false)}</select></td>
+                <td>
+                    <span class="legend-swatch" style="background:${this.activityColor(r.activity)}; display:inline-block; width:9px;height:9px;border-radius:3px; margin-right:3px;"></span>
+                    <select style="width:118px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'activity',this.value)">${this.selectOptionsHtml(activityOpts, r.activity, false)}</select>
+                </td>
+                <td><input type="number" min="0.1" step="0.25" value="${r.duration}" style="width:56px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'duration',this.value)"></td>
+                <td><select style="width:88px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'type',this.value)">${this.selectOptionsHtml(typeOpts, r.type, false)}</select></td>
+                <td><select style="width:88px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'zone',this.value)">${this.selectOptionsHtml(zoneOpts, r.zone, false)}</select></td>
+                <td><select style="width:88px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'area',this.value)">${this.selectOptionsHtml(areaOpts, r.area, true)}</select></td>
+                <td><input type="date" value="${dateVal}" style="width:130px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'start',this.value)"></td>
+                <td><select style="width:110px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'contractor',this.value)">${this.selectOptionsHtml(contractorOpts, r.contractor, true)}</select></td>
+                <td><input value="${escAttr(r.notes || '')}" placeholder="Notes" style="width:120px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'notes',this.value)"></td>
+                <td><select style="width:130px;" title="Predecessor" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'predLinkIndex',this.value)"><option value="">— none —</option>${linkOptions}</select></td>
+                <td><button class="preview-remove" onclick="this.getRootNode().host.removeBulkRow(${i})" title="Remove row">✕</button></td>
+            </tr>`;
+        }).join('');
+    }
+    updateBulkPreviewField(i, field, value) {
+        const r = this.bulkPreviewRows[i];
+        if (!r) return;
+        if (field === 'duration') {
+            r.duration = Math.max(0.1, parseFloat(value) || 0.1);
+        } else if (field === 'start') {
+            // preserve existing time-of-day, just change the calendar date
+            const prev = new Date(r.start);
+            const [y, m, d] = value.split('-').map(Number);
+            prev.setFullYear(y, m - 1, d);
+            r.start = prev.toISOString();
+        } else if (field === 'predLinkIndex') {
+            if (value === '') delete r.predLinkIndex;
+            else r.predLinkIndex = parseInt(value, 10);
+        } else {
+            r[field] = value;
+        }
+        // re-render swatch/labels that depend on the edited field without losing focus on unrelated inputs
+        this.renderBulkPreview();
+    }
+    removeBulkRow(i) {
+        this.bulkPreviewRows.splice(i, 1);
+        // fix up any predLinkIndex references: drop links that pointed at the
+        // removed row, shift every index above it down by one
+        this.bulkPreviewRows.forEach(r => {
+            if (r.predLinkIndex === undefined) return;
+            if (r.predLinkIndex === i) delete r.predLinkIndex;
+            else if (r.predLinkIndex > i) r.predLinkIndex -= 1;
+        });
+        if (!this.bulkPreviewRows.length) { this.backToBulkStep1(); return; }
+        this.renderBulkPreview();
+    }
+    backToBulkStep1() {
+        this.$('bulkStep1').style.display = 'block';
+        this.$('bulkStep2').style.display = 'none';
+        this.$('bulkCommitBtn').style.display = 'none';
+    }
+
+    async commitBulkAdd() {
+        this.setSaveIndicator('dirty', 'Saving...');
+        const insertedIds = [];
+        for (const r of this.bulkPreviewRows) {
+            await this.ensureListValue('assets', r.asset);
+            await this.ensureListValue('activities', r.activity);
+            if (r.contractor) await this.ensureListValue('contractors', r.contractor);
+            const payload = {
+                asset_name: r.asset, activity_name: r.activity, duration_hours: daysToHours(r.duration),
+                type: r.type, zone: r.zone, area: r.area || '', start_ts: r.start,
+                asset_type: '', contractor_name: r.contractor || '', notes: r.notes || ''
+            };
+            const saved = await this.DB.insert(this.TABLES.items, payload);
+            const newItem = saved ? { ...saved, duration_hours: payload.duration_hours } : { id: uid(), ...payload };
+            this.DATA.items.push(newItem);
+            insertedIds.push(newItem.id);
+        }
+        // second pass: resolve each row's predLinkIndex (a position within
+        // this batch) into the real id that ended up saved at that position
+        let linkCount = 0;
+        for (let i = 0; i < this.bulkPreviewRows.length; i++) {
+            const r = this.bulkPreviewRows[i];
+            if (r.predLinkIndex === undefined || r.predLinkIndex === null) continue;
+            const predId = insertedIds[r.predLinkIndex];
+            const succId = insertedIds[i];
+            if (!predId || !succId) continue;
+            const succItem = this.DATA.items.find(x => x.id === succId);
+            if (!succItem) continue;
+            succItem.predecessor_ids = succItem.predecessor_ids || [];
+            succItem.predecessor_ids.push(predId);
+            await this.DB.update(this.TABLES.items, succId, { predecessor_ids: succItem.predecessor_ids });
+            await this.enforceDependencies(predId);
+            linkCount++;
+        }
+        if (this.LAUNCHPAD_SYNC_ENABLED) {
+            for (const id of insertedIds) this.maybeSyncToLaunchPad(this.DATA.items.find(i => i.id === id));
+        }
+        this.setSaveIndicator('ready', 'Saved');
+        this.toast(`${this.bulkPreviewRows.length} item(s) added${linkCount ? `, ${linkCount} linked as predecessor/successor` : ''}`);
+        this.bulkPreviewRows = [];
+        this.closeModal('bulkModal');
+        this.renderFilterBar();
+        this.renderGantt();
+    }
+
+    /* =========================================================================
+       9. LISTS MANAGER — Assets / Activities / Contractors / Zones / Areas / Types
+       Backed by the same Supabase tables the schedule items reference.
+       ========================================================================= */
+
+    renderListsManager() {
+        this.$('assetListRows').innerHTML = this.DATA.assets.map(a => `
+            <div class="list-mgr-row">
+                <input value="${escAttr(a.name)}" onchange="this.getRootNode().host.renameListItem('assets','${a.id}', this.value)">
+                <button class="del" onclick="this.getRootNode().host.deleteListItem('assets','${a.id}')">🗑️</button>
+            </div>`).join('') || this.emptyRow();
+
+        this.$('activityListRows').innerHTML = this.DATA.activities.map(a => `
+            <div class="list-mgr-row">
+                <input value="${escAttr(a.name)}" onchange="this.getRootNode().host.renameListItem('activities','${a.id}', this.value)">
+                <button class="del" onclick="this.getRootNode().host.deleteListItem('activities','${a.id}')">🗑️</button>
+            </div>`).join('') || this.emptyRow();
+
+        this.$('contractorListRows').innerHTML = this.DATA.contractors.map(c => `
+            <div class="list-mgr-row">
+                <input value="${escAttr(c.name)}" onchange="this.getRootNode().host.renameListItem('contractors','${c.id}', this.value)">
+                <button class="del" onclick="this.getRootNode().host.deleteListItem('contractors','${c.id}')">🗑️</button>
+            </div>`).join('') || this.emptyRow();
+
+        this.$('zoneListRows').innerHTML = this.DATA.zones.map(z => `
+            <div class="list-mgr-row">
+                <input value="${escAttr(z.name)}" onchange="this.getRootNode().host.renameListItem('zones','${z.id}', this.value)">
+                <input type="date" value="${escAttr(this.getZoneEndDate(z.name)||'')}" title="Target end date (stored locally in this browser)" style="flex:0 0 140px;" onchange="this.getRootNode().host.setZoneEndDate('${z.name.replace(/'/g, "\\'")}', this.value); this.renderGantt();">
+                <button class="del" onclick="this.getRootNode().host.deleteListItem('zones','${z.id}')">🗑️</button>
+            </div>`).join('') || this.emptyRow();
+
+        this.$('areaListRows').innerHTML = this.DATA.areas.map(a => `
+            <div class="list-mgr-row">
+                <input value="${escAttr(a.name)}" onchange="this.getRootNode().host.renameListItem('areas','${a.id}', this.value)">
+                <button class="del" onclick="this.getRootNode().host.deleteListItem('areas','${a.id}')">🗑️</button>
+            </div>`).join('') || this.emptyRow();
+
+        this.$('typeListRows').innerHTML = this.DATA.types.map(t => `
+            <div class="list-mgr-row">
+                <input value="${escAttr(t.name)}" onchange="this.getRootNode().host.renameListItem('types','${t.id}', this.value)">
+                <button class="del" onclick="this.getRootNode().host.deleteListItem('types','${t.id}')">🗑️</button>
+            </div>`).join('') || this.emptyRow();
+
+        this.$('activityColorRows').innerHTML = this.DATA.activities.map(a => `
+            <div class="list-mgr-row">
+                <span style="flex:1; font-size:13px;">${escHtml(a.name)}</span>
+                <input type="color" class="swatch-input" value="${this.activityColor(a.name)}" onchange="this.getRootNode().host.setActivityColor('${a.name.replace(/'/g, "\\'")}', this.value); this.afterListChange();">
+            </div>`).join('') || this.emptyRow();
+    }
+    emptyRow() { return `<div style="padding:10px 0; color:#999; font-size:12.5px;">Nothing here yet — add one below.</div>`; }
+
+    async addListItem(table) {
+        let row = null;
+        if (table === 'assets') {
+            const name = this.$('newAssetName').value.trim();
+            if (!name) return;
+            row = { name };
+            this.$('newAssetName').value = '';
+        } else if (table === 'activities') {
+            const name = this.$('newActivityName').value.trim();
+            if (!name) return;
+            row = { name }; this.$('newActivityName').value = '';
+        } else if (table === 'contractors') {
+            const name = this.$('newContractorName').value.trim();
+            if (!name) return;
+            row = { name };
+            this.$('newContractorName').value = '';
+        } else if (table === 'zones') {
+            const name = this.$('newZoneName').value.trim();
+            if (!name) return;
+            const endDate = this.$('newZoneEndDate').value;
+            row = { name };
+            if (endDate) this.setZoneEndDate(name, endDate);
+            this.$('newZoneName').value = '';
+            this.$('newZoneEndDate').value = '';
+        } else if (table === 'areas') {
+            const name = this.$('newAreaName').value.trim();
+            if (!name) return;
+            row = { name }; this.$('newAreaName').value = '';
+        } else if (table === 'types') {
+            const name = this.$('newTypeName').value.trim();
+            if (!name) return;
+            row = { name };
+            this.$('newTypeName').value = '';
+        }
+        if (!row) return;
+        const saved = await this.DB.insert(this.TABLES[table], row);
+        this.DATA[table].push(saved || { id: uid(), ...row });
+        this.afterListChange();
+    }
+    async renameListItem(table, id, newName) {
+        if (!newName.trim()) return;
+        const trimmed = newName.trim();
+        const row = this.DATA[table].find(r => r.id === id);
+        const oldName = row ? row.name : null;
+        await this.DB.update(this.TABLES[table], id, { name: trimmed });
+        if (row) row.name = trimmed;
+        if (table === 'zones' && oldName && oldName !== trimmed) {
+            const endDate = this.getZoneEndDate(oldName);
+            if (endDate) { this.setZoneEndDate(oldName, null); this.setZoneEndDate(trimmed, endDate); }
+        }
+        if (table === 'activities' && oldName && oldName !== trimmed && this.ACTIVITY_COLORS[oldName]) {
+            this.setActivityColor(trimmed, this.ACTIVITY_COLORS[oldName]);
+            delete this.ACTIVITY_COLORS[oldName];
+            this.saveActivityColorsMap(this.ACTIVITY_COLORS);
+        }
+        this.afterListChange();
+    }
+    async updateListItem(table, id, patch) {
+        await this.DB.update(this.TABLES[table], id, patch);
+        const row = this.DATA[table].find(r => r.id === id);
+        if (row) Object.assign(row, patch);
+        this.afterListChange();
+    }
+    async deleteListItem(table, id) {
+        if (!confirm('Remove this item from the list? (Existing schedule items keep their values.)')) return;
+        const row = this.DATA[table].find(r => r.id === id);
+        await this.DB.remove(this.TABLES[table], id);
+        this.DATA[table] = this.DATA[table].filter(r => r.id !== id);
+        if (table === 'zones' && row) this.setZoneEndDate(row.name, null);
+        this.renderListsManager();
+        this.afterListChange();
+    }
+    afterListChange() {
+        this.renderListsManager();
+        this.renderLegend();
+        this.buildTypePicker('itemTypePicker');
+        this.buildTypePicker('bulkTypePicker');
+        this.renderFilterBar();
+        this.renderGantt();
+    }
+
+    /* =========================================================================
+       10. BASELINE PDF IMPORT
+       Renders page 1, tries the embedded text layer first (fast, accurate for
+       vector/drawn PDFs), and falls back to Tesseract OCR on the rendered
+       canvas for scanned/image-only sheets. Detected tokens become candidate
+       Zones/Areas the user can add with one click.
+       ========================================================================= */
+
+    async handleBaselineFile(file) {
+        if (!file) return;
+        const statusEl = this.$('baselineStatus');
+        const canvasWrap = this.$('baselineCanvasWrap');
+        statusEl.textContent = 'Loading PDF reader...';
+        canvasWrap.innerHTML = '';
+        this.baselineDetectedTokens = [];
+
+        await ensurePdfJs();
+        statusEl.textContent = 'Loading PDF...';
+        const buf = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+        const page = await pdf.getPage(1);
+        const viewport = page.getViewport({ scale: 1.4 });
+        const canvas = document.createElement('canvas');
+        canvas.width = viewport.width; canvas.height = viewport.height;
+        canvasWrap.appendChild(canvas);
+        await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+
+        statusEl.textContent = 'Extracting text layer...';
+        const textContent = await page.getTextContent();
+        let tokens = textContent.items.map(t => t.str.trim()).filter(s => s && s.length > 1 && s.length < 30 && !/^\d+$/.test(s));
+
+        if (tokens.length < 3) {
+            statusEl.textContent = 'No embedded text found — loading OCR engine...';
+            try {
+                await ensureTesseract();
+                statusEl.textContent = 'Running OCR (this can take a few seconds)...';
+                const { data } = await Tesseract.recognize(canvas, 'eng');
+                tokens = data.text.split(/\n|,/).map(s => s.trim()).filter(s => s && s.length > 1 && s.length < 30 && !/^\d+$/.test(s));
+                statusEl.textContent = `OCR complete — ${tokens.length} candidate label(s) found.`;
+            } catch (err) {
+                console.error(err);
+                statusEl.textContent = 'OCR failed. You can still add labels manually via Manage Lists.';
+            }
+        } else {
+            statusEl.textContent = `${tokens.length} candidate label(s) found in the PDF text layer.`;
+        }
+
+        this.baselineDetectedTokens = [...new Set(tokens)].slice(0, 200);
+        this.renderBaselineTokens();
+    }
+
+    renderBaselineTokens() {
+        const el = this.$('baselineTokens');
+        if (!this.baselineDetectedTokens.length) {
+            el.innerHTML = '<div style="color:#999; font-size:12.5px;">No labels detected yet.</div>';
+            return;
+        }
+        el.innerHTML = this.baselineDetectedTokens.map((t, i) =>
+            `<span class="token-chip" data-i="${i}" onclick="this.classList.toggle('selected')">${escHtml(t)}</span>`).join('');
+    }
+
+    async commitBaselineTokens(kind) {
+        const selected = [...this.$$('#baselineTokens .token-chip.selected')].map(c => c.textContent);
+        if (!selected.length) { this.toast('Select at least one label first.'); return; }
+        for (const name of selected) {
+            await this.ensureListValue(kind, name);
+        }
+        this.afterListChange();
+        this.populateSelect('itemZone', this.DATA.zones.map(z => z.name), true);
+        this.populateSelect('itemArea', this.DATA.areas.map(a => a.name), true);
+        this.toast(`Added ${selected.length} ${kind === 'zones' ? 'zone(s)' : 'area(s)'}`);
+    }
+
+    /* =========================================================================
+       10a. LAUNCHPAD SYNC
+       LaunchPad reads its schedule grid from its own "{PROJECT_KEY}BackEndData" table
+       in this same Supabase project — one row per (day, row-slot), keyed by a
+       deterministic numeric id: YYYYMMDD * 100 + rowIndex (LaunchPad's own
+       generateNumericId scheme, reverse-engineered from its source so ids
+       never collide with rows LaunchPad itself creates).
+       Field mapping mirrors LaunchPad's OWN entry mechanism (addSelectedReadyItems(),
+       the function LaunchPad itself uses to inject an external item into an
+       empty row) for Activity and Asset, plus Notes, which is synced two-way:
+         day_label <- item's start date | activity <- Activity | asset <- Asset | notes <-> Notes
+       Every other column (time, place, status, trade_partners, result,
+       duration) is left untouched, exactly like LaunchPad's own code leaves
+       them for manual entry or its own automation to fill in.
+
+       The link between a pull-plan item and its LaunchPad row lives in the
+       pull-plan item itself (launchpad_id / launchpad_day_label columns on
+       {PROJECT_KEY}schedule_items, persisted in Supabase) — NOT in browser localStorage.
+       That's what actually prevents push/pull from ever double-creating
+       entries: the link survives across devices, browsers, and cleared
+       storage, and a database unique index guarantees one LaunchPad row can
+       never end up linked to two different pull-plan items.
+       ========================================================================= */
+    loadLaunchPadSyncEnabled() { return localStorage.getItem(LAUNCHPAD_SYNC_KEY) === 'true'; }
+    saveLaunchPadSyncEnabled(v) { try { localStorage.setItem(LAUNCHPAD_SYNC_KEY, v ? 'true' : 'false'); } catch (e) {} }
+
+    // LaunchPad's own formula (matches its generateNumericId exactly) —
+    // e.g. "2026-04-20" row 5 -> 2026042005. Row index must stay 0-98 or it
+    // collides with the next day's block.
+    launchPadNumericId(dayLabel, index) {
+        const numericDate = parseInt(dayLabel.replace(/-/g, ''), 10);
+        return (numericDate * 100) + index;
+    }
+
+    async findFreeLaunchPadIndex(dayLabel) {
+        const { data, error } = await this._supabase.from(this.LAUNCHPAD_TABLE).select('id').eq('day_label', dayLabel);
+        if (error) { console.error('LaunchPad row lookup failed', error); return null; }
+        const base = parseInt(dayLabel.replace(/-/g, ''), 10) * 100;
+        const used = new Set((data || []).map(r => r.id - base));
+        for (let i = 0; i < 99; i++) { if (!used.has(i)) return i; }
+        return null; // that day's 0-98 block is completely full
+    }
+
+    // Mirrors LaunchPad's own addSelectedReadyItems() — its native mechanism
+    // for injecting an external item into the grid — which only ever sets
+    // Activity and Asset, leaving every other column alone for LaunchPad's
+    // own automation/manual entry to fill in later.
+    itemToLaunchPadRow(item, numericId, dayLabel) {
+        return {
+            id: numericId,
+            day_label: dayLabel,
+            activity: item.activity_name || '',
+            asset: item.asset_name || '',
+            notes: item.notes || ''
+        };
+    }
+
+    // Pushes one item to its LaunchPad row, reusing the same row if this item
+    // was already synced and hasn't changed days; allocates a fresh free slot
+    // otherwise. Returns true on success.
+    // Finds a LaunchPad row with the same asset+activity that isn't already
+    // linked to one of our items — i.e. something entered independently in
+    // both systems — so it can be matched up instead of doubled.
+    async findMatchingUnlinkedLaunchPadRow(assetName, activityName) {
+        const { data, error } = await this._supabase.from(this.LAUNCHPAD_TABLE)
+            .select('id, day_label').eq('asset', assetName).eq('activity', activityName);
+        if (error || !data || !data.length) return null;
+        const linkedIds = new Set(this.DATA.items.filter(i => i.launchpad_id).map(i => i.launchpad_id));
+        return data.find(row => !linkedIds.has(row.id)) || null;
+    }
+
+    async syncItemToLaunchPad(item) {
+        if (!this._supabase) return false;
+        const dayLabel = new Date(item.start_ts).toISOString().slice(0, 10);
+        let numericId;
+        let oldIdToRemove = null;
+        if (item.launchpad_id && item.launchpad_day_label === dayLabel) {
+            numericId = item.launchpad_id;
+        } else if (!item.launchpad_id) {
+            const match = await this.findMatchingUnlinkedLaunchPadRow(item.asset_name, item.activity_name);
+            if (match) {
+                numericId = match.id;
+            } else {
+                const idx = await this.findFreeLaunchPadIndex(dayLabel);
+                if (idx === null) { console.error(`LaunchPad: no free row slot for ${dayLabel}`); return false; }
+                numericId = this.launchPadNumericId(dayLabel, idx);
+            }
+        } else {
+            // already linked, but the day changed here — LaunchPad's id scheme
+            // is day-encoded, so this needs a new id. Without cleaning up the
+            // old row, it stays behind on the original day as an orphan while
+            // this new one gets created — the exact "moved but old one is
+            // still there" bug. Remember the old id so it can be deleted once
+            // the new row is safely written.
+            oldIdToRemove = item.launchpad_id;
+            const idx = await this.findFreeLaunchPadIndex(dayLabel);
+            if (idx === null) { console.error(`LaunchPad: no free row slot for ${dayLabel}`); return false; }
+            numericId = this.launchPadNumericId(dayLabel, idx);
+        }
+        const row = this.itemToLaunchPadRow(item, numericId, dayLabel);
+        const { error } = await this._supabase.from(this.LAUNCHPAD_TABLE).upsert([row]);
+        if (error) { console.error('LaunchPad sync failed', error); return false; }
+        if (oldIdToRemove !== null) {
+            const { error: cleanupError } = await this._supabase.from(this.LAUNCHPAD_TABLE).delete().eq('id', oldIdToRemove);
+            if (cleanupError) console.error('LaunchPad old-row cleanup failed (new row is correct, but the old one may still be there)', cleanupError);
+        }
+        item.launchpad_id = numericId;
+        item.launchpad_day_label = dayLabel;
+        await this.DB.update(this.TABLES.items, item.id, { launchpad_id: numericId, launchpad_day_label: dayLabel });
+        return true;
+    }
+
+    async syncAllToLaunchPad() {
+        if (!this._supabase) { this.toast('Connect to Supabase first — see the header subtitle.'); return; }
+        if (!this.DATA.items.length) { this.toast('No schedule items to push yet.'); return; }
+        this.setSaveIndicator('dirty', 'Pushing to LaunchPad...');
+        let ok = 0, fail = 0;
+        for (const item of this.DATA.items) {
+            const success = await this.syncItemToLaunchPad(item);
+            if (success) ok++; else fail++;
+        }
+        this.setSaveIndicator('ready', 'Ready');
+        this.toast(`Pushed ${ok} item(s) to LaunchPad${fail ? `, ${fail} failed — see console` : ''}`, 5000);
+        this.renderGantt();
+    }
+
+    toggleLaunchPadSync() {
+        this.LAUNCHPAD_SYNC_ENABLED = !this.LAUNCHPAD_SYNC_ENABLED;
+        this.saveLaunchPadSyncEnabled(this.LAUNCHPAD_SYNC_ENABLED);
+        this.updateLaunchPadSyncBtn();
+        this.closeAllMenus();
+        if (this.LAUNCHPAD_SYNC_ENABLED) {
+            this.toast('Auto-sync to LaunchPad is on — every save now also pushes there.', 4000);
+            this.syncAllToLaunchPad();
+        } else {
+            this.toast('Auto-sync to LaunchPad is off.');
+        }
+    }
+    updateLaunchPadSyncBtn() {
+        const menuItem = this.$('launchpadSyncMenuItem');
+        const btn = this.$('launchpadMenuBtn');
+        if (menuItem) menuItem.textContent = this.LAUNCHPAD_SYNC_ENABLED ? '📡 Sync to LaunchPad: On' : '📡 Sync to LaunchPad: Off';
+        if (btn) btn.classList.toggle('primary', this.LAUNCHPAD_SYNC_ENABLED);
+    }
+    statusCacheKey(asset, activity) { return `${asset}|||${activity}`; }
+
+    async fetchLaunchPadStatus(activity, asset) {
+        const key = this.statusCacheKey(asset, activity);
+        if (this.STATUS_CACHE[key] && this.STATUS_CACHE[key] !== 'error') return this.STATUS_CACHE[key];
+        this.STATUS_CACHE[key] = 'pending';
+        try {
+            const url = `${LAUNCHPAD_STATUS_SCRIPT_URL}?action=lookup&col3=${encodeURIComponent(activity)}&col4=${encodeURIComponent(asset)}`;
+            const res = await fetch(url);
+            const data = await res.json();
+            this.STATUS_CACHE[key] = (data && data.result) ? { result: data.result, url: data.url || null } : { result: 'NA', url: null };
+        } catch (err) {
+            console.error('LaunchPad status lookup failed', err);
+            this.STATUS_CACHE[key] = 'error';
+        }
+        return this.STATUS_CACHE[key];
+    }
+
+    isStatusNotReady(asset, activity) {
+        const cached = this.STATUS_CACHE[this.statusCacheKey(asset, activity)];
+        if (!cached || cached === 'pending' || cached === 'error') return false;
+        return /open|incomplete/i.test(cached.result || '');
+    }
+
+    async fetchLaunchPadStatusInto(activity, asset, elementId) {
+        const status = await this.fetchLaunchPadStatus(activity, asset);
+        const target = this.$(elementId);
+        if (!target) return; // panel closed before this resolved
+        if (status === 'error') { target.textContent = 'Unavailable'; return; }
+        target.innerHTML = status.url
+            ? `<a href="${status.url}" target="_blank" rel="noopener noreferrer">${escHtml(status.result)}</a>`
+            : escHtml(status.result);
+    }
+
+    isPastOrToday(item) {
+        const endOfToday = new Date(); endOfToday.setHours(23, 59, 59, 999);
+        return new Date(item.start_ts).getTime() <= endOfToday.getTime();
+    }
+
+    // The "result" column lives directly on {PROJECT_KEY}BackEndData now, so past and
+    // current-day items can read it straight from Supabase via their own
+    // launchpad_id — no round trip through the Apps Script lookup needed.
+    async fetchSupabaseResult(launchpadId) {
+        if (!launchpadId) return null;
+        if (Object.prototype.hasOwnProperty.call(this.RESULT_CACHE, launchpadId)) return this.RESULT_CACHE[launchpadId];
+        if (!this._supabase) return null;
+        const { data, error } = await this._supabase.from(this.LAUNCHPAD_TABLE).select('result').eq('id', launchpadId).maybeSingle();
+        if (error) { console.error('Supabase result lookup failed', error); return null; }
+        this.RESULT_CACHE[launchpadId] = (data && data.result) ? data.result : null;
+        return this.RESULT_CACHE[launchpadId];
+    }
+    async fetchSupabaseResultInto(launchpadId, elementId) {
+        const target = this.$(elementId);
+        if (!target) return;
+        if (!this._supabase || !launchpadId) { target.textContent = '—'; return; }
+        const result = await this.fetchSupabaseResult(launchpadId);
+        const t2 = this.$(elementId);
+        if (!t2) return; // panel closed before this resolved
+        t2.textContent = result || '—';
+    }
+
+    // A predecessor's constraint is considered satisfied — and stops blocking
+    // its successor in the UI — once LaunchPad's own result for it reads Pass
+    // or Complete. Anything else (incomplete, failed, rescheduled, in
+    // progress, or simply no result yet) keeps the constraint showing.
+    async isPredecessorSatisfied(predItem) {
+        if (!predItem.launchpad_id) return false;
+        const result = await this.fetchSupabaseResult(predItem.launchpad_id);
+        return !!(result && /pass|complete/i.test(result));
+    }
+
+    // Builds the "Constraints (predecessors)" text for an item, filtering out
+    // any predecessor whose LaunchPad result already reads Pass/Complete.
+    async unsatisfiedPredecessorsLabel(it) {
+        const preds = (it.predecessor_ids || []).map(pid => this.DATA.items.find(i => i.id === pid)).filter(Boolean);
+        if (!preds.length) return 'None';
+        const flags = await Promise.all(preds.map(p => this.isPredecessorSatisfied(p)));
+        const remaining = preds.filter((p, i) => !flags[i]).map(p => `${p.asset_name} — ${p.activity_name}`);
+        if (!remaining.length) return preds.length ? 'None (all predecessors complete)' : 'None';
+        return remaining.join(', ');
+    }
+
+    // Fetches status for every distinct (asset, activity) pair currently on
+    // the schedule, sequentially (LaunchPad's Apps Script endpoint isn't
+    // built for bursts of concurrent calls), then re-renders so any
+    // newly-detected "not ready" items get their orange frame.
+    async refreshAllStatuses() {
+        if (this.statusRefreshInFlight) return;
+        this.statusRefreshInFlight = true;
+        const pairs = new Set();
+        this.DATA.items.forEach(it => pairs.add(this.statusCacheKey(it.asset_name, it.activity_name)));
+        let done = 0;
+        for (const key of pairs) {
+            const [asset, activity] = key.split('|||');
+            await this.fetchLaunchPadStatus(activity, asset);
+            done++;
+        }
+        this.statusRefreshInFlight = false;
+        this.setSaveIndicator('ready', 'Ready');
+        this.renderGantt();
+        this.toast(`Status refreshed for ${pairs.size} activity/asset combination(s).`);
+    }
+
+    openDayDetail(isoDate) {
+        const dayItems = this.getFilteredItems().filter(it => {
+            const d = new Date(it.start_ts);
+            const itIso = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+            return itIso === isoDate;
+        });
+        const dateObj = new Date(isoDate + 'T00:00');
+        this.$('dayDetailTitle').textContent = dateObj.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+
+        if (!dayItems.length) {
+            this.$('dayDetailBody').innerHTML = `<div class="empty-state"><div class="emoji">🗓️</div>Nothing scheduled this day.</div>`;
+            this.openModal('dayDetailModal');
+            return;
+        }
+
+        // ready critical-path items first (most actionable — do these now),
+        // then critical-but-blocked, then everything else, not-ready ahead of
+        // ready within each tier so blockers still surface early
+        dayItems.sort((a, b) => {
+            const aCrit = this.isCriticalItem(a.id) ? 0 : 1;
+            const bCrit = this.isCriticalItem(b.id) ? 0 : 1;
+            if (aCrit !== bCrit) return aCrit - bCrit;
+            const aNotReady = this.isStatusNotReady(a.asset_name, a.activity_name) ? 1 : 0;
+            const bNotReady = this.isStatusNotReady(b.asset_name, b.activity_name) ? 1 : 0;
+            if (aNotReady !== bNotReady) return aNotReady - bNotReady;
+            return new Date(a.start_ts) - new Date(b.start_ts);
+        });
+
+        this.$('dayDetailBody').innerHTML = dayItems.map(it => {
+            const succs = this.DATA.items.filter(x => (x.predecessor_ids || []).includes(it.id)).map(x => `${x.asset_name} — ${x.activity_name}`);
+            const critical = this.isCriticalItem(it.id);
+            const notReady = this.isStatusNotReady(it.asset_name, it.activity_name);
+            const borderColor = notReady ? '#d32f2f' : (critical ? '#f57c00' : '#eee');
+            const statusElId = `dayStatus-${it.id}`;
+            const resultElId = `dayResult-${it.id}`;
+            const predsElId = `dayPreds-${it.id}`;
+            return `<div style="border:1px solid ${borderColor}; border-left:5px solid ${this.activityColor(it.activity_name)}; border-radius:6px; padding:12px 14px; margin-bottom:10px; ${notReady ? 'background:#fff5f5;' : (critical ? 'background:#fff8f0;' : '')}">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <strong style="font-size:14px;">${escHtml(it.asset_name)} — ${escHtml(it.activity_name)}</strong>
+                    <span>
+                        ${notReady ? '<span style="color:#d32f2f; font-weight:700; font-size:12px;">⛔ Not Ready</span>' : ''}
+                        ${critical ? '<span style="color:#f57c00; font-weight:700; font-size:12px; margin-left:8px;">🔥 Critical Path</span>' : ''}
+                    </span>
+                </div>
+                <div style="font-size:12.5px; color:#666; margin-top:6px; line-height:1.8;">
+                    <strong>Zone:</strong> ${escHtml(it.zone || '—')} &nbsp;•&nbsp;
+                    <strong>Type:</strong> ${escHtml(it.type)} &nbsp;•&nbsp;
+                    <strong>Duration:</strong> ${hoursToDays(it.duration_hours)} day(s) &nbsp;•&nbsp;
+                    <strong>Contractor:</strong> ${escHtml(it.contractor_name || '—')}<br>
+                    <strong>Status (LaunchPad):</strong> <span id="${statusElId}">Checking...</span>
+                    ${this.isPastOrToday(it) ? ` &nbsp;•&nbsp; <strong>Result (Supabase):</strong> <span id="${resultElId}">Checking...</span>` : ''}<br>
+                    <strong>Constraints (predecessors):</strong> <span id="${predsElId}">${(it.predecessor_ids||[]).length ? 'Checking...' : 'None'}</span><br>
+                    <strong>Blocks (successors):</strong> ${succs.length ? escHtml(succs.join(', ')) : 'None'}
+                </div>
+                <button class="tool-btn small" style="margin-top:8px;" onclick="this.getRootNode().host.closeModal('dayDetailModal'); this.getRootNode().host.openDetailPanel('${it.id}')">Open item</button>
+            </div>`;
+        }).join('');
+        dayItems.forEach(it => {
+            this.fetchLaunchPadStatusInto(it.activity_name, it.asset_name, `dayStatus-${it.id}`).then(() => {
+                // a fetch can flip an item's not-ready state after the list was
+                // already sorted/painted — resort next time the modal opens
+            });
+            if (this.isPastOrToday(it)) this.fetchSupabaseResultInto(it.launchpad_id, `dayResult-${it.id}`);
+            if ((it.predecessor_ids || []).length) {
+                this.unsatisfiedPredecessorsLabel(it).then(label => {
+                    const el = this.$(`dayPreds-${it.id}`);
+                    if (el) el.textContent = label;
+                });
+            }
+        });
+        this.openModal('dayDetailModal');
+    }
+
+    maybeSyncToLaunchPad(item) {
+        if (this.LAUNCHPAD_SYNC_ENABLED && item) this.syncItemToLaunchPad(item).catch(err => console.error('LaunchPad auto-sync failed', err));
+    }
+
+    // Pulls the current state of {PROJECT_KEY}BackEndData and reconciles it with the
+    // local schedule so there is only ever ONE pull-plan item per real-world
+    // activity, no matter how messy the data on either side has gotten:
+    //   0. First, consolidate any pre-existing duplicates already sitting in
+    //      Pull Planner itself (same asset+activity) — keeps the linked one
+    //      if there is one, else the most recently-starting one, and removes
+    //      the rest (re-pointing any dependency links onto the survivor).
+    //   1. Group every fetched LaunchPad row by (asset, activity) — this is
+    //      the key change: reconciliation is no longer "does this exact row
+    //      id match," it's "how many rows exist for this activity, and which
+    //      one is the real one." A row already linked to one of our items
+    //      always wins that choice (ID comes first, as it should); if none
+    //      of the group's rows are linked yet, the most recently-dated row is
+    //      treated as current. Every other row in the group is just noise
+    //      from however LaunchPad got into this state (e.g. its own move
+    //      operation leaving an old row behind) and is ignored rather than
+    //      spawning a second item here.
+    //   2. That single chosen row either updates an existing linked/matched
+    //      item (move + notes) or, if nothing matches at all, becomes one new
+    //      imported item.
+    async pullFromLaunchPad() {
+        if (!this._supabase) { this.toast('Connect to Supabase first.'); return; }
+        this.setSaveIndicator('dirty', 'Pulling from LaunchPad...');
+        const { data, error } = await this._supabase.from(this.LAUNCHPAD_TABLE).select('*');
+        if (error) { console.error('LaunchPad pull failed', error); this.setSaveIndicator('error', 'Pull failed'); this.toast('Pull from LaunchPad failed — see console.'); return; }
+
+        let moved = 0, imported = 0, matched = 0, deduped = 0;
+        const normKey = (asset, activity) => `${(asset || '').trim().toLowerCase()}|||${(activity || '').trim().toLowerCase()}`;
+
+        // ---- Step 0: consolidate our own pre-existing duplicates ----
+        const ourGroups = {};
+        this.DATA.items.forEach(it => {
+            (ourGroups[normKey(it.asset_name, it.activity_name)] = ourGroups[normKey(it.asset_name, it.activity_name)] || []).push(it);
+        });
+        for (const key of Object.keys(ourGroups)) {
+            const group = ourGroups[key];
+            if (group.length < 2) continue;
+            group.sort((a, b) => {
+                const aLinked = a.launchpad_id ? 1 : 0, bLinked = b.launchpad_id ? 1 : 0;
+                if (aLinked !== bLinked) return bLinked - aLinked; // linked item wins first
+                return new Date(b.start_ts) - new Date(a.start_ts); // else, most recent start wins
+            });
+            const survivor = group[0];
+            for (let i = 1; i < group.length; i++) {
+                const dup = group[i];
+                await this.DB.remove(this.TABLES.items, dup.id);
+                this.DATA.items = this.DATA.items.filter(x => x.id !== dup.id);
+                this.DATA.items.forEach(x => {
+                    if (x.predecessor_ids && x.predecessor_ids.includes(dup.id)) {
+                        x.predecessor_ids = x.predecessor_ids.filter(id => id !== dup.id);
+                        if (!x.predecessor_ids.includes(survivor.id)) x.predecessor_ids.push(survivor.id);
+                    }
+                });
+                deduped++;
+            }
+        }
+
+        // ---- Step 1: group every LaunchPad row by (asset, activity) ----
+        const reverseMap = {};
+        this.DATA.items.forEach(it => { if (it.launchpad_id) reverseMap[it.launchpad_id] = it; });
+
+        const rowGroups = {};
+        (data || []).forEach(row => {
+            if (!row.activity || !row.asset || !row.day_label) return;
+            (rowGroups[normKey(row.asset, row.activity)] = rowGroups[normKey(row.asset, row.activity)] || []).push(row);
+        });
+
+        for (const key of Object.keys(rowGroups)) {
+            const rows = rowGroups[key];
+            // an id already linked to one of our items always wins; among
+            // ties (or when nothing is linked yet), the latest day_label wins
+            rows.sort((a, b) => {
+                const aLinked = reverseMap[a.id] ? 1 : 0, bLinked = reverseMap[b.id] ? 1 : 0;
+                if (aLinked !== bLinked) return bLinked - aLinked;
+                return (b.day_label || '').localeCompare(a.day_label || '');
+            });
+            const bestRow = rows[0];
+
+            // ---- Step 2: resolve to a single item ----
+            let item = reverseMap[bestRow.id];
+            if (!item) {
+                for (const r of rows) { if (reverseMap[r.id]) { item = reverseMap[r.id]; break; } }
+            }
+            if (!item) {
+                // asset+activity identity takes precedence over trusting
+                // whatever this item's launchpad_id currently says — LaunchPad
+                // doesn't reliably preserve row ids or clean up the old row
+                // when an activity moves, so a stale link must not block a
+                // legitimate re-match here (that's exactly how the "moved in
+                // LaunchPad but created a duplicate" bug happened)
+                item = this.DATA.items.find(it =>
+                    it.asset_name.trim().toLowerCase() === bestRow.asset.trim().toLowerCase() &&
+                    it.activity_name.trim().toLowerCase() === bestRow.activity.trim().toLowerCase());
+                if (item && !item.launchpad_id) matched++;
+            }
+
+            if (item) {
+                let dayChanged = false;
+                const patch = {};
+                if (bestRow.day_label !== item.launchpad_day_label) {
+                    const oldStart = new Date(item.start_ts);
+                    const [y, m, d] = bestRow.day_label.split('-').map(Number);
+                    const newStart = new Date(oldStart);
+                    newStart.setFullYear(y, m - 1, d);
+                    item.start_ts = newStart.toISOString();
+                    patch.start_ts = item.start_ts;
+                    dayChanged = true;
+                }
+                if (item.launchpad_id !== bestRow.id) patch.launchpad_id = bestRow.id;
+                item.launchpad_id = bestRow.id;
+                item.launchpad_day_label = bestRow.day_label;
+                patch.launchpad_day_label = bestRow.day_label;
+                if ((bestRow.notes || '') !== (item.notes || '')) {
+                    item.notes = bestRow.notes || '';
+                    patch.notes = item.notes;
+                }
+                await this.DB.update(this.TABLES.items, item.id, patch);
+                if (dayChanged) { await this.enforceDependencies(item.id); moved++; }
+            } else {
+                const startDate = new Date(bestRow.day_label + 'T07:00');
+                await this.ensureListValue('assets', bestRow.asset);
+                await this.ensureListValue('activities', bestRow.activity);
+                const payload = {
+                    asset_name: bestRow.asset,
+                    activity_name: bestRow.activity,
+                    duration_hours: daysToHours(1),
+                    type: this.DATA.types[0]?.name || 'Other',
+                    zone: bestRow.place || (this.DATA.zones[0]?.name || 'Unzoned'),
+                    area: '', asset_type: '',
+                    contractor_name: bestRow.trade_partners || '',
+                    notes: bestRow.notes || 'Imported from LaunchPad',
+                    start_ts: startDate.toISOString(),
+                    predecessor_ids: [],
+                    launchpad_id: bestRow.id,
+                    launchpad_day_label: bestRow.day_label
+                };
+                const saved = await this.DB.insert(this.TABLES.items, payload);
+                const newItem = saved ? { ...saved, duration_hours: payload.duration_hours } : { id: uid(), ...payload };
+                this.DATA.items.push(newItem);
+                imported++;
+            }
+        }
+        this.setSaveIndicator('ready', 'Ready');
+        if (moved || imported || matched || deduped) {
+            this.toast(`Pulled from LaunchPad: ${imported} imported, ${matched} matched up, ${moved} moved, ${deduped} duplicate(s) cleaned up.`, 6500);
+            this.renderFilterBar();
+            this.renderGantt();
+        } else {
+            this.toast('Nothing new from LaunchPad — everything already matches.');
+        }
+    }
+
+    /* =========================================================================
+       10b. GOOGLE SHEETS SYNC
+       Pushes the current schedule (respecting active filters) into a Google
+       Sheet stored in Google Drive, using an OAuth token obtained client-side
+       via Google Identity Services. The spreadsheet is created once (inside
+       GOOGLE_DRIVE_FOLDER_ID if set) and reused on every subsequent sync.
+       ========================================================================= */
+
+    ensureGoogleTokenClient() {
+        if (!window.google || !google.accounts || !google.accounts.oauth2) return null;
+        if (!this.googleTokenClient) {
+            this.googleTokenClient = google.accounts.oauth2.initTokenClient({
+                client_id: GOOGLE_CLIENT_ID,
+                scope: 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file',
+                callback: () => {}
+            });
+        }
+        return this.googleTokenClient;
+    }
+    requestGoogleToken(forceConsent) {
+        return new Promise((resolve, reject) => {
+            const client = this.ensureGoogleTokenClient();
+            if (!client) { reject(new Error('Google Identity Services not loaded')); return; }
+            client.callback = (resp) => {
+                if (resp.error) { reject(resp); return; }
+                this.googleAccessToken = resp.access_token;
+                resolve(this.googleAccessToken);
+            };
+            client.requestAccessToken({ prompt: forceConsent ? 'consent' : '' });
+        });
+    }
+
+    async createSheetInDrive(token) {
+        const metadata = {
+            name: 'Pull Plan Schedule',
+            mimeType: 'application/vnd.google-apps.spreadsheet'
+        };
+        if (GOOGLE_DRIVE_FOLDER_ID) metadata.parents = [GOOGLE_DRIVE_FOLDER_ID];
+        const res = await fetch('https://www.googleapis.com/drive/v3/files', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(metadata)
+        });
+        if (!res.ok) throw new Error('Drive create failed: ' + (await res.text()));
+        const data = await res.json();
+        return data.id;
+    }
+
+    async writeScheduleToSheet(token, sheetId) {
+        const rows = this.exportRowsForReport();
+        const header = rows.length ? Object.keys(rows[0]) : ['Date','Time','Asset','Activity','Duration (days)','Type','Zone','Area','Asset Type','Contractor','Notes'];
+        const values = [header, ...rows.map(r => header.map(h => r[h] ?? ''))];
+        const range = 'A1';
+        const res = await fetch(
+            `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}?valueInputOption=RAW`,
+            {
+                method: 'PUT',
+                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ range, majorDimension: 'ROWS', values })
+            }
+        );
+        if (!res.ok) throw new Error('Sheets write failed: ' + (await res.text()));
+    }
+
+    async syncToGoogleSheet() {
+        if (!GOOGLE_CONFIGURED) {
+            this.toast('Add your Google OAuth Client ID in the script config first (see README).');
+            return;
+        }
+        this.setSaveIndicator('dirty', 'Connecting to Google...');
+        try {
+            const token = await this.requestGoogleToken(!this.googleAccessToken);
+            let sheetId = localStorage.getItem('pullplan_gsheet_id');
+            if (!sheetId) {
+                this.setSaveIndicator('dirty', 'Creating sheet in Drive...');
+                sheetId = await this.createSheetInDrive(token);
+                localStorage.setItem('pullplan_gsheet_id', sheetId);
+            }
+            this.setSaveIndicator('dirty', 'Pushing schedule...');
+            await this.writeScheduleToSheet(token, sheetId);
+            this.setSaveIndicator('ready', 'Synced to Google Sheets');
+            const link = this.$('openSheetLink');
+            link.href = `https://docs.google.com/spreadsheets/d/${sheetId}/edit`;
+            link.style.display = 'inline';
+            this.toast('Schedule pushed to Google Sheets');
+        } catch (err) {
+            console.error(err);
+            this.setSaveIndicator('error', 'Google sync failed');
+            this.toast('Google Sheets sync failed — see browser console for details');
+        }
+    }
+
+    /* =========================================================================
+       11. EXPORTS — Print (native), PDF report (jsPDF+autotable), XLSX (SheetJS)
+       All three respect the currently active filters.
+       ========================================================================= */
+
+    exportRowsForReport() {
+        return this.getFilteredItems()
+            .slice()
+            .sort((a, b) => new Date(a.start_ts) - new Date(b.start_ts))
+            .map(it => ({
+                Date: new Date(it.start_ts).toLocaleDateString(),
+                Time: new Date(it.start_ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                Asset: it.asset_name,
+                Activity: it.activity_name,
+                'Duration (days)': hoursToDays(it.duration_hours),
+                Type: it.type,
+                Zone: it.zone,
+                Area: it.area || '',
+                'Asset Type': it.asset_type || '',
+                Contractor: it.contractor_name || '',
+                Notes: it.notes || ''
+            }));
+    }
+
+    async exportPDF() {
+        const rows = this.exportRowsForReport();
+        if (!rows.length) { this.toast('No items to export with the current filters.'); return; }
+        await ensureJsPdf();
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF({ orientation: 'landscape' });
+        doc.setFontSize(16);
+        doc.setTextColor(46, 125, 50);
+        doc.text('Pull Plan Schedule', 14, 16);
+        doc.setFontSize(9);
+        doc.setTextColor(100);
+        doc.text(`Generated ${new Date().toLocaleString()}  •  ${rows.length} item(s)`, 14, 22);
+
+        doc.autoTable({
+            startY: 27,
+            head: [Object.keys(rows[0])],
+            body: rows.map(r => Object.values(r)),
+            styles: { fontSize: 8, cellPadding: 2.5 },
+            headStyles: { fillColor: [46, 125, 50], textColor: 255 },
+            alternateRowStyles: { fillColor: [245, 247, 245] }
+        });
+        doc.save(`pull-plan-schedule-${new Date().toISOString().slice(0,10)}.pdf`);
+        this.toast('PDF exported');
+    }
+
+    async exportXLSX() {
+        const rows = this.exportRowsForReport();
+        if (!rows.length) { this.toast('No items to export with the current filters.'); return; }
+        await ensureXlsx();
+        const ws = XLSX.utils.json_to_sheet(rows);
+        ws['!cols'] = Object.keys(rows[0]).map(k => ({ wch: Math.max(10, k.length + 2) }));
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Pull Plan Schedule');
+        XLSX.writeFile(wb, `pull-plan-schedule-${new Date().toISOString().slice(0,10)}.xlsx`);
+        this.toast('XLSX exported');
+    }
+
+    /* =========================================================================
+       12. COMPLETION PLAN — a date-range report grouped by assignee
+       (contractor), so each trade partner can see exactly what they owe and
+       when within the window, in date order.
+       ========================================================================= */
+    openCompletionPlanModal() {
+        const today = new Date().toISOString().slice(0, 10);
+        const twoWeeks = new Date(); twoWeeks.setDate(twoWeeks.getDate() + 14);
+        this.$('completionPlanStart').value = today;
+        this.$('completionPlanEnd').value = twoWeeks.toISOString().slice(0, 10);
+        this.openModal('completionPlanModal');
+    }
+
+    buildCompletionPlanGroups() {
+        const startVal = this.$('completionPlanStart').value;
+        const endVal = this.$('completionPlanEnd').value;
+        if (!startVal || !endVal) { this.toast('Pick both a start and end date.'); return null; }
+        const rangeStart = new Date(startVal + 'T00:00').getTime();
+        const rangeEnd = new Date(endVal + 'T23:59:59').getTime();
+        const items = this.DATA.items
+            .filter(it => { const t = new Date(it.start_ts).getTime(); return t >= rangeStart && t <= rangeEnd; })
+            .sort((a, b) => new Date(a.start_ts) - new Date(b.start_ts));
+        if (!items.length) { this.toast('No activities fall in that date range.'); return null; }
+
+        const groups = {};
+        items.forEach(it => {
+            const assignee = it.contractor_name || 'Unassigned';
+            (groups[assignee] = groups[assignee] || []).push(it);
+        });
+        return { groups, rangeStart, rangeEnd, startVal, endVal };
+    }
+
+    async exportCompletionPlan(format) {
+        const built = this.buildCompletionPlanGroups();
+        if (!built) return;
+        const { groups, startVal, endVal } = built;
+        const assignees = Object.keys(groups).sort();
+
+        // make sure status is fetched (and cached) for everything in this
+        // export first, so the Status column reflects LaunchPad's actual
+        // current values instead of "Checking..." placeholders
+        this.setSaveIndicator('dirty', 'Checking status...');
+        const allItems = assignees.flatMap(a => groups[a]);
+        for (const it of allItems) { await this.fetchLaunchPadStatus(it.activity_name, it.asset_name); }
+        this.setSaveIndicator('ready', 'Ready');
+
+        const statusFor = (it) => {
+            const cached = this.STATUS_CACHE[this.statusCacheKey(it.asset_name, it.activity_name)];
+            if (!cached || cached === 'pending' || cached === 'error') return { text: 'Unavailable', url: null };
+            return { text: cached.result || 'NA', url: cached.url || null };
+        };
+
+        if (format === 'xlsx') {
+            await ensureXlsx();
+            const rows = [];
+            const statusUrls = [];
+            assignees.forEach(assignee => {
+                groups[assignee].forEach(it => {
+                    const status = statusFor(it);
+                    rows.push({
+                        Assignee: assignee,
+                        Date: new Date(it.start_ts).toLocaleDateString(),
+                        Asset: it.asset_name,
+                        Activity: it.activity_name,
+                        Zone: it.zone,
+                        'Duration (days)': hoursToDays(it.duration_hours),
+                        'Critical Path': this.isCriticalItem(it.id) ? 'Y' : 'N',
+                        'Not Ready': this.isStatusNotReady(it.asset_name, it.activity_name) ? 'Y' : 'N',
+                        Status: status.text
+                    });
+                    statusUrls.push(status.url);
+                });
+            });
+            const ws = XLSX.utils.json_to_sheet(rows);
+            ws['!cols'] = Object.keys(rows[0]).map(k => ({ wch: Math.max(10, k.length + 2) }));
+            const statusColIdx = Object.keys(rows[0]).indexOf('Status');
+            statusUrls.forEach((url, i) => {
+                if (!url) return;
+                const cellRef = XLSX.utils.encode_cell({ r: i + 1, c: statusColIdx }); // +1 skips the header row
+                if (ws[cellRef]) ws[cellRef].l = { Target: url };
+            });
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, 'Completion Plan');
+            XLSX.writeFile(wb, `completion-plan-${startVal}-to-${endVal}.xlsx`);
+        } else {
+            await ensureJsPdf();
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF({ orientation: 'landscape' });
+            doc.setFontSize(16); doc.setTextColor(46, 125, 50);
+            doc.text('Completion Plan', 14, 16);
+            doc.setFontSize(9); doc.setTextColor(100);
+            doc.text(`${startVal} to ${endVal}  •  Generated ${new Date().toLocaleString()}`, 14, 22);
+            let y = 27;
+            assignees.forEach(assignee => {
+                const statusUrls = [];
+                const rows = groups[assignee].map(it => {
+                    const status = statusFor(it);
+                    statusUrls.push(status.url);
+                    return [
+                        new Date(it.start_ts).toLocaleDateString(), it.asset_name, it.activity_name, it.zone,
+                        `${hoursToDays(it.duration_hours)}d`, this.isCriticalItem(it.id) ? 'Y' : 'N',
+                        this.isStatusNotReady(it.asset_name, it.activity_name) ? 'Y' : 'N', status.text
+                    ];
+                });
+                doc.setFontSize(11); doc.setTextColor(46, 125, 50);
+                doc.text(assignee, 14, y + 5);
+                doc.autoTable({
+                    startY: y + 8,
+                    head: [['Date', 'Asset', 'Activity', 'Zone', 'Duration', 'Critical', 'Not Ready', 'Status']],
+                    body: rows,
+                    styles: { fontSize: 8, cellPadding: 2.5 },
+                    headStyles: { fillColor: [46, 125, 46], textColor: 255 },
+                    alternateRowStyles: { fillColor: [245, 247, 245] },
+                    didParseCell: (data) => {
+                        if (data.section === 'body' && data.column.index === 7 && statusUrls[data.row.index]) {
+                            data.cell.styles.textColor = [21, 101, 192];
+                        }
+                    },
+                    didDrawCell: (data) => {
+                        if (data.section === 'body' && data.column.index === 7) {
+                            const url = statusUrls[data.row.index];
+                            if (url) doc.link(data.cell.x, data.cell.y, data.cell.width, data.cell.height, { url });
+                        }
+                    }
+                });
+                y = doc.lastAutoTable.finalY + 12;
+                if (y > 180) { doc.addPage(); y = 20; }
+            });
+            doc.save(`completion-plan-${startVal}-to-${endVal}.pdf`);
+        }
+        this.toast('Completion plan exported');
+        this.closeModal('completionPlanModal');
+    }
+
+    showBridgeViewerUpsell() {
+        if (this.$('bridge-viewer-upsell')) return;
+        const modal = document.createElement('div');
+        modal.id = 'bridge-viewer-upsell';
+        modal.style.cssText = 'position:absolute; inset:0; background:rgba(0,0,0,0.4); z-index:5000; display:flex; align-items:center; justify-content:center;';
+        modal.innerHTML = `
+            <div style="background:white; border-radius:10px; padding:28px; max-width:360px; text-align:center; box-shadow:0 10px 40px rgba(0,0,0,0.25); font-family: inherit;">
+                <div style="font-size:36px; margin-bottom:10px;">🔒</div>
+                <h3 style="margin:0 0 8px; color:#333;">View-Only Access</h3>
+                <p style="color:#666; font-size:14px; margin-bottom:20px;">You have viewer access to this project and can't make changes here. Want to request editor access?</p>
+                <button onclick="this.getRootNode().host.requestBridgeHigherAccess()" style="background:#2e7d32; color:white; border:none; padding:12px 20px; border-radius:6px; cursor:pointer; font-weight:bold; width:100%; margin-bottom:8px;">Request Editor Access</button>
+                <button onclick="this.getRootNode().host.closeBridgeViewerUpsell()" style="background:none; border:none; color:#999; cursor:pointer; font-size:13px;">Cancel</button>
+            </div>
+        `;
+        // Appended to this component's own shadow root (not document.body) —
+        // unlike equipment-tracker-view's filter-dropdown, there's no overflow
+        // clipping this needs to escape; it's just an upsell dialog.
+        this.shadowRoot.appendChild(modal);
+    }
+
+    closeBridgeViewerUpsell() {
+        const modal = this.$('bridge-viewer-upsell');
+        if (modal) modal.remove();
+    }
+
+    async requestBridgeHigherAccess() {
+        const modal = this.$('bridge-viewer-upsell');
+        if (modal) modal.innerHTML = '<div style="background:white; border-radius:10px; padding:28px; text-align:center; font-size:14px; color:#666;">Sending request...</div>';
+
+        try {
+            if (!this.USER_EMAIL) throw new Error('No email was passed in from LaunchPad — please request access from there instead.');
+
+            // Look up this project's own Apps Script URL / admin email directly
+            // rather than assuming a scriptUrl param was passed in, so this
+            // stays correct regardless of how this file was opened.
+            const { data: project, error: projectErr } = await this._supabase
+                .from('launchpad_projects')
+                .select('google_script_url, admin_email')
+                .eq('project_key', this.PROJECT_KEY)
+                .maybeSingle();
+
+            if (projectErr || !project) throw new Error("Could not find this project's configuration.");
+
+            const accessRequestsTable = `${this.PROJECT_KEY}access_requests`;
+
+            // Avoid spamming duplicate upgrade requests if one's already pending.
+            const { data: existing } = await this._supabase
+                .from(accessRequestsTable)
+                .select('email')
+                .ilike('email', this.USER_EMAIL)
+                .maybeSingle();
+
+            if (!existing) {
+                const { error: insertErr } = await this._supabase
+                    .from(accessRequestsTable)
+                    .insert([{ email: this.USER_EMAIL, company: '', requested_role: 'editor' }]);
+                if (insertErr) throw insertErr;
+            }
+
+            const url = `${project.google_script_url}?action=requestAccess&email=${encodeURIComponent(this.USER_EMAIL)}&company=${encodeURIComponent('')}&admin=${encodeURIComponent(project.admin_email || '')}`;
+            await fetch(url);
+
+            if (modal) modal.remove();
+            alert('Your request for editor access has been sent to the admin.');
+        } catch (e) {
+            if (modal) modal.remove();
+            alert('Could not send the request: ' + e.message);
+        }
+    }
+}
+
+customElements.define('bridge-view', BridgeView);

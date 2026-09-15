@@ -1556,12 +1556,7 @@ body.dark-mode .phase-row {
         <div class="iframe-spinner"></div>
         <p>Loading Equipment Status Tracker...</p>
     </div>
-    <iframe 
-        id="equipment-tracker-iframe"
-        data-src-base="equipment-tracker.html"
-        style="width: 100%; height: 100%; border: none; margin: 0; padding: 0; display: block;"
-        title="Equipment Status Tracker">
-    </iframe>
+    <div id="equipment-tracker-view-container" style="width: 100%; height: 100%;"></div>
 </div>
 
 <div id="bridge-view" style="display: none; height: 100%; width: 100%; position: relative;">
@@ -1569,12 +1564,7 @@ body.dark-mode .phase-row {
         <div class="iframe-spinner"></div>
         <p>Loading The Bridge...</p>
     </div>
-    <iframe 
-        id="bridge-iframe"
-        data-src-base="bridge.html"
-        style="width: 100%; height: 100%; border: none; margin: 0; padding: 0; display: block;"
-        title="The Bridge">
-    </iframe>
+    <div id="bridge-view-container" style="width: 100%; height: 100%;"></div>
 </div>
 
 <div id="tamperseals-view" style="display: none; height: 100%; width: 100%; position: relative;">
@@ -1582,12 +1572,7 @@ body.dark-mode .phase-row {
         <div class="iframe-spinner"></div>
         <p>Loading Tamper Seals...</p>
     </div>
-    <iframe 
-        id="tamperseal-iframe"
-        data-src-base="tamperseal.html"
-        style="width: 100%; height: 100%; border: none; margin: 0; padding: 0; display: block;"
-        title="Tamper Seals">
-    </iframe>
+    <div id="tamperseal-view-container" style="width: 100%; height: 100%;"></div>
 </div>
 
 <div id="sealform-view" style="display: none; height: 100%; width: 100%; flex-direction: column; position: relative;">
@@ -1601,12 +1586,10 @@ body.dark-mode .phase-row {
             <div class="iframe-spinner"></div>
             <p>Loading Seal Form...</p>
         </div>
-        <iframe 
-            id="sealform-iframe"
-            data-src-base="seal-form.html"
-            style="width: 480px; max-width: 100%; height: 100%; border: none; margin: 0; background: white; box-shadow: 0 0 20px rgba(0,0,0,0.1);"
-            title="Seal Form Preview">
-        </iframe>
+        <div
+            id="sealform-view-container"
+            style="width: 480px; max-width: 100%; height: 100%; background: white; box-shadow: 0 0 20px rgba(0,0,0,0.1); overflow: auto;">
+        </div>
     </div>
 </div>
 
@@ -1899,13 +1882,18 @@ function toggleDarkMode() {
     // Save preference to local storage
     localStorage.setItem('launchpad_dark_mode', isDark ? 'enabled' : 'disabled');
     
-    // Broadcast to ALL iframes on the page (Equipment Tracker, Attributes, etc.)
+    // Broadcast to ALL iframes on the page (Bridge, Tamper Seals, etc.)
     const iframes = document.querySelectorAll('iframe');
     iframes.forEach(iframe => {
         if (iframe && iframe.contentWindow) {
             iframe.contentWindow.postMessage({ type: 'TOGGLE_DARK_MODE', isDark: isDark }, '*');
         }
     });
+
+    // equipment-tracker-view is a custom element now, not an iframe — call
+    // its dark-mode method directly instead of posting a message.
+    const equipmentTrackerEl = document.querySelector('equipment-tracker-view');
+    if (equipmentTrackerEl) equipmentTrackerEl.setDarkMode(isDark);
 
     // Re-run the color logic on every colored cell so already-rendered rows
     // immediately pick up the correct light/dark colors instead of waiting
@@ -2351,14 +2339,11 @@ document.addEventListener('click', (e) => {
 // here with the project/asset/section wired up from the dropdowns above it.
 async function loadSealFormPreview() {
     window.sealFormAssetsLoaded = true;
-    const iframe = document.getElementById('sealform-iframe');
-    if (!iframe || !window.LP_CONFIG) return;
+    const container = document.getElementById('sealform-view-container');
+    if (!container || !window.LP_CONFIG) return;
 
     const overlay = document.getElementById('sealform-iframe-loading');
-    if (overlay) {
-        overlay.style.display = 'flex';
-        iframe.onload = () => { overlay.style.display = 'none'; };
-    }
+    if (overlay) overlay.style.display = 'flex';
 
     if (!cachedSealFormProjectUuid) {
         try {
@@ -2375,13 +2360,18 @@ async function loadSealFormPreview() {
 
     if (!cachedSealFormProjectUuid) {
         if (overlay) overlay.style.display = 'none';
-        iframe.removeAttribute('src');
+        container.innerHTML = '';
         return;
     }
 
-    const base = iframe.getAttribute('data-src-base');
-    const params = new URLSearchParams({ id: cachedSealFormProjectUuid });
-    iframe.src = `${base}?${params.toString()}`;
+    await import('./seal-form-view.js');
+    container.innerHTML = '';
+    const el = document.createElement('seal-form-view');
+    el.setAttribute('project-uuid', cachedSealFormProjectUuid);
+    el.setAttribute('embedded', ''); // suppress document.title changes
+    el.supabaseClient = window.launchpadSupabaseClient; // reuse the shell's authenticated client
+    el.addEventListener('view-ready', () => { if (overlay) overlay.style.display = 'none'; }, { once: true });
+    container.appendChild(el);
 }
 
 // ===== QR CODE GENERATION =====
@@ -2443,12 +2433,52 @@ function renderSealFormQrCode() {
     `;
 }
 
-const IFRAME_VIEW_MAP = {
-    equipment: 'equipment-tracker-iframe',
-    bridge: 'bridge-iframe',
-    tamperseals: 'tamperseal-iframe',
-    sealform: 'sealform-iframe'
+// All four previously-iframed tabs (equipment, bridge, tamperseals,
+// sealform) are now custom elements mounted directly into the DOM instead
+// of iframes — see CUSTOM_ELEMENT_VIEWS/ensureViewMounted() below and
+// loadSealFormPreview() (sealform predates this map and has its own async
+// project-uuid lookup, so it's wired by hand rather than through here).
+// IFRAME_VIEW_MAP/loadIframeIfNeeded() are kept only in case a future tab
+// still needs the iframe path.
+const IFRAME_VIEW_MAP = {};
+
+// Views that are mounted as custom elements (Shadow DOM components) rather
+// than iframes — see ensureViewMounted() below, which mirrors the same
+// lazy-on-first-click pattern loadIframeIfNeeded() uses for the rest.
+const CUSTOM_ELEMENT_VIEWS = {
+    equipment: { tag: 'equipment-tracker-view', module: './equipment-tracker-view.js', container: 'equipment-tracker-view-container' },
+    tamperseals: { tag: 'tamperseal-view', module: './tamperseal-view.js', container: 'tamperseal-view-container' },
+    bridge: { tag: 'bridge-view', module: './bridge-view.js', container: 'bridge-view-container' }
 };
+const _viewMountPromises = {};
+function ensureViewMounted(viewType) {
+    const cfg = CUSTOM_ELEMENT_VIEWS[viewType];
+    if (!cfg) return Promise.resolve();
+    if (!_viewMountPromises[viewType]) {
+        _viewMountPromises[viewType] = import(cfg.module).then(() => {
+            const container = document.getElementById(cfg.container);
+            if (!container || container.querySelector(cfg.tag)) return; // already mounted
+            const el = document.createElement(cfg.tag);
+            el.setAttribute('project', window.LP_CONFIG.projectKey);
+            if (window.LP_CONFIG.googleScriptUrl) el.setAttribute('script-url', window.LP_CONFIG.googleScriptUrl);
+            if (window.userRole) el.setAttribute('role', window.userRole);
+            if (window.__currentUserEmail) el.setAttribute('email', window.__currentUserEmail);
+            el.supabaseClient = window.launchpadSupabaseClient; // reuse the shell's authenticated client
+            container.appendChild(el);
+        }).catch(err => {
+            _viewMountPromises[viewType] = null; // allow retry on next tab switch
+            console.error(`${viewType} view failed to load:`, err);
+        });
+    }
+    return _viewMountPromises[viewType];
+}
+function teardownCustomElementView(viewType) {
+    const cfg = CUSTOM_ELEMENT_VIEWS[viewType];
+    if (!cfg) return;
+    const container = document.getElementById(cfg.container);
+    if (container) container.innerHTML = ''; // removing the element runs its disconnectedCallback
+    _viewMountPromises[viewType] = null;
+}
 
 // Lazy-load helper: fetches a <script src> only once, caching the promise
 // so repeated calls (e.g. switching tabs back and forth) reuse the same
@@ -2505,8 +2535,22 @@ function switchMainView(viewType, btn) {
                 // skip rebuilding it — that's what caused the blank screen
                 // on returning to a tab.
                 oldIframe.removeAttribute('src');
-                if (window.__currentView === 'sealform') window.sealFormAssetsLoaded = false;
             }
+        }
+        // Custom-element views (equipment tracker, etc.) are real element
+        // instances, not iframes — tearing one down means removing it from
+        // the DOM outright (its disconnectedCallback detaches its own
+        // document-level listeners), same "fully destroy, rebuild next
+        // time" behavior the iframes get above.
+        teardownCustomElementView(window.__currentView);
+        // seal-form-view predates CUSTOM_ELEMENT_VIEWS and isn't routed
+        // through ensureViewMounted() (it has its own async project-uuid
+        // lookup in loadSealFormPreview()), so it's torn down the same way
+        // but by hand here.
+        if (window.__currentView === 'sealform') {
+            const sealformContainer = document.getElementById('sealform-view-container');
+            if (sealformContainer) sealformContainer.innerHTML = '';
+            window.sealFormAssetsLoaded = false;
         }
     }
     window.__currentView = viewType;
@@ -2558,26 +2602,45 @@ function switchMainView(viewType, btn) {
         // Lazy load Plotly + the dashboard module only when this tab is opened
         ensureDashboardMounted();
     } else if (viewType === 'equipment') {
-        if (equipmentView) equipmentView.style.display = 'block'; 
-        if (appBody) appBody.style.width = 'calc(100% - 36px)'; 
-        loadIframeIfNeeded('equipment-tracker-iframe');
-    } else if (viewType === 'bridge') { 
-        if (bridgeView) bridgeView.style.display = 'block'; 
-        if (appBody) appBody.style.width = 'calc(100% - 36px)'; 
-        loadIframeIfNeeded('bridge-iframe');
-        // PERF/BUGFIX: the iframe renders its initial layout while still
+        if (equipmentView) equipmentView.style.display = 'block';
+        if (appBody) appBody.style.width = 'calc(100% - 36px)';
+        // The overlay only covers "module loaded + element mounted" —
+        // equipment-tracker-view has its own internal loading overlay for
+        // the actual data fetch, same layering the old iframe had (this
+        // outer spinner used to hide on the iframe's 'load' event, which
+        // fired once its HTML/JS parsed, well before its data finished
+        // fetching).
+        const equipOverlay = document.getElementById('equipment-tracker-iframe-loading');
+        if (equipOverlay && !document.querySelector('#equipment-tracker-view-container equipment-tracker-view')) {
+            equipOverlay.style.display = 'flex';
+        }
+        ensureViewMounted('equipment').then(() => { if (equipOverlay) equipOverlay.style.display = 'none'; });
+    } else if (viewType === 'bridge') {
+        if (bridgeView) bridgeView.style.display = 'block';
+        if (appBody) appBody.style.width = 'calc(100% - 36px)';
+        const bridgeOverlay = document.getElementById('bridge-iframe-loading');
+        if (bridgeOverlay && !document.querySelector('#bridge-view-container bridge-view')) {
+            bridgeOverlay.style.display = 'flex';
+        }
+        // PERF/BUGFIX: the component renders its initial layout while still
         // display:none (measurements are all 0 at that point), so its
         // dependency connector lines never draw until something re-triggers
-        // a render. Tell it it's now actually visible so it can redo that
-        // measurement-dependent work.
-        const bridgeIframe = bridgeView ? bridgeView.querySelector('iframe') : null;
-        if (bridgeIframe && bridgeIframe.contentWindow) {
-            bridgeIframe.contentWindow.postMessage({ type: 'BRIDGE_VIEW_SHOWN' }, '*');
+        // a render. notifyVisible() tells it it's now actually visible so
+        // it can redo that measurement-dependent work — called every time
+        // this tab is opened, not just on first mount.
+        ensureViewMounted('bridge').then(() => {
+            if (bridgeOverlay) bridgeOverlay.style.display = 'none';
+            const bridgeEl = document.querySelector('#bridge-view-container bridge-view');
+            if (bridgeEl) bridgeEl.notifyVisible();
+        });
+    } else if (viewType === 'tamperseals') {
+        if (tamperSealsView) tamperSealsView.style.display = 'block';
+        if (appBody) appBody.style.width = 'calc(100% - 36px)';
+        const tsOverlay = document.getElementById('tamperseal-iframe-loading');
+        if (tsOverlay && !document.querySelector('#tamperseal-view-container tamperseal-view')) {
+            tsOverlay.style.display = 'flex';
         }
-    } else if (viewType === 'tamperseals') { 
-        if (tamperSealsView) tamperSealsView.style.display = 'block'; 
-        if (appBody) appBody.style.width = 'calc(100% - 36px)'; 
-        loadIframeIfNeeded('tamperseal-iframe');
+        ensureViewMounted('tamperseals').then(() => { if (tsOverlay) tsOverlay.style.display = 'none'; });
     } else if (viewType === 'sealform') {
         if (sealFormView) sealFormView.style.display = 'flex';
         if (appBody) appBody.style.width = 'calc(100% - 36px)';
@@ -4155,6 +4218,12 @@ async function triggerFullStatusRefresh() {
         // 1. Initialize Supabase
         const { createClient } = supabase;
         const _supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+        // Exposed so the custom elements mounted below (seal-form-view,
+        // equipment-tracker-view, etc.) can reuse this already-authenticated
+        // client instead of each creating and authenticating their own —
+        // they fall back to creating their own only when loaded standalone
+        // (no shell around them at all).
+        window.launchpadSupabaseClient = _supabase;
 
         // ===== MULTI-PROJECT CONFIG =====
         // Populated by selectProject() once we know which LaunchPad project
@@ -5763,18 +5832,19 @@ function openSettingsForCurrentView() {
     }
 
     if (view === 'equipment') {
-        const iframe = document.getElementById('equipment-tracker-iframe');
-        if (iframe && iframe.contentWindow) {
-            iframe.contentWindow.postMessage({ type: 'OPEN_SETTINGS' }, '*');
-        }
+        // equipment-tracker-view is a custom element now, not an iframe —
+        // call its openSettings() method directly instead of posting a
+        // message.
+        const el = document.querySelector('equipment-tracker-view');
+        if (el) el.openSettings();
         return;
     }
 
     if (view === 'tamperseals') {
-        const iframe = document.getElementById('tamperseal-iframe');
-        if (iframe && iframe.contentWindow) {
-            iframe.contentWindow.postMessage({ type: 'OPEN_SETTINGS' }, '*');
-        }
+        // tamperseal-view is a custom element now, not an iframe — call its
+        // openSettings() method directly instead of posting a message.
+        const el = document.querySelector('tamperseal-view');
+        if (el) el.openSettings();
         return;
     }
 
