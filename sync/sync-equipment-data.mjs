@@ -94,18 +94,30 @@ async function main() {
     const projects = await getProjectsToSync();
     console.log(`Found ${projects.length} project(s) with a google_script_url set.`);
 
-    let hadError = false;
+    // Equipment tracker is the primary thing this pipeline exists for, so
+    // its failures fail the whole run (so a real problem gets noticed).
+    // Dashboard failures are logged clearly but don't fail the run — a
+    // project's dashboard Apps Script action can be broken/undeployed
+    // independently (e.g. a 404 because getDashboardData was never wired
+    // into doGet, or the deployment needs a new version) without that
+    // being a reason to keep alerting on every scheduled run once it's a
+    // known, separate issue to fix on that project's Apps Script side.
+    let hadCriticalError = false;
     for (const project of projects) {
         const projectKey = project.project_key;
         try {
             await syncEquipmentTracker(projectKey, project.google_script_url);
+        } catch (e) {
+            hadCriticalError = true;
+            console.error(`[${projectKey}] equipment tracker sync failed:`, e.message);
+        }
+        try {
             await syncDashboard(projectKey, project.google_script_url);
         } catch (e) {
-            hadError = true;
-            console.error(`[${projectKey}] sync failed:`, e.message);
+            console.warn(`[${projectKey}] dashboard sync failed (non-fatal):`, e.message);
         }
     }
-    if (hadError) process.exit(1);
+    if (hadCriticalError) process.exit(1);
 }
 
 main();
