@@ -15,8 +15,8 @@
 // (a Supabase service_role key, NOT the anon key used in the browser — it
 // needs to bypass RLS to write) set as a GitHub Actions secret.
 //
-// To sync more projects, just add their project_key here.
-const PROJECT_KEYS = ['STY4'];
+// Covers every project in launchpad_projects that has a google_script_url
+// on file — no per-project list to maintain here.
 
 const SUPABASE_URL = 'https://rcnxetcomdrlxvlarqoc.supabase.co';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -44,12 +44,15 @@ async function supabaseRequest(path, options = {}) {
     return res;
 }
 
-async function getProject(projectKey) {
+async function getProjectsToSync() {
     const res = await supabaseRequest(
-        `launchpad_projects?project_key=eq.${encodeURIComponent(projectKey)}&select=project_key,google_script_url`
+        `launchpad_projects?select=project_key,google_script_url&google_script_url=not.is.null`
     );
     const rows = await res.json();
-    return rows[0] || null;
+    // Belt-and-suspenders: also drop rows where the column is an empty
+    // string rather than a real null (PostgREST's not.is.null only
+    // excludes actual NULLs).
+    return rows.filter(p => p.project_key && p.google_script_url);
 }
 
 async function syncEquipmentTracker(projectKey, scriptUrl) {
@@ -88,14 +91,13 @@ async function syncDashboard(projectKey, scriptUrl) {
 }
 
 async function main() {
+    const projects = await getProjectsToSync();
+    console.log(`Found ${projects.length} project(s) with a google_script_url set.`);
+
     let hadError = false;
-    for (const projectKey of PROJECT_KEYS) {
+    for (const project of projects) {
+        const projectKey = project.project_key;
         try {
-            const project = await getProject(projectKey);
-            if (!project || !project.google_script_url) {
-                console.warn(`[${projectKey}] no google_script_url on file in launchpad_projects — skipping`);
-                continue;
-            }
             await syncEquipmentTracker(projectKey, project.google_script_url);
             await syncDashboard(projectKey, project.google_script_url);
         } catch (e) {
