@@ -91,13 +91,13 @@ async function getProjectsToSync() {
 }
 
 async function syncEquipmentTracker(projectKey, scriptUrl) {
-    // Reads the pre-computed cache Apps Script's cacheEquipmentStatusData()
-    // writes (chained onto generateChecklistMatrix()'s existing schedule)
-    // instead of the old bare-URL default action, which recomputed
-    // everything live on every single sync tick and could time out on
-    // large projects. See getCachedEquipmentStatusResponse() in each
-    // project's Apps Script.
-    const payload = await fetchAppsScriptJson(`${scriptUrl}?action=getCachedEquipmentData`);
+    // Calls Apps Script's default (no-action) doGet branch directly, same
+    // as the original approach — it does the checklist/test/issue
+    // combining live on each request. (There's also a getCachedEquipmentData
+    // action available in some projects' scripts from an earlier caching
+    // experiment, reading from an "API Cache" sheet populated by
+    // generateChecklistMatrix() — not used here for now.)
+    const payload = await fetchAppsScriptJson(scriptUrl);
     if (payload.error) throw new Error(`Apps Script returned an error: ${payload.error}`);
 
     await supabaseRequest('launchpad_equipment_tracker_data', {
