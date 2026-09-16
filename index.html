@@ -1326,8 +1326,8 @@ body.dark-mode .phase-row {
    shrinks/shifts to stay fully visible next to the panel instead of
    sliding underneath it. */
 :root {
-    --help-dock-panel-width: 400px;
-    --help-dock-inset: 420px; /* panel width + 16px gutter on each side */
+    --help-dock-panel-width: 460px;
+    --help-dock-inset: 480px; /* panel width + 16px gutter on each side, plus a small buffer */
 }
 .help-modal-docked {
     background: transparent !important;
@@ -1375,13 +1375,15 @@ body.help-docked #loading-overlay {
 
 /* ===== HELP GUIDE IFRAME FIT =====
    Scribe's embed still enforces its own internal minimum layout width
-   even with size=flexible, so at the docked panel's ~400px width its
-   title/step content was getting clipped instead of shrinking. Rendering
-   the iframe at that minimum width and scaling the whole thing down with
-   a CSS transform (rather than relying on the iframe to reflow itself)
-   guarantees it always fits, at the cost of smaller text — same trade the
-   user asked for ("smaller fit"). Full/expanded mode has enough room
-   (900px modal) that no scaling is needed there. */
+   even with size=flexible — 480px (our first guess at that minimum) still
+   wasn't enough and left a horizontal scrollbar/clipped title. Rather than
+   keep guessing at Scribe's actual minimum, this renders the iframe at
+   900px — the SAME width the full/expanded modal already uses, which is
+   confirmed to fit every guide cleanly with no scrollbar — and scales
+   that whole 900px-wide render down to the docked panel's width with a
+   CSS transform. That guarantees a fit no matter how wide any given
+   guide's internal layout is, at the cost of smaller (but fully visible)
+   text, which is the trade the user asked for. */
 .help-guide-frame-wrap {
     flex: 1;
     position: relative;
@@ -1394,9 +1396,9 @@ body.help-docked #loading-overlay {
     display: block;
 }
 .help-modal-docked .help-guide-frame-wrap iframe {
-    width: 480px;   /* Scribe's effective minimum flexible-layout width */
-    height: 120%;   /* 100% / (400/480) so the scaled-down frame still fills the wrap's height */
-    transform: scale(0.8333); /* 400 / 480 — matches --help-dock-panel-width */
+    width: 900px;     /* matches the expanded modal's own width — known to fit every guide with no scrollbar */
+    height: 195.6%;   /* 100% / (460/900) so the scaled-down frame still fills the wrap's height */
+    transform: scale(0.5111); /* 460 / 900 — matches --help-dock-panel-width */
     transform-origin: top left;
 }
 </style>
