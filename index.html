@@ -1338,12 +1338,36 @@ body.dark-mode .phase-row {
 }
 .help-modal-docked .help-modal-panel {
     pointer-events: auto !important;
+    position: relative !important; /* anchors .help-dock-resize-handle below */
     width: var(--help-dock-panel-width) !important;
     max-width: 92vw !important;
     height: 100% !important;
     max-height: none !important;
     border-radius: 10px !important;
     box-shadow: -6px 6px 28px rgba(0,0,0,0.35) !important;
+}
+
+/* Drag handle on the panel's left edge — resizes the dock width live (see
+   startHelpDockResize()/onHelpDockResizeMove() below), with the guide
+   iframe rescaled to match on every move so its content grows/shrinks
+   with the panel instead of staying a fixed size. Hidden outside docked
+   mode since the panel isn't resizable there. */
+.help-dock-resize-handle {
+    display: none;
+}
+.help-modal-docked .help-dock-resize-handle {
+    display: block;
+    position: absolute;
+    top: 0;
+    left: -4px;
+    width: 8px;
+    height: 100%;
+    cursor: ew-resize;
+    z-index: 1;
+}
+.help-dock-resize-handle:hover,
+.help-dock-resize-handle.dragging {
+    background: rgba(0,0,0,0.15);
 }
 
 /* Squeezes the real app (or the sign-in card) down so none of it ends up
@@ -1377,13 +1401,15 @@ body.help-docked #loading-overlay {
    Scribe's embed still enforces its own internal minimum layout width
    even with size=flexible — 480px (our first guess at that minimum) still
    wasn't enough and left a horizontal scrollbar/clipped title. Rather than
-   keep guessing at Scribe's actual minimum, this renders the iframe at
-   900px — the SAME width the full/expanded modal already uses, which is
-   confirmed to fit every guide cleanly with no scrollbar — and scales
-   that whole 900px-wide render down to the docked panel's width with a
-   CSS transform. That guarantees a fit no matter how wide any given
-   guide's internal layout is, at the cost of smaller (but fully visible)
-   text, which is the trade the user asked for. */
+   keep guessing at Scribe's actual minimum, applyHelpDockWidth() (in the
+   script below) renders the iframe at 900px — the SAME width the
+   full/expanded modal already uses, which is confirmed to fit every guide
+   cleanly with no scrollbar — and scales that whole 900px-wide render
+   down to the docked panel's CURRENT width (recalculated live as the
+   panel is resized, via the drag handle) with a CSS transform. That
+   guarantees a fit no matter how wide any given guide's internal layout
+   is or how the user resizes the panel, at the cost of smaller (but fully
+   visible) text at narrower widths. */
 .help-guide-frame-wrap {
     flex: 1;
     position: relative;
@@ -1394,11 +1420,6 @@ body.help-docked #loading-overlay {
     width: 100%;
     height: 100%;
     display: block;
-}
-.help-modal-docked .help-guide-frame-wrap iframe {
-    width: 900px;     /* matches the expanded modal's own width — known to fit every guide with no scrollbar */
-    height: 195.6%;   /* 100% / (460/900) so the scaled-down frame still fills the wrap's height */
-    transform: scale(0.5111); /* 460 / 900 — matches --help-dock-panel-width */
     transform-origin: top left;
 }
 </style>
@@ -1852,6 +1873,7 @@ body.help-docked #loading-overlay {
 
 <div id="help-modal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 10002; align-items: center; justify-content: center;">
     <div class="help-modal-panel" style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); width: 900px; max-width: 95vw; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
+        <div class="help-dock-resize-handle" onmousedown="startHelpDockResize(event, 'help-modal')" title="Drag to resize"></div>
         <div style="display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #eee; background: #1565c0; color: white; flex-shrink: 0;">
             <h3 style="margin: 0; font-size: 18px;">Requesting Access to a LaunchPad Project</h3>
             <div style="display: flex; align-items: center; gap: 8px;">
@@ -1881,6 +1903,7 @@ body.help-docked #loading-overlay {
 
 <div id="schedule-help-modal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 10002; align-items: center; justify-content: center;">
     <div class="help-modal-panel" style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); width: 900px; max-width: 95vw; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
+        <div class="help-dock-resize-handle" onmousedown="startHelpDockResize(event, 'schedule-help-modal')" title="Drag to resize"></div>
         <div style="display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #eee; background: #2e7d32; color: white; flex-shrink: 0;">
             <h3 id="schedule-help-title" style="margin: 0; font-size: 18px;">Schedule Help &amp; Training</h3>
             <div style="display: flex; align-items: center; gap: 8px;">
@@ -1954,6 +1977,7 @@ body.help-docked #loading-overlay {
 
 <div id="equipment-help-modal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 10002; align-items: center; justify-content: center;">
     <div class="help-modal-panel" style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); width: 900px; max-width: 95vw; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
+        <div class="help-dock-resize-handle" onmousedown="startHelpDockResize(event, 'equipment-help-modal')" title="Drag to resize"></div>
         <div style="display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #eee; background: #1565c0; color: white; flex-shrink: 0;">
             <h3 id="equipment-help-title" style="margin: 0; font-size: 18px;">Equipment Status Tracker Help &amp; Training</h3>
             <div style="display: flex; align-items: center; gap: 8px;">
@@ -2027,6 +2051,7 @@ body.help-docked #loading-overlay {
 
 <div id="dashboard-help-modal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 10002; align-items: center; justify-content: center;">
     <div class="help-modal-panel" style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); width: 900px; max-width: 95vw; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
+        <div class="help-dock-resize-handle" onmousedown="startHelpDockResize(event, 'dashboard-help-modal')" title="Drag to resize"></div>
         <div style="display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #eee; background: linear-gradient(135deg, #6a1b9a, #4527a0); color: white; flex-shrink: 0;">
             <h3 id="dashboard-help-title" style="margin: 0; font-size: 18px;">Dashboard Help &amp; Training</h3>
             <div style="display: flex; align-items: center; gap: 8px;">
@@ -4687,19 +4712,32 @@ function closeHelpModal() {
 // left the dock state.
 function resetHelpDock(modalId, btnId) {
     const modal = document.getElementById(modalId);
-    if (modal) modal.classList.remove('help-modal-docked');
+    if (modal) {
+        modal.classList.remove('help-modal-docked');
+        clearHelpDockSizing(modal);
+    }
     const dockBtn = document.getElementById(btnId);
     if (dockBtn) dockBtn.innerHTML = '⇥ Dock';
     document.body.classList.remove('help-docked');
 }
 
-// ===== HELP MODAL "DOCK TO SIDE" =====
-// Shared by all three of the view-specific help modals below (Schedule/
-// Equipment/Dashboard). Docking shrinks the modal into a panel anchored to
-// the right edge and lets clicks pass through everywhere else (see the
-// .help-modal-docked / .help-modal-panel CSS), so a user can keep the
-// guide open on-screen while actually working the steps in LaunchPad
-// underneath it instead of having to close the guide to try each step.
+// ===== HELP MODAL "DOCK TO SIDE" (+ resizing) =====
+// Shared by all four help modals (sign-in/Schedule/Equipment/Dashboard).
+// Docking shrinks the modal into a panel anchored to the right edge and
+// lets clicks pass through everywhere else (see the .help-modal-docked /
+// .help-modal-panel CSS), so a user can keep the guide open on-screen
+// while actually working the steps in LaunchPad underneath it instead of
+// having to close the guide to try each step. The panel's left edge is
+// also drag-resizable (startHelpDockResize() below), with the guide's
+// iframe rescaled to match on every move — the size is remembered
+// per-browser (localStorage) so it's not reset every time someone opens a
+// guide.
+const HELP_DOCK_WIDTH_KEY = 'launchpad_help_dock_width';
+const HELP_DOCK_DEFAULT_WIDTH = 460;
+const HELP_DOCK_MIN_WIDTH = 320;
+const HELP_DOCK_MAX_WIDTH = 1100;
+const HELP_DOCK_IFRAME_NATIVE_WIDTH = 900; // matches the expanded modal's own width — known to fit every guide with no scrollbar
+
 function toggleHelpDock(modalId, btnId) {
     const modal = document.getElementById(modalId);
     if (!modal) return;
@@ -4716,6 +4754,90 @@ function toggleHelpDock(modalId, btnId) {
     // <style> block. Only one help modal is ever open at a time, so a
     // single shared body class is safe here.
     document.body.classList.toggle('help-docked', isDocked);
+
+    if (isDocked) {
+        let width = HELP_DOCK_DEFAULT_WIDTH;
+        try {
+            const saved = parseInt(localStorage.getItem(HELP_DOCK_WIDTH_KEY), 10);
+            if (saved) width = saved;
+        } catch (e) { /* localStorage unavailable — fall back to the default width */ }
+        applyHelpDockWidth(modal, width);
+    } else {
+        clearHelpDockSizing(modal);
+    }
+}
+
+function applyHelpDockWidth(modal, widthPx) {
+    widthPx = Math.min(HELP_DOCK_MAX_WIDTH, Math.max(HELP_DOCK_MIN_WIDTH, widthPx));
+    const panel = modal.querySelector('.help-modal-panel');
+    if (panel) panel.style.setProperty('width', widthPx + 'px', 'important');
+    document.documentElement.style.setProperty('--help-dock-inset', (widthPx + 20) + 'px');
+
+    // Rescales the guide iframe to match, so its content grows/shrinks
+    // with the panel instead of staying whatever fixed size it started at.
+    const iframe = modal.querySelector('.help-guide-frame-wrap iframe');
+    if (iframe) {
+        const scale = widthPx / HELP_DOCK_IFRAME_NATIVE_WIDTH;
+        iframe.style.width = HELP_DOCK_IFRAME_NATIVE_WIDTH + 'px';
+        iframe.style.transform = `scale(${scale})`;
+        iframe.style.height = (100 / scale) + '%';
+    }
+    return widthPx;
+}
+
+function clearHelpDockSizing(modal) {
+    const panel = modal.querySelector('.help-modal-panel');
+    if (panel) panel.style.removeProperty('width');
+    const iframe = modal.querySelector('.help-guide-frame-wrap iframe');
+    if (iframe) {
+        iframe.style.removeProperty('width');
+        iframe.style.removeProperty('height');
+        iframe.style.removeProperty('transform');
+    }
+}
+
+let _helpDockResizeState = null;
+
+function startHelpDockResize(e, modalId) {
+    e.preventDefault();
+    const modal = document.getElementById(modalId);
+    const panel = modal && modal.querySelector('.help-modal-panel');
+    if (!panel) return;
+    _helpDockResizeState = {
+        modal,
+        startX: e.clientX,
+        startWidth: panel.getBoundingClientRect().width
+    };
+    e.currentTarget.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onHelpDockResizeMove);
+    document.addEventListener('mouseup', stopHelpDockResize);
+}
+
+function onHelpDockResizeMove(e) {
+    if (!_helpDockResizeState) return;
+    const { modal, startX, startWidth } = _helpDockResizeState;
+    // Panel is anchored to the right edge, so dragging the handle LEFT
+    // (negative clientX delta) should grow it, and right should shrink it.
+    const delta = startX - e.clientX;
+    const maxAvailable = window.innerWidth - 60;
+    applyHelpDockWidth(modal, Math.min(HELP_DOCK_MAX_WIDTH, maxAvailable, startWidth + delta));
+}
+
+function stopHelpDockResize() {
+    if (_helpDockResizeState) {
+        const panel = _helpDockResizeState.modal.querySelector('.help-modal-panel');
+        if (panel) {
+            try {
+                localStorage.setItem(HELP_DOCK_WIDTH_KEY, String(Math.round(panel.getBoundingClientRect().width)));
+            } catch (e) { /* localStorage unavailable — size just won't persist across sessions */ }
+        }
+    }
+    document.querySelectorAll('.help-dock-resize-handle.dragging').forEach(el => el.classList.remove('dragging'));
+    _helpDockResizeState = null;
+    document.body.style.userSelect = '';
+    document.removeEventListener('mousemove', onHelpDockResizeMove);
+    document.removeEventListener('mouseup', stopHelpDockResize);
 }
 
 // ===== HELP (SCHEDULE SCREEN) =====
