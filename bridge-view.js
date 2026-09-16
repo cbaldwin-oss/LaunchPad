@@ -136,6 +136,25 @@ function ensureXlsx() {
 function hoursToDays(h) { return Math.round((h / HOURS_PER_DAY) * 100) / 100; }
 function daysToHours(d) { return Math.round(d * HOURS_PER_DAY * 100) / 100; }
 
+// Every other date input in this file is a native <input type="date">,
+// which always comes back as YYYY-MM-DD — safe to hand straight to
+// `new Date(str + 'T07:00')`. Pasted WBS schedule data instead carries
+// whatever format the source spreadsheet used, most commonly US-style
+// M/D/YYYY (e.g. "10/26/2026"), which that same concatenation trick would
+// silently turn into an Invalid Date. This normalizes either shape before
+// applying the same default 7am local start time.
+function parseFlexibleDate(str) {
+    if (!str) return null;
+    str = str.trim();
+    if (!str) return null;
+    const us = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (us) {
+        const [, m, d, y] = us;
+        return new Date(`${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}T07:00`);
+    }
+    return new Date(str.includes('T') ? str : str + 'T07:00');
+}
+
 function uid() {
     return 'id-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
@@ -696,6 +715,7 @@ const MARKUP = `
                 <div class="tabs">
                     <button class="tab-btn active" onclick="this.getRootNode().host.switchTab('bulkTab','combo')">Combination Builder</button>
                     <button class="tab-btn" onclick="this.getRootNode().host.switchTab('bulkTab','paste')">Paste / CSV</button>
+                    <button class="tab-btn" onclick="this.getRootNode().host.switchTab('bulkTab','wbs')">Import Schedule (WBS)</button>
                 </div>
                 <div class="tab-panel active" id="bulkTab-combo">
                     <div class="form-grid">
@@ -747,12 +767,19 @@ const MARKUP = `
 Pump-101, Install Piping, 1, Mech, Zone A, Level 1, 2026-08-03, Apex Mechanical, Confirm crane access" style="width:100%; font-family:monospace; font-size:12.5px; padding:10px; border:1px solid #ccc; border-radius:5px;"></textarea>
                     <button class="tool-btn primary" style="margin-top:10px;" onclick="this.getRootNode().host.generateBulkPreview('paste')">Generate Preview →</button>
                 </div>
+                <div class="tab-panel" id="bulkTab-wbs">
+                    <p style="color:#666; font-size:13px; margin-top:0;">Paste rows exported from a WBS schedule (e.g. copied straight from Excel) with columns, in this exact order: <strong>Index, WBS, Activity, Activity Type, Asset, Status, Predecessors, Notes, Start Date, Duration, Trade Partners</strong>. Tab-separated (a normal Excel paste) is safest — commas inside Notes won't get misread. <strong>Index</strong> is required on every row (it's how the Predecessors column links rows to each other); <strong>Duration</strong> can be like "0.5d" or "2d" and is always rounded up to whole days; each row's own Start Date is used as-is, not recalculated from its predecessors.</p>
+                    <textarea id="bulkWbsPasteArea" rows="10" placeholder="Index	WBS	Activity	Activity Type	Asset	Status	Predecessors	Notes	Start Date	Duration	Trade Partners
+3	EYD.Z1.FBAT.04	L2D for Temp power SSS1-A BDC	Temp Power	SSS-1A	Not Started	2		10/26/2026	0.5d	Tune
+4	EYD.Z1.FBAT.05	Temp Power to SSS1-A BDC	Temp Power	SSS-1A	Not Started	3		10/26/2026	1d	" style="width:100%; font-family:monospace; font-size:12.5px; padding:10px; border:1px solid #ccc; border-radius:5px;"></textarea>
+                    <button class="tool-btn primary" style="margin-top:10px;" onclick="this.getRootNode().host.generateBulkPreview('wbs')">Generate Preview →</button>
+                </div>
             </div>
             <div id="bulkStep2" style="display:none;">
                 <p style="color:#666; font-size:13px; margin-top:0;"><strong id="bulkPreviewCount"></strong> — review before adding to the schedule. Every field is editable; remove any rows you don't want.</p>
                 <div style="max-height:340px; overflow:auto; border:1px solid #eee; border-radius:6px;">
                     <table class="preview-table">
-                        <thead><tr><th>Asset</th><th>Activity</th><th>Dur (days)</th><th>Type</th><th>Zone</th><th>Area</th><th>Start</th><th>Contractor</th><th>Notes</th><th>Linked after</th><th></th></tr></thead>
+                        <thead id="bulkPreviewHead"><tr><th>Asset</th><th>Activity</th><th>Dur (days)</th><th>Type</th><th>Zone</th><th>Area</th><th>Start</th><th>Contractor</th><th>Notes</th><th>Linked after</th><th></th></tr></thead>
                         <tbody id="bulkPreviewBody"></tbody>
                     </table>
                 </div>
@@ -3158,6 +3185,7 @@ export class BridgeView extends HTMLElement {
 
     generateBulkPreview(mode) {
         this.bulkPreviewRows = [];
+        this.bulkPreviewMode = mode;
         if (mode === 'combo') {
             const assets = [...this.$$('#bulkAssetList input:checked')].map(i => i.value);
             const activities = [...this.$$('#bulkActivityList input:checked')].map(i => i.value);
@@ -3189,7 +3217,7 @@ export class BridgeView extends HTMLElement {
                     if (autoLink) cursor = new Date(cursor.getTime() + daysToHours(duration) * 3600000);
                 });
             });
-        } else {
+        } else if (mode === 'paste') {
             const raw = this.$('bulkPasteArea').value.trim();
             if (!raw) { this.toast('Paste some rows first.'); return; }
             const lines = raw.split('\n').filter(l => l.trim());
@@ -3210,6 +3238,60 @@ export class BridgeView extends HTMLElement {
                     start: start.toISOString()
                 });
             });
+        } else if (mode === 'wbs') {
+            // Index, WBS, Activity, Activity Type, Asset, Status, Predecessors,
+            // Notes, Start Date, Duration, Trade Partners — a fixed column
+            // order matching a WBS schedule exported from Excel (e.g. a Cx
+            // schedule PDF that was itself converted from a spreadsheet).
+            const raw = this.$('bulkWbsPasteArea').value.trim();
+            if (!raw) { this.toast('Paste the schedule rows first.'); return; }
+            const lines = raw.split('\n').filter(l => l.trim());
+            const rows = [];
+            lines.forEach((line, i) => {
+                if (i === 0 && /index/i.test(line) && /predecessors/i.test(line)) return; // skip header row
+                // Prefer a literal tab as the delimiter whenever the line has
+                // one (a real Excel paste) — free text columns like Notes
+                // routinely contain commas ("...yet, 125V will require..."),
+                // which would otherwise get misread as extra column breaks.
+                const parts = line.includes('\t')
+                    ? line.split('\t').map(s => s.trim())
+                    : line.split(/,(?![^"]*")/).map(s => s.trim());
+                const [idxStr, wbs, activity, actType, asset, , predsRaw, notes, startDate, durationRaw, contractor] = parts;
+                const srcIndex = parseInt(idxStr, 10);
+                // Index is required — it's the only thing Predecessors on
+                // OTHER rows can reference to link back to this one.
+                if (!Number.isFinite(srcIndex) || !asset || !activity) return;
+                const parsedStart = parseFlexibleDate(startDate);
+                const start = (parsedStart && !isNaN(parsedStart)) ? parsedStart : new Date();
+                // Duration arrives as "0.5d" / "1d" / "2d" etc. — always
+                // round UP to a whole day (per request), and a multi-day
+                // duration just spans that many calendar days starting on
+                // this row's own Start Date (set below, never recalculated
+                // from a predecessor's finish time).
+                const durDays = Math.max(1, Math.ceil(parseFloat(durationRaw) || 1));
+                rows.push({
+                    srcIndex, wbs: wbs || '', asset, activity,
+                    duration: durDays,
+                    type: actType || (this.DATA.types[0]?.name || 'Other'),
+                    zone: this.ASSET_TO_ZONE_MAP[asset] || (this.DATA.zones[0]?.name || ''),
+                    area: this.ASSET_TO_AREA_MAP[asset] || '',
+                    contractor: contractor || '',
+                    notes: [wbs ? `WBS ${wbs}` : '', notes || ''].filter(Boolean).join(' — '),
+                    start: start.toISOString(),
+                    predSrcIndices: (predsRaw || '').split(',').map(s => parseInt(s.trim(), 10)).filter(Number.isFinite)
+                });
+            });
+            if (!rows.length) { this.toast('No valid rows found — every row needs at least an Index, Asset, and Activity.'); return; }
+            // Resolve each row's Predecessors (source Index references) into
+            // positions within THIS batch — same idea as predLinkIndex below
+            // for the simpler paste format, just supporting more than one
+            // predecessor per row since a real WBS row can depend on several.
+            const indexToPosition = {};
+            rows.forEach((r, i) => { indexToPosition[r.srcIndex] = i; });
+            rows.forEach(r => {
+                r.predLinkIndices = r.predSrcIndices.map(si => indexToPosition[si]).filter(pos => pos !== undefined);
+            });
+            this.bulkPreviewRows = rows;
         }
         if (!this.bulkPreviewRows.length) { this.toast('No valid rows to preview.'); return; }
         this.renderBulkPreview();
@@ -3238,28 +3320,50 @@ export class BridgeView extends HTMLElement {
         const zoneOpts = this.DATA.zones.map(z => z.name);
         const areaOpts = this.DATA.areas.map(a => a.name);
         const contractorOpts = this.DATA.contractors.map(c => c.name);
+        const isWbs = this.bulkPreviewMode === 'wbs';
+        this.$('bulkPreviewHead').innerHTML = isWbs
+            ? `<tr><th>Index</th><th>Asset</th><th>Activity</th><th>Dur (days)</th><th>Type</th><th>Start</th><th>Contractor</th><th>Notes</th><th>Predecessors</th><th></th></tr>`
+            : `<tr><th>Asset</th><th>Activity</th><th>Dur (days)</th><th>Type</th><th>Zone</th><th>Area</th><th>Start</th><th>Contractor</th><th>Notes</th><th>Linked after</th><th></th></tr>`;
         this.$('bulkPreviewBody').innerHTML = this.bulkPreviewRows.map((r, i) => {
             const dateVal = new Date(r.start).toISOString().slice(0, 10);
+            const assetCell = `<td><select style="width:120px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'asset',this.value)">${this.selectOptionsHtml(assetOpts, r.asset, false)}</select></td>`;
+            const activityCell = `<td>
+                    <span class="legend-swatch" style="background:${this.activityColor(r.activity)}; display:inline-block; width:9px;height:9px;border-radius:3px; margin-right:3px;"></span>
+                    <select style="width:118px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'activity',this.value)">${this.selectOptionsHtml(activityOpts, r.activity, false)}</select>
+                </td>`;
+            const durationCell = `<td><input type="number" min="1" step="1" value="${r.duration}" style="width:56px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'duration',this.value)"></td>`;
+            const typeCell = `<td><select style="width:88px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'type',this.value)">${this.selectOptionsHtml(typeOpts, r.type, false)}</select></td>`;
+            const startCell = `<td><input type="date" value="${dateVal}" style="width:130px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'start',this.value)"></td>`;
+            const contractorCell = `<td><select style="width:110px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'contractor',this.value)">${this.selectOptionsHtml(contractorOpts, r.contractor, true)}</select></td>`;
+            const notesCell = `<td><input value="${escAttr(r.notes || '')}" placeholder="Notes" style="width:120px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'notes',this.value)"></td>`;
+            const removeCell = `<td><button class="preview-remove" onclick="this.getRootNode().host.removeBulkRow(${i})" title="Remove row">✕</button></td>`;
+
+            if (isWbs) {
+                // Predecessors here were resolved automatically from the
+                // pasted Index/Predecessors columns — shown read-only
+                // (rather than a re-editable dropdown, since a row can have
+                // several) — adjust actual links afterward via the normal
+                // item editor if something doesn't look right.
+                const predLabels = (r.predLinkIndices || []).map(j => {
+                    const other = this.bulkPreviewRows[j];
+                    return other ? `#${other.srcIndex} ${escHtml(other.activity)}` : null;
+                }).filter(Boolean);
+                const predCell = `<td style="font-size:11.5px; color:#555;">${predLabels.length ? predLabels.join('<br>') : '—'}</td>`;
+                return `<tr>
+                    <td style="text-align:center; color:#888;">${r.srcIndex}</td>
+                    ${assetCell}${activityCell}${durationCell}${typeCell}${startCell}${contractorCell}${notesCell}${predCell}${removeCell}
+                </tr>`;
+            }
+
             const linkOptions = this.bulkPreviewRows.map((other, j) => {
                 if (j === i) return '';
                 return `<option value="${j}" ${r.predLinkIndex === j ? 'selected' : ''}>${escHtml(other.asset)} — ${escHtml(other.activity)}</option>`;
             }).join('');
-            return `
-            <tr>
-                <td><select style="width:120px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'asset',this.value)">${this.selectOptionsHtml(assetOpts, r.asset, false)}</select></td>
-                <td>
-                    <span class="legend-swatch" style="background:${this.activityColor(r.activity)}; display:inline-block; width:9px;height:9px;border-radius:3px; margin-right:3px;"></span>
-                    <select style="width:118px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'activity',this.value)">${this.selectOptionsHtml(activityOpts, r.activity, false)}</select>
-                </td>
-                <td><input type="number" min="0.1" step="0.25" value="${r.duration}" style="width:56px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'duration',this.value)"></td>
-                <td><select style="width:88px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'type',this.value)">${this.selectOptionsHtml(typeOpts, r.type, false)}</select></td>
-                <td><select style="width:88px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'zone',this.value)">${this.selectOptionsHtml(zoneOpts, r.zone, false)}</select></td>
-                <td><select style="width:88px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'area',this.value)">${this.selectOptionsHtml(areaOpts, r.area, true)}</select></td>
-                <td><input type="date" value="${dateVal}" style="width:130px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'start',this.value)"></td>
-                <td><select style="width:110px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'contractor',this.value)">${this.selectOptionsHtml(contractorOpts, r.contractor, true)}</select></td>
-                <td><input value="${escAttr(r.notes || '')}" placeholder="Notes" style="width:120px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'notes',this.value)"></td>
-                <td><select style="width:130px;" title="Predecessor" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'predLinkIndex',this.value)"><option value="">— none —</option>${linkOptions}</select></td>
-                <td><button class="preview-remove" onclick="this.getRootNode().host.removeBulkRow(${i})" title="Remove row">✕</button></td>
+            const zoneCell = `<td><select style="width:88px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'zone',this.value)">${this.selectOptionsHtml(zoneOpts, r.zone, false)}</select></td>`;
+            const areaCell = `<td><select style="width:88px;" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'area',this.value)">${this.selectOptionsHtml(areaOpts, r.area, true)}</select></td>`;
+            const linkCell = `<td><select style="width:130px;" title="Predecessor" onchange="this.getRootNode().host.updateBulkPreviewField(${i},'predLinkIndex',this.value)"><option value="">— none —</option>${linkOptions}</select></td>`;
+            return `<tr>
+                ${assetCell}${activityCell}${durationCell}${typeCell}${zoneCell}${areaCell}${startCell}${contractorCell}${notesCell}${linkCell}${removeCell}
             </tr>`;
         }).join('');
     }
@@ -3267,7 +3371,12 @@ export class BridgeView extends HTMLElement {
         const r = this.bulkPreviewRows[i];
         if (!r) return;
         if (field === 'duration') {
-            r.duration = Math.max(0.1, parseFloat(value) || 0.1);
+            // WBS-imported rows stay whole-day (always rounded up), same
+            // rule as the initial import — every other mode keeps allowing
+            // fractional days.
+            r.duration = this.bulkPreviewMode === 'wbs'
+                ? Math.max(1, Math.ceil(parseFloat(value) || 1))
+                : Math.max(0.1, parseFloat(value) || 0.1);
         } else if (field === 'start') {
             // preserve existing time-of-day, just change the calendar date
             const prev = new Date(r.start);
@@ -3285,12 +3394,21 @@ export class BridgeView extends HTMLElement {
     }
     removeBulkRow(i) {
         this.bulkPreviewRows.splice(i, 1);
-        // fix up any predLinkIndex references: drop links that pointed at the
-        // removed row, shift every index above it down by one
+        // fix up any predLinkIndex/predLinkIndices references: drop links
+        // that pointed at the removed row, shift every index above it down
+        // by one (they're positions within this batch's array, so removing
+        // row i invalidates every position that referenced it or anything
+        // after it)
         this.bulkPreviewRows.forEach(r => {
-            if (r.predLinkIndex === undefined) return;
-            if (r.predLinkIndex === i) delete r.predLinkIndex;
-            else if (r.predLinkIndex > i) r.predLinkIndex -= 1;
+            if (r.predLinkIndex !== undefined) {
+                if (r.predLinkIndex === i) delete r.predLinkIndex;
+                else if (r.predLinkIndex > i) r.predLinkIndex -= 1;
+            }
+            if (r.predLinkIndices) {
+                r.predLinkIndices = r.predLinkIndices
+                    .filter(j => j !== i)
+                    .map(j => j > i ? j - 1 : j);
+            }
         });
         if (!this.bulkPreviewRows.length) { this.backToBulkStep1(); return; }
         this.renderBulkPreview();
@@ -3318,22 +3436,37 @@ export class BridgeView extends HTMLElement {
             this.DATA.items.push(newItem);
             insertedIds.push(newItem.id);
         }
-        // second pass: resolve each row's predLinkIndex (a position within
-        // this batch) into the real id that ended up saved at that position
+        // second pass: resolve each row's predLinkIndex/predLinkIndices (a
+        // position, or several, within this batch) into the real id(s) that
+        // ended up saved at those positions. WBS-imported rows can have more
+        // than one predecessor (a real schedule row can depend on several
+        // prior activities), where every other mode only ever has one.
+        const isWbsImport = this.bulkPreviewMode === 'wbs';
         let linkCount = 0;
         for (let i = 0; i < this.bulkPreviewRows.length; i++) {
             const r = this.bulkPreviewRows[i];
-            if (r.predLinkIndex === undefined || r.predLinkIndex === null) continue;
-            const predId = insertedIds[r.predLinkIndex];
+            const linkPositions = r.predLinkIndices !== undefined
+                ? r.predLinkIndices
+                : (r.predLinkIndex === undefined || r.predLinkIndex === null ? [] : [r.predLinkIndex]);
+            if (!linkPositions.length) continue;
             const succId = insertedIds[i];
-            if (!predId || !succId) continue;
             const succItem = this.DATA.items.find(x => x.id === succId);
             if (!succItem) continue;
             succItem.predecessor_ids = succItem.predecessor_ids || [];
-            succItem.predecessor_ids.push(predId);
+            for (const pos of linkPositions) {
+                const predId = insertedIds[pos];
+                if (!predId || succItem.predecessor_ids.includes(predId)) continue;
+                succItem.predecessor_ids.push(predId);
+                linkCount++;
+            }
             await this.DB.update(this.TABLES.items, succId, { predecessor_ids: succItem.predecessor_ids });
-            await this.enforceDependencies(predId);
-            linkCount++;
+            // A WBS import brings its own Start Date per row — the whole
+            // point of "use the start date as the original" is that it's
+            // NOT recalculated from a predecessor's finish time, so skip
+            // the auto-cascade every other mode relies on here.
+            if (!isWbsImport) {
+                for (const pos of linkPositions) await this.enforceDependencies(insertedIds[pos]);
+            }
         }
         if (this.LAUNCHPAD_SYNC_ENABLED) {
             for (const id of insertedIds) this.maybeSyncToLaunchPad(this.DATA.items.find(i => i.id === id));
