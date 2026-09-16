@@ -713,9 +713,9 @@ const MARKUP = `
             <div id="bulkStep1">
                 <p style="color:#666; font-size:13px; margin-top:0;">Select multiple assets and activities to generate combinations, or paste rows from a spreadsheet (Asset, Activity, Duration in days, Type, Zone, Area, Start Date columns, tab or comma separated).</p>
                 <div class="tabs">
-                    <button class="tab-btn active" onclick="this.getRootNode().host.switchTab('bulkTab','combo')">Combination Builder</button>
-                    <button class="tab-btn" onclick="this.getRootNode().host.switchTab('bulkTab','paste')">Paste / CSV</button>
-                    <button class="tab-btn" onclick="this.getRootNode().host.switchTab('bulkTab','wbs')">Import Schedule (WBS)</button>
+                    <button class="tab-btn active" onclick="this.getRootNode().host.switchTab('bulkTab','combo',event)">Combination Builder</button>
+                    <button class="tab-btn" onclick="this.getRootNode().host.switchTab('bulkTab','paste',event)">Paste / CSV</button>
+                    <button class="tab-btn" onclick="this.getRootNode().host.switchTab('bulkTab','wbs',event)">Import Schedule (WBS)</button>
                 </div>
                 <div class="tab-panel active" id="bulkTab-combo">
                     <div class="form-grid">
@@ -802,12 +802,12 @@ Pump-101, Install Piping, 1, Mech, Zone A, Level 1, 2026-08-03, Apex Mechanical,
         </div>
         <div class="modal-body">
             <div class="tabs">
-                <button class="tab-btn active" onclick="this.getRootNode().host.switchTab('listsTab','assets')">Assets</button>
-                <button class="tab-btn" onclick="this.getRootNode().host.switchTab('listsTab','activities')">Activities</button>
-                <button class="tab-btn" onclick="this.getRootNode().host.switchTab('listsTab','contractors')">Contractors</button>
-                <button class="tab-btn" onclick="this.getRootNode().host.switchTab('listsTab','zones')">Zones / Areas</button>
-                <button class="tab-btn" onclick="this.getRootNode().host.switchTab('listsTab','types')">Types</button>
-                <button class="tab-btn" onclick="this.getRootNode().host.switchTab('listsTab','activitycolors')">Activity Colors</button>
+                <button class="tab-btn active" onclick="this.getRootNode().host.switchTab('listsTab','assets',event)">Assets</button>
+                <button class="tab-btn" onclick="this.getRootNode().host.switchTab('listsTab','activities',event)">Activities</button>
+                <button class="tab-btn" onclick="this.getRootNode().host.switchTab('listsTab','contractors',event)">Contractors</button>
+                <button class="tab-btn" onclick="this.getRootNode().host.switchTab('listsTab','zones',event)">Zones / Areas</button>
+                <button class="tab-btn" onclick="this.getRootNode().host.switchTab('listsTab','types',event)">Types</button>
+                <button class="tab-btn" onclick="this.getRootNode().host.switchTab('listsTab','activitycolors',event)">Activity Colors</button>
             </div>
             <div class="tab-panel active" id="listsTab-assets">
                 <div id="assetListRows"></div>
@@ -1630,9 +1630,16 @@ export class BridgeView extends HTMLElement {
     }
     openModal(id) { this.$(id).classList.add('open'); }
     closeModal(id) { this.$(id).classList.remove('open'); }
-    switchTab(group, name) {
+    switchTab(group, name, evt) {
+        // evt is passed explicitly from each button's onclick below rather
+        // than relying on the bare global `event` this used to reference —
+        // that only works via the legacy, non-standard window.event
+        // (Firefox doesn't support it at all), so on any browser without it
+        // this threw a ReferenceError right here and aborted before ever
+        // reaching the panel-switching lines below. That's why clicking any
+        // tab other than the one already active did nothing.
         this.$$(`#${group === 'bulkTab' ? 'bulkModal' : (group === 'listsTab' ? 'listsModal' : '')} .tab-btn`).forEach(b => b.classList.remove('active'));
-        event.target.classList.add('active');
+        if (evt && evt.target) evt.target.classList.add('active');
         this.$$(`[id^="${group}-"]`).forEach(p => p.classList.remove('active'));
         this.$(`${group}-${name}`).classList.add('active');
         if (group === 'listsTab') this.renderListsManager();
