@@ -337,6 +337,13 @@ input,select,textarea{font-family:inherit;}
 .gantt-day.weekend{background:#f7f7f7; color:#aaa;}
 .gantt-day .dow{font-size:10px; font-weight:600; color:var(--text-muted); text-transform:uppercase;}
 .gantt-day.today{background:var(--green-light); color:var(--green-dark);}
+/* Compact zoom's collapsed empty-day marker — a narrow, visually distinct
+   "seam" so it reads as a deliberate cut rather than a missing/broken day. */
+.gantt-day.gap{
+    flex:0 0 34px; background:repeating-linear-gradient(135deg, #eee, #eee 4px, #e3e3e3 4px, #e3e3e3 8px);
+    color:#888; font-size:10px; font-weight:700; line-height:1.3; cursor:default;
+}
+.gantt-day.gap:hover{background:repeating-linear-gradient(135deg, #eee, #eee 4px, #e3e3e3 4px, #e3e3e3 8px);}
 
 .gantt-body{position:relative;}
 .gantt-row{display:flex; min-width:100%; border-bottom:3px solid var(--grey-border); position:relative; transition:height .05s;}
@@ -359,6 +366,7 @@ input,select,textarea{font-family:inherit;}
 .gantt-gridlines{position:absolute; top:0; left:0; bottom:0; display:flex; pointer-events:none;}
 .gantt-gridline{flex:0 0 var(--daywidth); border-right:1px solid #f0f0f0;}
 .gantt-gridline.weekend{background:rgba(0,0,0,0.02);}
+.gantt-gridline.gap{flex:0 0 34px; background:repeating-linear-gradient(135deg, #fafafa, #fafafa 4px, #f0f0f0 4px, #f0f0f0 8px); border-right:1px dashed #ddd;}
 .gantt-gridline.today{background:rgba(46,125,50,0.06);}
 
 .gantt-item{
@@ -569,9 +577,9 @@ const MARKUP = `
         <option value="contractor">Group by Contractor</option>
         <option value="type">Group by Type</option>
     </select>
-    <select class="tool-btn small" id="dayWidthSelect" onchange="this.getRootNode().host.setDayWidth(this.value)" style="font-weight:600;" title="All zoom levels use day-based sizing — Wide just gives each day more horizontal room.">
-        <option value="120">Zoom: Compact</option>
-        <option value="220" selected>Zoom: Normal</option>
+    <select class="tool-btn small" id="dayWidthSelect" onchange="this.getRootNode().host.setDayWidth(this.value)" style="font-weight:600;" title="All zoom levels use day-based sizing — Wide just gives each day more horizontal room. Compact is a bird's-eye overview: activity labels are hidden (color-coded only) and stretches of days with nothing scheduled are collapsed, so drag/resize is turned off there — zoom to Normal or Wide to edit.">
+        <option value="32" selected>Zoom: Compact</option>
+        <option value="220">Zoom: Normal</option>
         <option value="360">Zoom: Wide</option>
     </select>
     <button class="tool-btn small" id="expandToggleBtn" onclick="this.getRootNode().host.toggleExpandView()" title="Give every activity its own line, or collapse back to the packed view">⬍ Expand All Activities</button>
@@ -996,9 +1004,10 @@ export class BridgeView extends HTMLElement {
             activity: new Set(),
             area: new Set()
         };
-        this.DAY_WIDTH = 220;
+        this.DAY_WIDTH = 32;        // matches the "Zoom: Compact" default in #dayWidthSelect
         this.TIMELINE_START = null; // Date, midnight
         this.TIMELINE_DAYS = 42;    // 6-week rolling window
+        this.compactDayMap = null;  // built per-render while zoomed to Compact — see buildCompactDayMap()
         this.dragCtx = null;
         this.bulkPreviewRows = [];
         this.baselineDetectedTokens = [];
@@ -1829,8 +1838,62 @@ export class BridgeView extends HTMLElement {
         const ms = d.setHours ? d - this.TIMELINE_START : new Date(d) - this.TIMELINE_START;
         return ms / 86400000;
     }
+    // Below Normal(220)/Wide(360) with plenty of margin — safely identifies
+    // the Compact zoom preset even if its exact pixel value gets tuned later.
+    get isCompactZoom() { return this.DAY_WIDTH <= 60; }
+    /* Compact is a bird's-eye overview: stretches of days with nothing
+       scheduled (by the currently-filtered items) are collapsed into a
+       single narrow "gap" marker instead of each taking a full day-width
+       column — this is what actually cuts the empty days out, called once
+       per render (see renderGantt()) against whatever set of items is
+       currently visible, so it respects active filters. Returns null
+       outside Compact zoom, in which case every other method below just
+       falls back to plain day*DAY_WIDTH math. */
+    buildCompactDayMap(items) {
+        if (!this.isCompactZoom) return null;
+        const activeDays = new Set();
+        items.forEach(it => {
+            const startIdx = Math.max(0, Math.floor(this.dayIndexForDate(new Date(it.start_ts))));
+            const endIdx = Math.min(this.TIMELINE_DAYS, Math.ceil(this.dayIndexForDate(new Date(this.itemEndMs(it)))));
+            for (let d = startIdx; d < endIdx; d++) activeDays.add(d);
+        });
+        const GAP_WIDTH = 34;
+        const dayToX = {};
+        const segments = [];
+        let x = 0;
+        let i = 0;
+        while (i < this.TIMELINE_DAYS) {
+            if (activeDays.has(i)) {
+                dayToX[i] = x;
+                segments.push({ type: 'day', day: i, x, width: this.DAY_WIDTH });
+                x += this.DAY_WIDTH;
+                i++;
+            } else {
+                let j = i;
+                while (j < this.TIMELINE_DAYS && !activeDays.has(j)) j++;
+                segments.push({ type: 'gap', startDay: i, endDay: j - 1, length: j - i, x, width: GAP_WIDTH });
+                x += GAP_WIDTH;
+                i = j;
+            }
+        }
+        return { dayToX, segments, totalWidth: x };
+    }
+    // Real (possibly fractional, e.g. an item starting mid-day) day offset ->
+    // pixel X, honoring the current compact day-collapsing map when active.
+    // A day's own fractional remainder is never itself collapsed (only whole
+    // EMPTY days are), so interpolating within DAY_WIDTH past its base X is
+    // always safe.
+    xForDayIndex(dayIdx) {
+        if (this.compactDayMap) {
+            const floor = Math.floor(dayIdx);
+            const frac = dayIdx - floor;
+            const baseX = this.compactDayMap.dayToX[floor];
+            if (baseX !== undefined) return baseX + frac * this.DAY_WIDTH;
+        }
+        return dayIdx * this.DAY_WIDTH;
+    }
     xForItem(item) {
-        return this.dayIndexForDate(new Date(item.start_ts)) * this.DAY_WIDTH;
+        return this.xForDayIndex(this.dayIndexForDate(new Date(item.start_ts)));
     }
     widthForItem(item) {
         return Math.max(24, (item.duration_hours / 24) * this.DAY_WIDTH);
@@ -1871,16 +1934,22 @@ export class BridgeView extends HTMLElement {
             if (group.length === 1) {
                 // no same-day conflict — size the block to its real duration,
                 // spanning as many day-columns as it actually needs instead of
-                // always being forced to exactly one day wide
+                // always being forced to exactly one day wide. The width math
+                // stays plain day-count * DAY_WIDTH even under compact
+                // day-collapsing: every day this item itself covers is by
+                // definition "active" (it's on it), so none of ITS days are
+                // ever the ones getting collapsed — only the X start position
+                // needs to route through the collapsed mapping.
                 const it = group[0];
-                it._blockLeft = dayIdx * this.DAY_WIDTH;
+                it._blockLeft = this.xForDayIndex(dayIdx);
                 it._blockWidth = Math.max(24, (it.duration_hours / 24) * this.DAY_WIDTH);
             } else {
                 // multiple activities sharing this one day in this lane split
                 // that day's width between them
                 const slotWidth = this.DAY_WIDTH / group.length;
+                const dayX = this.xForDayIndex(dayIdx);
                 group.forEach((it, idx) => {
-                    it._blockLeft = dayIdx * this.DAY_WIDTH + idx * slotWidth;
+                    it._blockLeft = dayX + idx * slotWidth;
                     it._blockWidth = Math.max(20, slotWidth - 2);
                 });
             }
@@ -2006,13 +2075,29 @@ export class BridgeView extends HTMLElement {
     buildGanttHeaderHtml(groupBy, rowMinWidth) {
         const todayStr = new Date().toDateString();
         let headerHtml = `<div class="gantt-rowlabel-col">${this.labelForGroup(groupBy)}</div>`;
-        for (let i = 0; i < this.TIMELINE_DAYS; i++) {
+        const dayCellHtml = (i) => {
             const d = new Date(this.TIMELINE_START); d.setDate(d.getDate() + i);
             const isWeekend = d.getDay() === 0 || d.getDay() === 6;
             const isToday = d.toDateString() === todayStr;
             const isoDate = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-            headerHtml += `<div class="gantt-day ${isWeekend ? 'weekend' : ''} ${isToday ? 'today' : ''}" onclick="this.getRootNode().host.openDayDetail('${isoDate}')" title="Click to see everything scheduled this day">
+            return `<div class="gantt-day ${isWeekend ? 'weekend' : ''} ${isToday ? 'today' : ''}" onclick="this.getRootNode().host.openDayDetail('${isoDate}')" title="Click to see everything scheduled this day">
                 <div class="dow">${d.toLocaleDateString(undefined,{weekday:'short'})}</div>${d.getMonth()+1}/${d.getDate()}</div>`;
+        };
+        if (this.compactDayMap) {
+            // Cuts stretches of days with nothing scheduled out of the
+            // timeline entirely (Compact zoom only) — each real day still
+            // gets its normal cell; a run of empty ones collapses into one
+            // narrow marker instead, so scrolling through a long quiet
+            // stretch isn't just empty space.
+            this.compactDayMap.segments.forEach(seg => {
+                if (seg.type === 'day') { headerHtml += dayCellHtml(seg.day); return; }
+                const startD = new Date(this.TIMELINE_START); startD.setDate(startD.getDate() + seg.startDay);
+                const endD = new Date(this.TIMELINE_START); endD.setDate(endD.getDate() + seg.endDay);
+                const rangeLabel = `${startD.toLocaleDateString(undefined,{month:'numeric',day:'numeric'})}–${endD.toLocaleDateString(undefined,{month:'numeric',day:'numeric'})}`;
+                headerHtml += `<div class="gantt-day gap" title="${seg.length} day(s) with nothing scheduled (${rangeLabel}) — hidden to keep this zoomed-out view compact">⋯<br>${seg.length}d</div>`;
+            });
+        } else {
+            for (let i = 0; i < this.TIMELINE_DAYS; i++) headerHtml += dayCellHtml(i);
         }
         return headerHtml;
     }
@@ -2021,8 +2106,9 @@ export class BridgeView extends HTMLElement {
         if (groupBy !== 'zone') return '';
         const endDate = this.getZoneEndDate(gname);
         if (!endDate) return '';
-        const left = this.dayIndexForDate(new Date(endDate + 'T00:00')) * this.DAY_WIDTH;
-        if (left < 0 || left > this.TIMELINE_DAYS * this.DAY_WIDTH) return '';
+        const left = this.xForDayIndex(this.dayIndexForDate(new Date(endDate + 'T00:00')));
+        const totalWidth = this.compactDayMap ? this.compactDayMap.totalWidth : this.TIMELINE_DAYS * this.DAY_WIDTH;
+        if (left < 0 || left > totalWidth) return '';
         return `<div class="zone-end-marker" style="left:${left}px; height:${height}px;">
             <span class="zone-end-flag">Target ${new Date(endDate + 'T00:00').toLocaleDateString(undefined,{month:'numeric',day:'numeric'})}</span>
         </div>`;
@@ -2058,9 +2144,6 @@ export class BridgeView extends HTMLElement {
     renderGantt() {
         this.style.setProperty('--daywidth', this.DAY_WIDTH + 'px');
         const groupBy = this.$('groupBySelect').value;
-        const totalWidth = this.TIMELINE_DAYS * this.DAY_WIDTH;
-        const wrapClientWidth = this.$('ganttWrap').clientWidth || 0;
-        const rowMinWidth = Math.max(totalWidth + 200, wrapClientWidth);
 
         try {
             this.criticalPathData = this.computeCriticalPath();
@@ -2070,6 +2153,13 @@ export class BridgeView extends HTMLElement {
         }
 
         const items = this.getFilteredItems();
+        // Rebuilt every render (not just on zoom change) since it depends on
+        // which items are currently visible — filtering down to fewer items
+        // can open up new empty stretches to collapse, or vice versa.
+        this.compactDayMap = this.buildCompactDayMap(items);
+        const totalWidth = this.compactDayMap ? this.compactDayMap.totalWidth : this.TIMELINE_DAYS * this.DAY_WIDTH;
+        const wrapClientWidth = this.$('ganttWrap').clientWidth || 0;
+        const rowMinWidth = Math.max(totalWidth + 200, wrapClientWidth);
 
         try {
             this.focusChainSet = this.connectionFocusId ? this.getConnectedComponent(this.connectionFocusId) : null;
@@ -2194,12 +2284,21 @@ export class BridgeView extends HTMLElement {
 
     gridlinesHtml() {
         const todayStr = new Date().toDateString();
-        let html = '';
-        for (let i = 0; i < this.TIMELINE_DAYS; i++) {
+        const dayLineHtml = (i) => {
             const d = new Date(this.TIMELINE_START); d.setDate(d.getDate() + i);
             const isWeekend = d.getDay() === 0 || d.getDay() === 6;
             const isToday = d.toDateString() === todayStr;
-            html += `<div class="gantt-gridline ${isWeekend ? 'weekend' : ''} ${isToday ? 'today' : ''}"></div>`;
+            return `<div class="gantt-gridline ${isWeekend ? 'weekend' : ''} ${isToday ? 'today' : ''}"></div>`;
+        };
+        let html = '';
+        if (this.compactDayMap) {
+            // Mirrors buildGanttHeaderHtml()'s segments 1:1 so the gap
+            // markers line up under the matching header cell.
+            this.compactDayMap.segments.forEach(seg => {
+                html += seg.type === 'day' ? dayLineHtml(seg.day) : `<div class="gantt-gridline gap"></div>`;
+            });
+        } else {
+            for (let i = 0; i < this.TIMELINE_DAYS; i++) html += dayLineHtml(i);
         }
         return html;
     }
@@ -2227,11 +2326,15 @@ export class BridgeView extends HTMLElement {
         const floatTitle = floatVal !== null && floatVal !== undefined ? ` — float ${hoursToDays(floatVal)}d${floatVal <= 0.01 ? ' (critical path)' : ''}` : '';
         const launchpadLinked = !!it.launchpad_id;
         const notReady = this.isStatusNotReady(it.asset_name, it.activity_name);
+        // Compact zoom is a color-only overview — the bar itself is the
+        // whole point (activityColor already encodes which activity it is),
+        // so the text labels just get in the way at these widths. Full
+        // asset/activity detail is still one hover away via the title tooltip.
+        const showLabels = !this.isCompactZoom;
         return `<div class="gantt-item ${overdue ? 'overdue' : ''} ${focused ? 'focused' : ''} ${dimmed ? 'dimmed' : ''} ${critical ? 'critical' : ''} ${multiselected ? 'multiselected' : ''} ${notReady ? 'not-ready' : ''}" data-id="${it.id}" style="left:${left}px; width:${width}px; top:${top}px; background:${color};" title="${escAttr(it.asset_name)} — ${escAttr(it.activity_name)}${overdue ? ' (past zone target end date)' : ''}${floatTitle}${launchpadLinked ? ' — linked to LaunchPad' : ''}${notReady ? ' — NOT READY (status open/incomplete)' : ''}">
             ${resizable ? `<div class="resize-handle left" data-id="${it.id}" data-edge="left"></div>` : ''}
             ${launchpadLinked ? `<span class="launchpad-badge" title="Linked to a LaunchPad row">📡</span>` : ''}
-            <span class="gi-asset">${escHtml(it.asset_name)}</span>
-            <span class="gi-activity">${escHtml(it.activity_name)}</span>
+            ${showLabels ? `<span class="gi-asset">${escHtml(it.asset_name)}</span><span class="gi-activity">${escHtml(it.activity_name)}</span>` : ''}
             ${resizable ? `<div class="resize-handle" data-id="${it.id}" data-edge="right"></div>` : ''}
             <div class="link-handle" data-id="${it.id}" title="Drag to link a successor activity"></div>
         </div>`;
@@ -2743,6 +2846,17 @@ export class BridgeView extends HTMLElement {
 
     startDrag(e, el, mode) {
         e.preventDefault();
+        // Compact zoom collapses empty days into narrow gap markers, which
+        // makes the pixel-to-day math drag/resize rely on (dx / DAY_WIDTH,
+        // treating every pixel as uniform calendar time) incorrect —
+        // dragging here would silently land on the wrong date. Simplest
+        // safe option: turn dragging off at this zoom level instead of
+        // teaching every drag/resize calculation about the collapsed
+        // mapping. Zoom to Normal or Wide to move or resize an activity.
+        if (this.compactDayMap) {
+            this.toast('Zoom in to Normal or Wide to move or resize activities.');
+            return;
+        }
         const id = el.dataset.id;
         const item = this.DATA.items.find(i => i.id === id);
         if (!item) return;
