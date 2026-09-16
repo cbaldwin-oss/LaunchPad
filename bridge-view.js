@@ -3263,11 +3263,11 @@ export class BridgeView extends HTMLElement {
                 const parts = line.includes('\t')
                     ? line.split('\t').map(s => s.trim())
                     : line.split(/,(?![^"]*")/).map(s => s.trim());
-                const [idxStr, wbs, activity, actType, asset, , predsRaw, notes, startDate, durationRaw, contractor] = parts;
+                const [idxStr, wbs, activityDesc, actType, asset, , predsRaw, notes, startDate, durationRaw, contractor] = parts;
                 const srcIndex = parseInt(idxStr, 10);
                 // Index is required — it's the only thing Predecessors on
                 // OTHER rows can reference to link back to this one.
-                if (!Number.isFinite(srcIndex) || !asset || !activity) return;
+                if (!Number.isFinite(srcIndex) || !asset || !actType) return;
                 const parsedStart = parseFlexibleDate(startDate);
                 const start = (parsedStart && !isNaN(parsedStart)) ? parsedStart : new Date();
                 // Duration arrives as "0.5d" / "1d" / "2d" etc. — always
@@ -3277,13 +3277,19 @@ export class BridgeView extends HTMLElement {
                 // from a predecessor's finish time).
                 const durDays = Math.max(1, Math.ceil(parseFloat(durationRaw) || 1));
                 rows.push({
-                    srcIndex, wbs: wbs || '', asset, activity,
+                    srcIndex, wbs: wbs || '', asset,
+                    // Per request: for this import, the WBS "Activity Type"
+                    // column (e.g. "Temp Power", "Energize", "L2D") is used
+                    // as Bridge's Activity — the long free-text "Activity"
+                    // column becomes descriptive detail instead, folded
+                    // into Notes below rather than dropped.
+                    activity: actType,
                     duration: durDays,
-                    type: actType || (this.DATA.types[0]?.name || 'Other'),
+                    type: this.DATA.types[0]?.name || 'Other',
                     zone: this.ASSET_TO_ZONE_MAP[asset] || (this.DATA.zones[0]?.name || ''),
                     area: this.ASSET_TO_AREA_MAP[asset] || '',
                     contractor: contractor || '',
-                    notes: [wbs ? `WBS ${wbs}` : '', notes || ''].filter(Boolean).join(' — '),
+                    notes: [wbs ? `WBS ${wbs}` : '', activityDesc || '', notes || ''].filter(Boolean).join(' — '),
                     start: start.toISOString(),
                     predSrcIndices: (predsRaw || '').split(',').map(s => parseInt(s.trim(), 10)).filter(Number.isFinite)
                 });
