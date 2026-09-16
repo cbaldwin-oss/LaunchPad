@@ -1311,13 +1311,24 @@ body.dark-mode .phase-row {
 }
 
 /* ===== HELP MODAL "DOCK TO SIDE" MODE =====
-   Toggled by toggleHelpDock() (see script below) on any of the three help
-   modals (schedule/equipment/dashboard). The outer overlay covers the full
-   viewport either way (so the panel can still anchor to its right edge),
-   but in docked mode it turns transparent and click-through
+   Toggled by toggleHelpDock() (see script below) on any of the four help
+   modals (sign-in/schedule/equipment/dashboard). The outer overlay covers
+   the full viewport either way (so the panel can still anchor to its right
+   edge), but in docked mode it turns transparent and click-through
    (pointer-events: none) everywhere except the panel itself
    (pointer-events: auto, re-enabled on .help-modal-panel), so the rest of
-   LaunchPad stays fully usable underneath while a guide is open. */
+   LaunchPad stays fully usable underneath while a guide is open.
+
+   --help-dock-inset is the total width that eats into the right edge of
+   the screen while docked (panel width + its right-side gutter) — the
+   body-squeeze rules below use the SAME value so the real app content
+   (header, main content area, and Schedule's right-hand filter sidebar)
+   shrinks/shifts to stay fully visible next to the panel instead of
+   sliding underneath it. */
+:root {
+    --help-dock-panel-width: 400px;
+    --help-dock-inset: 420px; /* panel width + 16px gutter on each side */
+}
 .help-modal-docked {
     background: transparent !important;
     justify-content: flex-end !important;
@@ -1327,12 +1338,66 @@ body.dark-mode .phase-row {
 }
 .help-modal-docked .help-modal-panel {
     pointer-events: auto !important;
-    width: 380px !important;
+    width: var(--help-dock-panel-width) !important;
     max-width: 92vw !important;
     height: 100% !important;
     max-height: none !important;
     border-radius: 10px !important;
     box-shadow: -6px 6px 28px rgba(0,0,0,0.35) !important;
+}
+
+/* Squeezes the real app (or the sign-in card) down so none of it ends up
+   hidden behind the docked panel — body's own content width shrinks,
+   which the header and #app-body (normal-flow children with % based
+   widths) automatically follow; the right-hand filter sidebar is
+   fixed-positioned so it needs its own "right" offset to move with it. */
+body.help-docked {
+    margin-right: var(--help-dock-inset);
+    transition: margin-right 0.25s ease;
+}
+body.help-docked #filter-sidebar {
+    right: var(--help-dock-inset) !important;
+}
+body.help-docked .header,
+body.help-docked #app-body {
+    transition: margin-right 0.25s ease, width 0.25s ease;
+}
+/* Sign-in/project-picker screen (#loading-overlay) is position:fixed with
+   an explicit width:100%, so — unlike .header/#app-body above — a
+   margin-right wouldn't shrink it, just push it off-screen. It needs its
+   own width cut instead; since it's still display:flex/justify-content:
+   center, the sign-in card re-centers itself in the narrower space
+   automatically. */
+body.help-docked #loading-overlay {
+    width: calc(100% - var(--help-dock-inset));
+    transition: width 0.25s ease;
+}
+
+/* ===== HELP GUIDE IFRAME FIT =====
+   Scribe's embed still enforces its own internal minimum layout width
+   even with size=flexible, so at the docked panel's ~400px width its
+   title/step content was getting clipped instead of shrinking. Rendering
+   the iframe at that minimum width and scaling the whole thing down with
+   a CSS transform (rather than relying on the iframe to reflow itself)
+   guarantees it always fits, at the cost of smaller text — same trade the
+   user asked for ("smaller fit"). Full/expanded mode has enough room
+   (900px modal) that no scaling is needed there. */
+.help-guide-frame-wrap {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+}
+.help-guide-frame-wrap iframe {
+    border: none;
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+.help-modal-docked .help-guide-frame-wrap iframe {
+    width: 480px;   /* Scribe's effective minimum flexible-layout width */
+    height: 120%;   /* 100% / (400/480) so the scaled-down frame still fills the wrap's height */
+    transform: scale(0.8333); /* 400 / 480 — matches --help-dock-panel-width */
+    transform-origin: top left;
 }
 </style>
 </head>
@@ -1784,12 +1849,17 @@ body.dark-mode .phase-row {
 </div>
 
 <div id="help-modal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 10002; align-items: center; justify-content: center;">
-    <div style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); width: 900px; max-width: 95vw; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
+    <div class="help-modal-panel" style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); width: 900px; max-width: 95vw; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
         <div style="display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #eee; background: #1565c0; color: white; flex-shrink: 0;">
             <h3 style="margin: 0; font-size: 18px;">Requesting Access to a LaunchPad Project</h3>
-            <button onclick="closeHelpModal()" style="background: none; border: none; cursor: pointer; font-size: 26px; color: white; line-height: 1; padding: 0;">&times;</button>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <button id="launchpad-help-dock-btn" onclick="toggleHelpDock('help-modal', 'launchpad-help-dock-btn')" title="Dock to the side so you can use LaunchPad while following along" style="background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.4); color: white; border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;">⇥ Dock</button>
+                <button onclick="closeHelpModal()" style="background: none; border: none; cursor: pointer; font-size: 26px; color: white; line-height: 1; padding: 0;">&times;</button>
+            </div>
         </div>
-        <iframe id="help-modal-iframe" src="about:blank" style="flex: 1; border: none; width: 100%;" allow="fullscreen"></iframe>
+        <div class="help-guide-frame-wrap">
+            <iframe id="help-modal-iframe" src="about:blank" allow="fullscreen"></iframe>
+        </div>
     </div>
 </div>
 
@@ -1812,7 +1882,7 @@ body.dark-mode .phase-row {
         <div style="display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #eee; background: #2e7d32; color: white; flex-shrink: 0;">
             <h3 id="schedule-help-title" style="margin: 0; font-size: 18px;">Schedule Help &amp; Training</h3>
             <div style="display: flex; align-items: center; gap: 8px;">
-                <button id="schedule-help-dock-btn" onclick="toggleHelpDock('schedule')" title="Dock to the side so you can use LaunchPad while following along" style="background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.4); color: white; border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;">⇥ Dock</button>
+                <button id="schedule-help-dock-btn" onclick="toggleHelpDock('schedule-help-modal', 'schedule-help-dock-btn')" title="Dock to the side so you can use LaunchPad while following along" style="background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.4); color: white; border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;">⇥ Dock</button>
                 <button onclick="closeScheduleHelpModal()" style="background: none; border: none; cursor: pointer; font-size: 26px; color: white; line-height: 1; padding: 0;">&times;</button>
             </div>
         </div>
@@ -1861,7 +1931,9 @@ body.dark-mode .phase-row {
             <div style="padding: 10px 20px; border-bottom: 1px solid #eee; flex-shrink: 0;">
                 <button onclick="backToScheduleHelpMenu()" style="background: none; border: none; cursor: pointer; font-size: 13px; font-weight: 600; color: #2e7d32; padding: 4px 0;">← Back to overview</button>
             </div>
-            <iframe id="schedule-help-guide-iframe" src="about:blank" style="flex: 1; border: none; width: 100%;" allow="fullscreen"></iframe>
+            <div class="help-guide-frame-wrap">
+                <iframe id="schedule-help-guide-iframe" src="about:blank" allow="fullscreen"></iframe>
+            </div>
         </div>
     </div>
 </div>
@@ -1883,7 +1955,7 @@ body.dark-mode .phase-row {
         <div style="display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #eee; background: #1565c0; color: white; flex-shrink: 0;">
             <h3 id="equipment-help-title" style="margin: 0; font-size: 18px;">Equipment Status Tracker Help &amp; Training</h3>
             <div style="display: flex; align-items: center; gap: 8px;">
-                <button id="equipment-help-dock-btn" onclick="toggleHelpDock('equipment')" title="Dock to the side so you can use LaunchPad while following along" style="background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.4); color: white; border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;">⇥ Dock</button>
+                <button id="equipment-help-dock-btn" onclick="toggleHelpDock('equipment-help-modal', 'equipment-help-dock-btn')" title="Dock to the side so you can use LaunchPad while following along" style="background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.4); color: white; border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;">⇥ Dock</button>
                 <button onclick="closeEquipmentHelpModal()" style="background: none; border: none; cursor: pointer; font-size: 26px; color: white; line-height: 1; padding: 0;">&times;</button>
             </div>
         </div>
@@ -1928,7 +2000,9 @@ body.dark-mode .phase-row {
             <div style="padding: 10px 20px; border-bottom: 1px solid #eee; flex-shrink: 0;">
                 <button onclick="backToEquipmentHelpMenu()" style="background: none; border: none; cursor: pointer; font-size: 13px; font-weight: 600; color: #1565c0; padding: 4px 0;">← Back to overview</button>
             </div>
-            <iframe id="equipment-help-guide-iframe" src="about:blank" style="flex: 1; border: none; width: 100%;" allow="fullscreen"></iframe>
+            <div class="help-guide-frame-wrap">
+                <iframe id="equipment-help-guide-iframe" src="about:blank" allow="fullscreen"></iframe>
+            </div>
         </div>
     </div>
 </div>
@@ -1954,7 +2028,7 @@ body.dark-mode .phase-row {
         <div style="display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #eee; background: linear-gradient(135deg, #6a1b9a, #4527a0); color: white; flex-shrink: 0;">
             <h3 id="dashboard-help-title" style="margin: 0; font-size: 18px;">Dashboard Help &amp; Training</h3>
             <div style="display: flex; align-items: center; gap: 8px;">
-                <button id="dashboard-help-dock-btn" onclick="toggleHelpDock('dashboard')" title="Dock to the side so you can use LaunchPad while following along" style="background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.4); color: white; border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;">⇥ Dock</button>
+                <button id="dashboard-help-dock-btn" onclick="toggleHelpDock('dashboard-help-modal', 'dashboard-help-dock-btn')" title="Dock to the side so you can use LaunchPad while following along" style="background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.4); color: white; border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;">⇥ Dock</button>
                 <button onclick="closeDashboardHelpModal()" style="background: none; border: none; cursor: pointer; font-size: 26px; color: white; line-height: 1; padding: 0;">&times;</button>
             </div>
         </div>
@@ -2000,7 +2074,9 @@ body.dark-mode .phase-row {
             <div style="padding: 10px 20px; border-bottom: 1px solid #eee; flex-shrink: 0;">
                 <button onclick="backToDashboardHelpMenu()" style="background: none; border: none; cursor: pointer; font-size: 13px; font-weight: 600; color: #6a1b9a; padding: 4px 0;">← Back to overview</button>
             </div>
-            <iframe id="dashboard-help-guide-iframe" src="about:blank" style="flex: 1; border: none; width: 100%;" allow="fullscreen"></iframe>
+            <div class="help-guide-frame-wrap">
+                <iframe id="dashboard-help-guide-iframe" src="about:blank" allow="fullscreen"></iframe>
+            </div>
         </div>
     </div>
 </div>
@@ -4601,6 +4677,18 @@ function openHelpModal() {
 
 function closeHelpModal() {
     document.getElementById('help-modal').style.display = 'none';
+    resetHelpDock('help-modal', 'launchpad-help-dock-btn');
+}
+
+// Shared by every help modal's close function — always reopen full-screen
+// and with the app back to full width, not wherever a previous session
+// left the dock state.
+function resetHelpDock(modalId, btnId) {
+    const modal = document.getElementById(modalId);
+    if (modal) modal.classList.remove('help-modal-docked');
+    const dockBtn = document.getElementById(btnId);
+    if (dockBtn) dockBtn.innerHTML = '⇥ Dock';
+    document.body.classList.remove('help-docked');
 }
 
 // ===== HELP MODAL "DOCK TO SIDE" =====
@@ -4610,17 +4698,22 @@ function closeHelpModal() {
 // .help-modal-docked / .help-modal-panel CSS), so a user can keep the
 // guide open on-screen while actually working the steps in LaunchPad
 // underneath it instead of having to close the guide to try each step.
-function toggleHelpDock(prefix) {
-    const modal = document.getElementById(`${prefix}-help-modal`);
+function toggleHelpDock(modalId, btnId) {
+    const modal = document.getElementById(modalId);
     if (!modal) return;
     const isDocked = modal.classList.toggle('help-modal-docked');
-    const btn = document.getElementById(`${prefix}-help-dock-btn`);
+    const btn = document.getElementById(btnId);
     if (btn) {
         btn.innerHTML = isDocked ? '⛶ Expand' : '⇥ Dock';
         btn.title = isDocked
             ? 'Expand back to full view'
             : 'Dock to the side so you can use LaunchPad while following along';
     }
+    // Squeezes the real app (or the sign-in card) over so none of it ends
+    // up hidden behind the panel — see the body.help-docked rules in the
+    // <style> block. Only one help modal is ever open at a time, so a
+    // single shared body class is safe here.
+    document.body.classList.toggle('help-docked', isDocked);
 }
 
 // ===== HELP (SCHEDULE SCREEN) =====
@@ -4636,12 +4729,8 @@ function openScheduleHelpModal() {
 }
 
 function closeScheduleHelpModal() {
-    const modal = document.getElementById('schedule-help-modal');
-    modal.style.display = 'none';
-    // Always reopen full-screen, not wherever a previous session left the dock state.
-    modal.classList.remove('help-modal-docked');
-    const dockBtn = document.getElementById('schedule-help-dock-btn');
-    if (dockBtn) dockBtn.innerHTML = '⇥ Dock';
+    document.getElementById('schedule-help-modal').style.display = 'none';
+    resetHelpDock('schedule-help-modal', 'schedule-help-dock-btn');
 }
 
 function openScheduleHelpGuide(url, title) {
@@ -4667,11 +4756,8 @@ function openEquipmentHelpModal() {
 }
 
 function closeEquipmentHelpModal() {
-    const modal = document.getElementById('equipment-help-modal');
-    modal.style.display = 'none';
-    modal.classList.remove('help-modal-docked');
-    const dockBtn = document.getElementById('equipment-help-dock-btn');
-    if (dockBtn) dockBtn.innerHTML = '⇥ Dock';
+    document.getElementById('equipment-help-modal').style.display = 'none';
+    resetHelpDock('equipment-help-modal', 'equipment-help-dock-btn');
 }
 
 function openEquipmentHelpGuide(url, title) {
@@ -4697,11 +4783,8 @@ function openDashboardHelpModal() {
 }
 
 function closeDashboardHelpModal() {
-    const modal = document.getElementById('dashboard-help-modal');
-    modal.style.display = 'none';
-    modal.classList.remove('help-modal-docked');
-    const dockBtn = document.getElementById('dashboard-help-dock-btn');
-    if (dockBtn) dockBtn.innerHTML = '⇥ Dock';
+    document.getElementById('dashboard-help-modal').style.display = 'none';
+    resetHelpDock('dashboard-help-modal', 'dashboard-help-dock-btn');
 }
 
 function openDashboardHelpGuide(url, title) {
