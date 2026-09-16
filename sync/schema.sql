@@ -31,3 +31,12 @@ create policy "Allow anon read" on launchpad_equipment_tracker_data for select u
 alter table launchpad_dashboard_data enable row level security;
 drop policy if exists "Allow anon read" on launchpad_dashboard_data;
 create policy "Allow anon read" on launchpad_dashboard_data for select using (true);
+
+-- Optional per-project override for the KPI dashboard's title (otherwise
+-- it's whatever project_name comes through in the synced Apps
+-- Script/Sheets data — see dashboard.js renderAll()). Set from the
+-- Dashboard tab's own Settings (gear icon), admin-gated the same way the
+-- existing access_code regeneration on this table already is — no new RLS
+-- policy needed since that update already runs through whatever policy
+-- currently allows an authorized admin to update their own project's row.
+alter table launchpad_projects add column if not exists dashboard_display_name text;

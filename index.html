@@ -1972,6 +1972,31 @@ body.dark-mode .phase-row {
     </div>
 </div>
 
+<!-- Dashboard settings: currently just the display title override (the
+     title otherwise comes straight from the synced project_name in the
+     Apps Script/Sheets data — see dashboard.js renderAll()). Reached via
+     the same gear icon as Schedule/Equipment Tracker settings
+     (openSettingsForCurrentView() branches on window.__currentView), so
+     it's already admin-gated the same way those are (nav-settings itself
+     is hidden for non-admins). -->
+<div id="dashboard-settings-modal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 2000; align-items: center; justify-content: center;">
+    <div style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.25); width: 440px; max-width: 90vw; display: flex; flex-direction: column; overflow: hidden;">
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 18px 20px; border-bottom: 1px solid #eee;">
+            <h3 style="margin: 0; color: #6a1b9a;">Dashboard Settings</h3>
+            <button onclick="closeDashboardSettingsModal()" style="background: none; border: none; cursor: pointer; font-size: 22px; color: #999;">&times;</button>
+        </div>
+        <div style="padding: 20px; display: flex; flex-direction: column; gap: 8px;">
+            <label for="dashboard-title-input" style="font-size: 13px; font-weight: 600; color: #444;">Dashboard Title</label>
+            <input id="dashboard-title-input" type="text" placeholder="e.g. SAN Airline Tenant Improvements (BOH)" style="padding: 10px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+            <p id="dashboard-title-hint" style="margin: 2px 0 0; font-size: 12px; color: #888; line-height: 1.5;"></p>
+        </div>
+        <div style="display: flex; justify-content: flex-end; gap: 10px; padding: 16px 20px; border-top: 1px solid #eee; background: #fafafa;">
+            <button onclick="closeDashboardSettingsModal()" style="padding: 9px 16px; background: none; border: 1px solid #ddd; border-radius: 6px; cursor: pointer; font-size: 13px; color: #555;">Cancel</button>
+            <button onclick="saveDashboardSettings()" style="padding: 9px 16px; background: #6a1b9a; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; color: white;">Save</button>
+        </div>
+    </div>
+</div>
+
 <div id="admin-panel" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 2000; align-items: center; justify-content: center;">
     <div style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.25); width: 480px; max-width: 90vw; max-height: 80vh; display: flex; flex-direction: column; overflow: hidden;">
         <div style="display: flex; justify-content: space-between; align-items: center; padding: 18px 20px; border-bottom: 1px solid #eee;">
@@ -4626,6 +4651,53 @@ function backToDashboardHelpMenu() {
     document.getElementById('dashboard-help-title').innerText = 'Dashboard Help & Training';
 }
 
+// ===== DASHBOARD SETTINGS (title override) =====
+// The dashboard's title otherwise always comes from project_name in the
+// synced Apps Script/Sheets data (dashboard.js renderAll()) — this lets an
+// admin override it with a cleaner display name, saved to
+// launchpad_projects.dashboard_display_name so it persists across
+// sessions/devices the same way every other project setting does.
+function openDashboardSettingsModal() {
+    const input = document.getElementById('dashboard-title-input');
+    const hint = document.getElementById('dashboard-title-hint');
+    input.value = (window.LP_CONFIG && window.LP_CONFIG.dashboardDisplayName) || '';
+    const autoName = (window.caDashboardInstance && window.caDashboardInstance.STATE && window.caDashboardInstance.STATE.data)
+        ? window.caDashboardInstance.STATE.data.project_name
+        : null;
+    hint.textContent = autoName
+        ? `Leave blank to use the synced name: "${autoName}".`
+        : 'Leave blank to use the name synced from the commissioning data.';
+    document.getElementById('dashboard-settings-modal').style.display = 'flex';
+}
+
+function closeDashboardSettingsModal() {
+    document.getElementById('dashboard-settings-modal').style.display = 'none';
+}
+
+async function saveDashboardSettings() {
+    if (!window.LP_CONFIG || !window.LP_CONFIG.projectKey) return;
+    const newTitle = document.getElementById('dashboard-title-input').value.trim();
+
+    const { error } = await _supabase
+        .from('launchpad_projects')
+        .update({ dashboard_display_name: newTitle || null })
+        .eq('project_key', window.LP_CONFIG.projectKey);
+
+    if (error) {
+        alert('Could not save dashboard title: ' + error.message);
+        return;
+    }
+
+    window.LP_CONFIG.dashboardDisplayName = newTitle || null;
+    closeDashboardSettingsModal();
+
+    // Reflect immediately if the dashboard is already mounted, instead of
+    // requiring a tab switch/reload to see the new title.
+    if (window.caDashboardInstance && typeof window.caDashboardInstance.renderAll === 'function') {
+        window.caDashboardInstance.renderAll();
+    }
+}
+
 // The sign-in form (#auth-prompt) and the project picker (#project-picker)
 // are each set to display:block/flex from several different places in this
 // file (initial load, sign-out, session expiry, switching projects, etc.)
@@ -5359,7 +5431,8 @@ async function applyProjectConfig(projectKey) {
         logoUrl: project.logo_url,
         themeColor: project.theme_color || '#1b5e20',
         startDate: project.start_date,
-        durationWeeks: project.duration_weeks
+        durationWeeks: project.duration_weeks,
+        dashboardDisplayName: project.dashboard_display_name || null
     };
     localStorage.setItem('launchpad_project', projectKey);
 
@@ -6159,6 +6232,11 @@ function openSettingsForCurrentView() {
         // openSettings() method directly instead of posting a message.
         const el = document.querySelector('tamperseal-view');
         if (el) el.openSettings();
+        return;
+    }
+
+    if (view === 'dashboard') {
+        openDashboardSettingsModal();
         return;
     }
 

@@ -455,7 +455,11 @@ export class CriticalArcDashboard {
     this.renderTests(tests, issues);
     this.renderEquipment(equipment, checklists, tests, issues);
     
-    this.q('ca-pageTitle').textContent = d.project_name || 'Project Dashboard';
+    // An admin can override the synced project_name with a cleaner display
+    // name via Dashboard Settings (saved to launchpad_projects.dashboard_
+    // display_name) — prefer that when set.
+    const titleOverride = window.LP_CONFIG && window.LP_CONFIG.dashboardDisplayName;
+    this.q('ca-pageTitle').textContent = titleOverride || d.project_name || 'Project Dashboard';
     const synced = d.data_synced_at ? new Date(d.data_synced_at) : null;
     const isData = !!(synced && !isNaN(synced));
     const stamp = isData ? synced : new Date();
