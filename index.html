@@ -8298,13 +8298,22 @@ async function runFailsafeSync() {
  * ONLY includes rows from days that are currently expanded/opened.
  */
 function exportToPDF() {
+    // Respect Settings' column visibility AND order — scheduleColConfig is
+    // already an array in display order, so filtering to .visible keeps
+    // that order intact without needing to sort anything ourselves.
+    const visibleCols = scheduleColConfig.filter(c => c.visible);
+    if (visibleCols.length === 0) {
+        alert("No columns are set to visible in Settings — nothing to export.");
+        return;
+    }
+
     const rows = document.querySelectorAll('.cell-row');
     const shownRowsData = [];
-    
+
     rows.forEach(row => {
         // 1. Ensure the row is visible (not filtered out by a specific search)
         const isRowVisible = row.style.display !== 'none' && window.getComputedStyle(row).display !== 'none';
-        
+
         // 2. Ensure the row actually has user data saved in it
         const isOccupied = row.getAttribute('data-occupied') === 'true';
 
@@ -8318,38 +8327,39 @@ function exportToPDF() {
 
         if (isRowVisible && isOccupied && isDayExpanded && isWeekExpanded) {
             const rowDate = row.getAttribute('data-date') || "";
-            const cols = [];
-            
-            for (let col = 1; col <= 9; col++) {
-                const el = row.querySelector(`[data-col-index="${col}"]`) || row.querySelector(`[id$="-c${col}"]`);
+            const colsById = {};
+
+            visibleCols.forEach(col => {
+                const colId = col.id;
+                const el = row.querySelector(`[data-col-index="${colId}"]`) || row.querySelector(`[id$="-c${colId}"]`);
                 let val = "";
-                
+
                 if (el) {
-                    if (col === 5) {
+                    if (colId === 5) {
                         val = el.innerText || "";
                         if (val === "...") val = ""; // Clean up default unassigned status dots
-                    } else if (col === 6) {
+                    } else if (colId === 6) {
                         val = el.getAttribute('data-selected') || el.value || "";
                     } else {
                         val = el.value || "";
                     }
                 }
-                
+
                 // Safe string conversion and trim
                 val = (val || "").toString().trim();
-                
+
                 // Final text clean-up: Strip out unassigned placeholder text
                 if (val.toLowerCase() === "select..." || val.toLowerCase() === "+ add multi") {
                     val = "";
                 }
-                
-                cols.push(val);
-            }
-            
+
+                colsById[colId] = val;
+            });
+
             // Double check that there is at least some textual data remaining
-            const hasText = cols.some(v => v !== "");
+            const hasText = Object.values(colsById).some(v => v !== "");
             if (hasText) {
-                shownRowsData.push({ date: rowDate, cols: cols });
+                shownRowsData.push({ date: rowDate, colsById: colsById });
             }
         }
     });
@@ -8364,7 +8374,7 @@ function exportToPDF() {
         alert("Pop-up blocked! Please enable pop-ups for this dashboard to run reports.");
         return;
     }
-    
+
     // String sanitation helper
     const escapeHtml = (str) => {
         if (!str) return '';
@@ -8376,15 +8386,49 @@ function exportToPDF() {
             .replace(/'/g, "&#039;");
     };
 
-    let tableBodyHtml = '';
+    // Group consecutive rows sharing the same date into blocks, so each
+    // date can read as one visually distinct section: a single merged
+    // (rowspan) Date cell, and every row under it sharing that block's
+    // background color. Rows already come out of the DOM in the
+    // schedule's own day-by-day order, so same-date rows are already
+    // adjacent — no separate sort needed.
+    const dateGroups = [];
     shownRowsData.forEach(item => {
-        tableBodyHtml += `<tr>`;
-        tableBodyHtml += `<td style="font-weight: bold; color: #333;">${escapeHtml(item.date)}</td>`;
-        item.cols.forEach(colVal => {
-            tableBodyHtml += `<td>${escapeHtml(colVal)}</td>`;
-        });
-        tableBodyHtml += `</tr>`;
+        const lastGroup = dateGroups[dateGroups.length - 1];
+        if (lastGroup && lastGroup.date === item.date) {
+            lastGroup.items.push(item);
+        } else {
+            dateGroups.push({ date: item.date, items: [item] });
+        }
     });
+
+    // Alternating per-date-block colors so adjacent dates are easy to tell
+    // apart at a glance, even when a date only has one or two rows.
+    const DATE_BLOCK_COLORS = ['#e8f5e9', '#e3f2fd'];
+
+    // Column widths are proportional to each column's configured .width
+    // weight (same numbers Settings uses for the live grid), scaled to
+    // fill the space left after a fixed-width Date column.
+    const DATE_COL_PERCENT = 8;
+    const totalWeight = visibleCols.reduce((sum, c) => sum + (Number(c.width) || 10), 0) || 1;
+    const widthFor = (col) => (((Number(col.width) || 10) / totalWeight) * (100 - DATE_COL_PERCENT)).toFixed(2);
+
+    let tableBodyHtml = '';
+    dateGroups.forEach((group, groupIndex) => {
+        const color = DATE_BLOCK_COLORS[groupIndex % DATE_BLOCK_COLORS.length];
+        group.items.forEach((item, rowIndexInGroup) => {
+            tableBodyHtml += `<tr style="background-color:${color};">`;
+            if (rowIndexInGroup === 0) {
+                tableBodyHtml += `<td rowspan="${group.items.length}" style="font-weight: bold; color: #1b5e20; background-color:${color}; vertical-align: middle;">${escapeHtml(item.date)}</td>`;
+            }
+            visibleCols.forEach(col => {
+                tableBodyHtml += `<td>${escapeHtml(item.colsById[col.id])}</td>`;
+            });
+            tableBodyHtml += `</tr>`;
+        });
+    });
+
+    const headerCellsHtml = visibleCols.map(col => `<th style="width: ${widthFor(col)}%;">${escapeHtml(col.name)}</th>`).join('');
 
     const htmlContent = `
     <!DOCTYPE html>
@@ -8399,10 +8443,10 @@ function exportToPDF() {
             table { width: 100%; border-collapse: collapse; font-size: 11px; table-layout: fixed; }
             th { background-color: #00d134; color: white; padding: 10px 5px; border: 1px solid #1b5e20; text-transform: uppercase; font-weight: bold; font-size: 10px; text-align: center; letter-spacing: 0.5px; }
             td { padding: 8px 5px; border: 1px solid #e0e0e0; text-align: center; word-wrap: break-word; font-size: 11px; }
-            tr:nth-child(even) { background-color: #fcfcfc; }
             @media print {
                 body { padding: 0; margin: 0; }
                 @page { margin: 1.2cm; }
+                * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
             }
         </style>
     </head>
@@ -8414,15 +8458,8 @@ function exportToPDF() {
         <table>
             <thead>
                 <tr>
-                    <th style="width: 85px;">Date</th>
-                    <th style="width: 70px;">Time</th>
-                    <th style="width: 85px;">Place</th>
-                    <th>Activity</th>
-                    <th style="width: 90px;">Asset</th>
-                    <th style="width: 85px;">Status</th>
-                    <th>Trade Partners</th>
-                    <th style="width: 85px;">Result</th>
-                    <th style="width: 140px;">Notes</th>
+                    <th style="width: ${DATE_COL_PERCENT}%;">Date</th>
+                    ${headerCellsHtml}
                 </tr>
             </thead>
             <tbody>
