@@ -1858,6 +1858,75 @@ body.dark-mode .phase-row {
     </div>
 </div>
 
+<!-- Dashboard help button: only shown while viewing that tab (toggled
+     directly in switchMainView(), same pattern as the other help widgets
+     above). The overview panel gets a bolder gradient/chip treatment
+     ("eyepopping") instead of a single grey paragraph like the other two,
+     per request — the copy itself is unchanged, just presented in a more
+     visually distinct way (pulled-out lead line + data-source/filter
+     chips lifted from that same copy). -->
+<div id="dashboard-help-widget" style="display: none; position: fixed; bottom: 24px; right: 24px; z-index: 10001; align-items: center;">
+    <div id="dashboard-help-tooltip" style="position: absolute; bottom: 62px; right: 0; background: #222; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity 0.15s;">Help</div>
+    <button id="dashboard-help-btn" onclick="openDashboardHelpModal()"
+        onmouseover="document.getElementById('dashboard-help-tooltip').style.opacity='1'; this.style.transform='scale(1.08)';"
+        onmouseout="document.getElementById('dashboard-help-tooltip').style.opacity='0'; this.style.transform='scale(1)';"
+        style="width: 50px; height: 50px; border-radius: 50%; background: linear-gradient(135deg, #6a1b9a, #4527a0); color: white; border: none; font-size: 24px; font-weight: bold; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,0.3); transition: transform 0.15s; display: flex; align-items: center; justify-content: center;"
+        aria-label="Help" title="Help">?</button>
+</div>
+
+<div id="dashboard-help-modal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 10002; align-items: center; justify-content: center;">
+    <div style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); width: 900px; max-width: 95vw; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #eee; background: linear-gradient(135deg, #6a1b9a, #4527a0); color: white; flex-shrink: 0;">
+            <h3 id="dashboard-help-title" style="margin: 0; font-size: 18px;">Dashboard Help &amp; Training</h3>
+            <button onclick="closeDashboardHelpModal()" style="background: none; border: none; cursor: pointer; font-size: 26px; color: white; line-height: 1; padding: 0;">&times;</button>
+        </div>
+
+        <div id="dashboard-help-menu" style="flex: 1; overflow-y: auto; padding: 0;">
+            <div style="padding: 26px 28px; background: linear-gradient(135deg, #4527a0 0%, #6a1b9a 55%, #8e24aa 100%); color: white;">
+                <p style="margin: 0 0 16px; font-size: 19px; font-weight: 700; line-height: 1.35; letter-spacing: 0.2px;">Turns commissioning data into an executive-readable progress picture.</p>
+                <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                    <span style="background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.35); color: white; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;">📊 CxAlloy (verified)</span>
+                    <span style="background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.35); color: white; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;">🗓️ LaunchPad (planned)</span>
+                    <span style="background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.35); color: white; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;">📈 Planned vs. Actual</span>
+                </div>
+            </div>
+
+            <div style="padding: 24px 28px;">
+                <p style="margin: 0 0 16px; color: #333; font-size: 14px; line-height: 1.6;">It reads directly from the commissioning software of record (CxAlloy) – issues, checklists, functional tests, equipment, people and companies – and pairs it with planned QCx activity data from LaunchPad, so the planned and the verified side of the job sit in one view.</p>
+
+                <p style="margin: 0 0 16px; color: #333; font-size: 14px; line-height: 1.6;">Because both sides are present, the dashboard reports progress against schedule rather than in isolation: completion by trade and by contractor, aging and escalation, test pass rates, and equipment-level readiness. Every metric filters by discipline, trade partner, status and building phase, so the same dashboard serves a project executive looking at the whole job and a foreman looking only at their own scope.</p>
+
+                <div style="display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 20px;">
+                    <span style="background: #f3e5f5; border: 1px solid #e1bee7; color: #4a148c; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;">Discipline</span>
+                    <span style="background: #f3e5f5; border: 1px solid #e1bee7; color: #4a148c; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;">Trade Partner</span>
+                    <span style="background: #f3e5f5; border: 1px solid #e1bee7; color: #4a148c; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;">Status</span>
+                    <span style="background: #f3e5f5; border: 1px solid #e1bee7; color: #4a148c; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;">Building Phase</span>
+                </div>
+
+                <p style="margin: 0 0 16px; padding: 14px 16px; background: #f8f5fb; border-left: 3px solid #6a1b9a; border-radius: 4px; color: #4a148c; font-size: 13.5px; font-style: italic; line-height: 1.6;">The intent is not another reporting screen. It takes data the team already trusts, presents it in an interface built to drive action rather than to be read, and uses planned-versus-actual to make the picture predictive instead of reactive.</p>
+
+                <p style="margin: 0; color: #666; font-size: 12.5px; line-height: 1.6;">The client-facing build ships as a self-contained static bundle that drops into an existing web app behind the customer's own login.</p>
+            </div>
+
+            <div style="padding: 0 28px 24px;">
+                <h4 style="margin: 0 0 10px; color: #6a1b9a; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">Trainings</h4>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <button class="dashboard-help-guide-btn" onclick="openDashboardHelpGuide('https://scribehow.com/embed-preview/How_To_Navigate_The_KPI_Dashboard__o9CHagCtTWyRNvEXyggKgA?as=slides&size=flexible', 'How to Navigate KPI Dashboard')" onmouseover="this.style.background='#e1bee7'" onmouseout="this.style.background='#f3e5f5'" style="text-align: left; padding: 14px 16px; background: #f3e5f5; border: 1px solid #e1bee7; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; color: #4a148c; display: flex; justify-content: space-between; align-items: center; transition: background 0.15s;">
+                        How to navigate KPI dashboard <span style="opacity:0.6;">▸</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div id="dashboard-help-guide-view" style="display: none; flex: 1; flex-direction: column; overflow: hidden;">
+            <div style="padding: 10px 20px; border-bottom: 1px solid #eee; flex-shrink: 0;">
+                <button onclick="backToDashboardHelpMenu()" style="background: none; border: none; cursor: pointer; font-size: 13px; font-weight: 600; color: #6a1b9a; padding: 4px 0;">← Back to overview</button>
+            </div>
+            <iframe id="dashboard-help-guide-iframe" src="about:blank" style="flex: 1; border: none; width: 100%;" allow="fullscreen"></iframe>
+        </div>
+    </div>
+</div>
+
 <div id="admin-panel" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 2000; align-items: center; justify-content: center;">
     <div style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.25); width: 480px; max-width: 90vw; max-height: 80vh; display: flex; flex-direction: column; overflow: hidden;">
         <div style="display: flex; justify-content: space-between; align-items: center; padding: 18px 20px; border-bottom: 1px solid #eee;">
@@ -2661,6 +2730,7 @@ function switchMainView(viewType, btn) {
     const filterSidebar = document.getElementById('filter-sidebar');
     const scheduleHelpWidget = document.getElementById('schedule-help-widget');
     const equipmentHelpWidget = document.getElementById('equipment-help-widget');
+    const dashboardHelpWidget = document.getElementById('dashboard-help-widget');
     
     // 3. Target schedule layout wrappers & app body
     const mainContent = document.getElementById('main-content-area');
@@ -2688,10 +2758,12 @@ function switchMainView(viewType, btn) {
     if (filterSidebar) filterSidebar.style.display = 'none';
     if (scheduleHelpWidget) scheduleHelpWidget.style.display = 'none';
     if (equipmentHelpWidget) equipmentHelpWidget.style.display = 'none';
+    if (dashboardHelpWidget) dashboardHelpWidget.style.display = 'none';
 
     // Route view choice
     if (viewType === 'dashboard') {
         if (dash) dash.style.display = 'block';
+        if (dashboardHelpWidget) dashboardHelpWidget.style.display = 'flex';
         if (appBody) appBody.style.width = 'calc(100% - 36px)';
         // Lazy load Plotly + the dashboard module only when this tab is opened
         ensureDashboardMounted();
@@ -4481,6 +4553,32 @@ function backToEquipmentHelpMenu() {
     document.getElementById('equipment-help-guide-view').style.display = 'none';
     document.getElementById('equipment-help-menu').style.display = 'block';
     document.getElementById('equipment-help-title').innerText = 'Equipment Status Tracker Help & Training';
+}
+
+// ===== HELP (DASHBOARD SCREEN) =====
+// Same widget/modal/menu-then-guide pattern as the other help buttons.
+// Visibility is toggled directly in switchMainView() (only shown while
+// viewing the Dashboard tab).
+function openDashboardHelpModal() {
+    backToDashboardHelpMenu(); // always open on the overview, not wherever a previous session left off
+    document.getElementById('dashboard-help-modal').style.display = 'flex';
+}
+
+function closeDashboardHelpModal() {
+    document.getElementById('dashboard-help-modal').style.display = 'none';
+}
+
+function openDashboardHelpGuide(url, title) {
+    document.getElementById('dashboard-help-guide-iframe').src = url;
+    document.getElementById('dashboard-help-title').innerText = title;
+    document.getElementById('dashboard-help-menu').style.display = 'none';
+    document.getElementById('dashboard-help-guide-view').style.display = 'flex';
+}
+
+function backToDashboardHelpMenu() {
+    document.getElementById('dashboard-help-guide-view').style.display = 'none';
+    document.getElementById('dashboard-help-menu').style.display = 'block';
+    document.getElementById('dashboard-help-title').innerText = 'Dashboard Help & Training';
 }
 
 // The sign-in form (#auth-prompt) and the project picker (#project-picker)
