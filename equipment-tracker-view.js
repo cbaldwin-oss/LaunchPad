@@ -178,6 +178,13 @@ const STYLE = `
     .cell-row.highlight-search .frozen-combined { background-color: #fff9c4 !important; }
     .highlight-cell { box-shadow: inset 0 0 0 4px #d32f2f, inset 0 0 15px rgba(211,47,47,0.2) !important; z-index: 50 !important; position: relative; }
 
+    /* Was referenced only in the dark-mode override below, never actually
+       defined for light mode — Refresh Data (the only .tool-btn in this
+       file) was falling back to bare, unstyled button chrome instead of
+       matching its pill-button siblings (.pdf-btn/.clear-filters-btn). */
+    .tool-btn { background: #ffffff; color: #2e7d32; border: 1px solid #2e7d32; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; display: flex; align-items: center; gap: 6px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); transition: all 0.2s; }
+    .tool-btn:hover { background: #e8f5e9; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+
     .pdf-btn { background: #2e7d32; color: white; border: 1px solid #1b5e20; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; display: flex; align-items: center; gap: 6px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); transition: all 0.2s; }
     .pdf-btn:hover { background: #1b5e20; box-shadow: 0 4px 8px rgba(0,0,0,0.2); }
 
@@ -670,7 +677,7 @@ const MARKUP = `
 
         <div class="subheader-right">
             <div style="font-size: 13px; color: #2e7d32; font-weight: bold; margin-right: 5px; white-space: nowrap;" id="sync-status">Connecting Backend...</div>
-            <button onclick="this.getRootNode().host.fetchTrackerData(false)" class="tool-btn" style="border-color:#2e7d32; color:#2e7d32; margin-right: 5px;" title="Reload the latest data from the backend">🔄 Refresh Data</button>
+            <button onclick="this.getRootNode().host.fetchTrackerData(false)" class="tool-btn" title="Reload the latest data from the backend">🔄 Refresh Data</button>
             <button id="setup-config-btn" class="setup-btn" style="display: none;" onclick="this.getRootNode().host.openSettingsModal()">⚙️ Setup Config</button>
             <button onclick="this.getRootNode().host.clearAllFilters()" class="clear-filters-btn">
                 <span style="font-size: 14px;">🧹</span> Remove Filters
@@ -940,7 +947,6 @@ export class EquipmentTrackerView extends HTMLElement {
         this._outsideFilterClickHandler = this._handleOutsideFilterClick.bind(this);
 
         // --- PERFORMANCE OPTIMIZATION CACHE ---
-        this.filterCache = { 0: new Set(), 1: new Set(), 2: new Set(), 3: new Set(), 4: new Set(), 5: new Set(), 6: new Set(), 7: new Set(), 8: new Set() };
         this.rowFilterData = [];
         this.rowNodes = [];
         this.__lastTrackerFingerprint = null;
@@ -1052,6 +1058,7 @@ export class EquipmentTrackerView extends HTMLElement {
                 .maybeSingle();
             if (error) throw error;
             const siteName = (data && (data.project_key || data.client_name)) || this.PROJECT_KEY;
+            this.SITE_NAME = siteName;
             const el = this.$('zone-title-display');
             if (el) el.innerText = siteName;
         } catch (e) {
@@ -1516,7 +1523,6 @@ export class EquipmentTrackerView extends HTMLElement {
             const container = this.$('tracker-rows');
             let htmlChunks = [];
 
-            this.filterCache = { 0: new Set(), 1: new Set(), 2: new Set(), 3: new Set(), 4: new Set(), 5: new Set(), 6: new Set(), 7: new Set(), 8: new Set() };
             this.rowFilterData = [];
 
             rows.forEach(row => {
@@ -1540,10 +1546,6 @@ export class EquipmentTrackerView extends HTMLElement {
                 let fVal6 = getGateVal(row['L4 Gate CL 1']);
                 let fVal7 = String(row['L4 Overall Status'] || 'N/A').trim();
                 let fVal8 = String(issuesOpen.rawText).trim();
-
-                this.filterCache[0].add(fVal0); this.filterCache[1].add(fVal1); this.filterCache[2].add(fVal2);
-                this.filterCache[3].add(fVal3); this.filterCache[4].add(fVal4); this.filterCache[5].add(fVal5);
-                this.filterCache[6].add(fVal6); this.filterCache[7].add(fVal7); this.filterCache[8].add(fVal8);
 
                 this.rowFilterData.push({ 0: fVal0, 1: fVal1, 2: fVal2, 3: fVal3, 4: fVal4, 5: fVal5, 6: fVal6, 7: fVal7, 8: fVal8 });
 
@@ -1590,10 +1592,12 @@ export class EquipmentTrackerView extends HTMLElement {
                 setTimeout(() => {
                     overlay.style.visibility = 'hidden';
                 }, 400);
-            } else {
-                // If silent, re-apply any active searches or filters so the UI doesn't jump
-                this.executeFilters();
             }
+            // Re-apply any active column filters (and the global search)
+            // against the freshly-rendered rows — previously this only ran
+            // on a silent background refresh, so clicking "Refresh Data"
+            // manually silently dropped whatever filters were active.
+            this.executeFilters();
 
         } catch (error) {
             console.error("Fetch Exception: ", error);
@@ -1838,6 +1842,26 @@ export class EquipmentTrackerView extends HTMLElement {
         } catch (e) { console.error("Issue Expansion Error: ", e); }
     }
 
+    // Cascading filters: the values offered for one column should narrow
+    // down to whatever's actually still reachable given every OTHER
+    // active filter, not the full, static set of values across all rows
+    // (this.filterCache) regardless of what else is already filtered.
+    // Recomputed fresh each time a dropdown opens — rowFilterData is a
+    // flat array of plain values, so this stays cheap even for thousands
+    // of rows.
+    getAvailableValuesForColumn(colIndex) {
+        const values = new Set();
+        for (const rData of this.rowFilterData) {
+            let passesOtherFilters = true;
+            for (const col in this.activeFilters) {
+                if (Number(col) === colIndex) continue; // don't filter a column by itself
+                if (!this.activeFilters[col].has(rData[col])) { passesOtherFilters = false; break; }
+            }
+            if (passesOtherFilters) values.add(rData[colIndex]);
+        }
+        return values;
+    }
+
     // The filter dropdown itself is deliberately appended to the real
     // document.body (not this.shadowRoot) so it can escape
     // .tracker-container's overflow:auto clipping — see the
@@ -1846,8 +1870,10 @@ export class EquipmentTrackerView extends HTMLElement {
         event.stopPropagation();
         if (this.currentDropdown) { let wasSame = (this.currentDropdown.dataset.col == colIndex); this.closeFilterMenu(); if (wasSame) return; }
 
-        // --- ⚡ INSTANT MEMORY CACHE LOOKUP ---
-        const uniqueValues = this.filterCache[colIndex] || new Set();
+        // Values available given every OTHER active filter — see
+        // getAvailableValuesForColumn() above for why this isn't just the
+        // static this.filterCache[colIndex] anymore.
+        const uniqueValues = this.getAvailableValuesForColumn(colIndex);
 
         const dropdown = document.createElement('div'); dropdown.className = 'filter-dropdown'; dropdown.dataset.col = colIndex;
 
@@ -2141,7 +2167,16 @@ export class EquipmentTrackerView extends HTMLElement {
         let logo2El = this.$('app-logo-2');
         let logo1 = logo1El ? logo1El.src : '';
         let logo2 = logo2El ? logo2El.src : '';
-        let zTitle = this.globalConfig.customHeaders.zoneTitle || 'Zone 1';
+        // The actual resolved site name (matches what's shown next to
+        // "Equipment Status Tracker" in the header), not the legacy
+        // Sheet-configurable customHeaders.zoneTitle field, which almost
+        // always just sits at its 'Zone 1' default.
+        let zTitle = this.SITE_NAME || (this.$('zone-title-display') && this.$('zone-title-display').innerText) || this.PROJECT_KEY;
+        // Same logo shown top-right of the LaunchPad shell's own header —
+        // repeated on every printed/exported page via position:fixed
+        // (Chrome's print/PDF engine renders a fixed-position element on
+        // each page, not just the first).
+        const CRITICALARC_LOGO_URL = 'https://lh3.googleusercontent.com/u/0/d/1Wy_ftXtce-UG5jV-5vwS80lV1yt7QTbG';
 
         let printWin = window.open('', '_blank');
         let html = `<html><head><title>Equipment Status Tracker - PDF Export</title>
@@ -2149,6 +2184,7 @@ export class EquipmentTrackerView extends HTMLElement {
         <style>
             @page { size: landscape; margin: 10mm; }
             body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; font-size: 10px; }
+            .page-logo { position: fixed; top: 0; right: 0; height: 34px; object-fit: contain; }
             .header-container { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; border-bottom: 2px solid #2e7d32; padding-bottom: 10px; }
             h2 { color: #2e7d32; margin: 0; font-size: 18px; text-transform: uppercase; text-align: center; }
             img.logo { height: 70px; object-fit: contain; }
@@ -2164,6 +2200,8 @@ export class EquipmentTrackerView extends HTMLElement {
 
             * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
         </style></head><body>
+
+        <img class="page-logo" src="${CRITICALARC_LOGO_URL}" alt="CriticalArc">
 
         <div class="header-container">
             <div style="flex: 1; text-align: left;">
