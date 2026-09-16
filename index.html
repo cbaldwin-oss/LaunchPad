@@ -8538,11 +8538,18 @@ async function orderChronologically() {
 // --- BATCH ADD LOGIC ---
 function openBatchAddModal() {
     document.getElementById('batch-add-modal').style.display = 'flex';
-    
+
+    // Always open fresh on the selection step, not wherever a previous
+    // session left off.
+    document.getElementById('batchStep1').style.display = 'flex';
+    document.getElementById('batchStep2').style.display = 'none';
+    document.getElementById('batchPreviewBody').innerHTML = '';
+
     // Populate standard dropdowns
     const timeSelect = document.getElementById('batch-time');
     timeSelect.innerHTML = '<option value="">Select...</option>';
     (window.dropdownData?.col1 || []).forEach(t => timeSelect.add(new Option(t, t)));
+    document.getElementById('batch-loto').value = '';
 
     // Populate Checkbox Lists
     const tradeList = document.getElementById('batch-trade-list');
@@ -8580,10 +8587,11 @@ function closeBatchAddModal() {
     document.getElementById('batch-add-modal').style.display = 'none';
 }
 
-async function processBatchAdd() {
+function generateBatchPreview() {
     const targetDate = document.getElementById('batch-date').value;
     const timeVal = document.getElementById('batch-time').value;
     const notesVal = document.getElementById('batch-notes').value;
+    const lotoVal = document.getElementById('batch-loto').value;
 
     if (!targetDate) return alert("Please select a target date.");
 
@@ -8596,14 +8604,76 @@ async function processBatchAdd() {
         return alert("You must select at least one Activity and one Asset.");
     }
 
-    const totalRowsNeeded = selectedActs.length * selectedAssets.length;
-    if (!confirm(`This will generate ${totalRowsNeeded} line items on ${targetDate}. Continue?`)) return;
+    // Build the Matrix (every Activity applied to every Asset) as an
+    // in-memory preview instead of writing straight to the schedule — the
+    // review table below replaces the old "This will generate N line
+    // items... Continue?" confirm() prompt, since the user can now see
+    // and edit exactly what's about to be added instead of just a count.
+    const rows = [];
+    selectedActs.forEach(act => {
+        selectedAssets.forEach(asset => {
+            const placeVal = (window.assetToPlaceMap && window.assetToPlaceMap[asset]) ? window.assetToPlaceMap[asset] : "";
+            rows.push({ time: timeVal, place: placeVal, activity: act, asset: asset, trade: selectedTrades, notes: notesVal, loto: lotoVal });
+        });
+    });
+
+    const esc = (v) => String(v || '').replace(/"/g, '&quot;');
+    document.getElementById('batchPreviewCount').innerText = `${rows.length} line item(s) for ${targetDate}`;
+    document.getElementById('batchPreviewBody').innerHTML = rows.map(r => `
+        <tr>
+            <td style="padding:6px 8px; border-bottom:1px solid #eee;"><input type="text" class="bp-time" value="${esc(r.time)}" style="width:100%; padding:5px; border:1px solid #ddd; border-radius:3px; font-size:12px; box-sizing:border-box;"></td>
+            <td style="padding:6px 8px; border-bottom:1px solid #eee;"><input type="text" class="bp-place" value="${esc(r.place)}" style="width:100%; padding:5px; border:1px solid #ddd; border-radius:3px; font-size:12px; box-sizing:border-box;"></td>
+            <td style="padding:6px 8px; border-bottom:1px solid #eee;"><input type="text" class="bp-activity" value="${esc(r.activity)}" style="width:100%; padding:5px; border:1px solid #ddd; border-radius:3px; font-size:12px; box-sizing:border-box;"></td>
+            <td style="padding:6px 8px; border-bottom:1px solid #eee;"><input type="text" class="bp-asset" value="${esc(r.asset)}" style="width:100%; padding:5px; border:1px solid #ddd; border-radius:3px; font-size:12px; box-sizing:border-box;"></td>
+            <td style="padding:6px 8px; border-bottom:1px solid #eee;"><input type="text" class="bp-trade" value="${esc(r.trade)}" style="width:100%; padding:5px; border:1px solid #ddd; border-radius:3px; font-size:12px; box-sizing:border-box;"></td>
+            <td style="padding:6px 8px; border-bottom:1px solid #eee;"><input type="text" class="bp-notes" value="${esc(r.notes)}" style="width:100%; padding:5px; border:1px solid #ddd; border-radius:3px; font-size:12px; box-sizing:border-box;"></td>
+            <td style="padding:6px 8px; border-bottom:1px solid #eee;">
+                <select class="bp-loto" style="width:100%; padding:5px; border:1px solid #ddd; border-radius:3px; font-size:12px;">
+                    <option value=""${r.loto === '' ? ' selected' : ''}>Select...</option>
+                    <option value="Yes"${r.loto === 'Yes' ? ' selected' : ''}>Yes</option>
+                    <option value="No"${r.loto === 'No' ? ' selected' : ''}>No</option>
+                </select>
+            </td>
+            <td style="padding:6px 8px; border-bottom:1px solid #eee; text-align:center;"><button type="button" onclick="this.closest('tr').remove()" style="background:none; border:none; color:#d32f2f; cursor:pointer; font-size:14px;" title="Remove this row">✕</button></td>
+        </tr>
+    `).join('');
+
+    // The commit step needs the target date but the per-row inputs don't
+    // carry it, so stash it on the step-2 container itself.
+    document.getElementById('batchStep2').dataset.targetDate = targetDate;
+
+    document.getElementById('batchStep1').style.display = 'none';
+    document.getElementById('batchStep2').style.display = 'flex';
+}
+
+function backToBatchStep1() {
+    document.getElementById('batchStep2').style.display = 'none';
+    document.getElementById('batchStep1').style.display = 'flex';
+}
+
+async function commitBatchAdd() {
+    const targetDate = document.getElementById('batchStep2').dataset.targetDate;
+
+    // Read the (possibly hand-edited, possibly row-removed) preview table
+    // rather than recomputing from the checkboxes, so edits/removals made
+    // in the review step are exactly what gets added.
+    const previewRows = Array.from(document.querySelectorAll('#batchPreviewBody tr')).map(tr => ({
+        time: tr.querySelector('.bp-time').value,
+        place: tr.querySelector('.bp-place').value,
+        activity: tr.querySelector('.bp-activity').value,
+        asset: tr.querySelector('.bp-asset').value,
+        trade: tr.querySelector('.bp-trade').value,
+        notes: tr.querySelector('.bp-notes').value,
+        loto: tr.querySelector('.bp-loto').value,
+    }));
+
+    if (previewRows.length === 0) return alert("No line items left to add — every row was removed.");
 
     let targetRowsDiv = document.getElementById(`rows-${targetDate}`);
     if (!targetRowsDiv) {
         return alert("The selected date is outside of the active schedule window.");
     }
-    
+
     // Initialize day if completely empty
     if (targetRowsDiv.innerHTML === '') {
         const addBtn = createAddRowsButton(targetRowsDiv, targetDate);
@@ -8612,15 +8682,15 @@ async function processBatchAdd() {
 
     // Ensure we have enough blank rows, auto-generate more if we don't
     let emptyRows = Array.from(targetRowsDiv.querySelectorAll('.cell-row:not([data-occupied="true"])'));
-    while (emptyRows.length < totalRowsNeeded) {
+    while (emptyRows.length < previewRows.length) {
         const currentCount = targetRowsDiv.querySelectorAll('.cell-row').length;
         // Generate up to exactly what we need
-        addRowsToContainer(targetRowsDiv, targetDate, null, currentCount, Math.max(20, totalRowsNeeded - emptyRows.length));
-        
+        addRowsToContainer(targetRowsDiv, targetDate, null, currentCount, Math.max(20, previewRows.length - emptyRows.length));
+
         // Push Add Button back to the bottom
         const addBtn = targetRowsDiv.querySelector('.add-rows-btn');
         if (addBtn) targetRowsDiv.appendChild(addBtn);
-        
+
         // Re-scrape empty rows
         emptyRows = Array.from(targetRowsDiv.querySelectorAll('.cell-row:not([data-occupied="true"])'));
     }
@@ -8630,58 +8700,49 @@ async function processBatchAdd() {
 
     closeBatchAddModal();
 
-    let rowIndex = 0;
-    
-    // Create the Matrix: Every Activity gets applied to Every Asset
-    for (const act of selectedActs) {
-        for (const asset of selectedAssets) {
-            const emptyRow = emptyRows[rowIndex];
-            emptyRow.setAttribute('data-occupied', 'true');
-            emptyRow.style.display = 'flex'; 
+    previewRows.forEach((r, rowIndex) => {
+        const emptyRow = emptyRows[rowIndex];
+        emptyRow.setAttribute('data-occupied', 'true');
+        emptyRow.style.display = 'flex';
 
-            const rowNum = parseInt(emptyRow.id.replace('row-wrapper-', ''));
-            
-            // --- NEW: Automatically look up the corresponding place for this asset ---
-            const placeVal = (window.assetToPlaceMap && window.assetToPlaceMap[asset]) ? window.assetToPlaceMap[asset] : "";
+        const rowNum = parseInt(emptyRow.id.replace('row-wrapper-', ''));
 
-            const setAndSave = (colIndex, val) => {
-                const el = emptyRow.querySelector(`[data-col-index="${colIndex}"]`);
-                if (el) {
-                    if (el.tagName === 'SELECT' && val !== "") {
-                        const exists = Array.from(el.options).some(opt => opt.value === val);
-                        if (!exists) el.add(new Option(val, val));
-                    }
-                    if (colIndex === 6) {
-                        el.setAttribute('data-selected', val);
-                        if (el.options && el.options[0]) el.options[0].text = val ? `Selected: ${val}` : "+ Add Multi";
-                    } else {
-                        el.value = val;
-                    }
-                    applyCellColor(el, val);
-                    saveCell(el, val, colIndex, true);
+        const setAndSave = (colIndex, val) => {
+            const el = emptyRow.querySelector(`[data-col-index="${colIndex}"]`);
+            if (el) {
+                if (el.tagName === 'SELECT' && val !== "") {
+                    const exists = Array.from(el.options).some(opt => opt.value === val);
+                    if (!exists) el.add(new Option(val, val));
                 }
-            };
+                if (colIndex === 6) {
+                    el.setAttribute('data-selected', val);
+                    if (el.options && el.options[0]) el.options[0].text = val ? `Selected: ${val}` : "+ Add Multi";
+                } else {
+                    el.value = val;
+                }
+                applyCellColor(el, val);
+                saveCell(el, val, colIndex, true);
+            }
+        };
 
-            // Inject the data: Place is 2, Activity is 3
-            setAndSave(1, timeVal);
-            setAndSave(2, placeVal); // Automatically assigned!
-            setAndSave(3, act);
-            setAndSave(4, asset);
-            setAndSave(6, selectedTrades);
-            setAndSave(8, notesVal);
+        // Inject the data: Place is 2, Activity is 3, LOTO is 10
+        setAndSave(1, r.time);
+        setAndSave(2, r.place);
+        setAndSave(3, r.activity);
+        setAndSave(4, r.asset);
+        setAndSave(6, r.trade);
+        setAndSave(8, r.notes);
+        setAndSave(10, r.loto);
 
-            // Trigger the Google Sheets Status Lookup
-            lookupColumn5Value(rowNum, targetDate, false);
-            rowIndex++;
-
-            // Trigger the Google Sheets Status Lookup
-            lookupColumn5Value(rowNum, targetDate, false);
-            rowIndex++;
-        }
-    }
+        // Trigger the Google Sheets Status Lookup — this was previously
+        // called (and rowIndex incremented) TWICE per row by mistake,
+        // which meant every other empty row got skipped and left blank
+        // instead of used, leaving visible gaps in the grid.
+        lookupColumn5Value(rowNum, targetDate, false);
+    });
 
     document.getElementById('saveIndicator').innerText = "Saved";
-    alert(`Successfully generated and added ${totalRowsNeeded} line item(s) to ${targetDate}.`);
+    alert(`Successfully added ${previewRows.length} line item(s) to ${targetDate}.`);
 }
 /**
  * Helper function to convert 12hr/24hr time strings into numerical minutes for accurate sorting.
@@ -8765,12 +8826,13 @@ function filterBatchList(listId, query) {
 </div>
 
 <div class="modal-overlay" id="batch-add-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:10000; justify-content:center; align-items:center;">
-    <div style="background:white; padding:30px; border-radius:8px; width:700px; max-width:95%; max-height:90vh; display:flex; flex-direction:column; box-shadow: 0 10px 30px rgba(0,0,0,0.2);">
+    <div style="background:white; padding:30px; border-radius:8px; width:950px; max-width:95%; max-height:90vh; display:flex; flex-direction:column; box-shadow: 0 10px 30px rgba(0,0,0,0.2);">
         <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #eee; padding-bottom:15px; margin-bottom:15px;">
             <h2 style="margin:0; color:#2e7d32;">Batch Add Line Items</h2>
             <button onclick="closeBatchAddModal()" style="background:none; border:none; font-size:24px; cursor:pointer; color:#999;">×</button>
         </div>
-        
+
+        <div id="batchStep1" style="display:flex; flex-direction:column; flex:1; overflow:hidden; gap:15px;">
         <div style="overflow-y:auto; flex:1; padding-right:10px; display:flex; flex-direction:column; gap:15px;">
             <div style="display:flex; gap:15px;">
                 <div style="flex:1;">
@@ -8781,6 +8843,14 @@ function filterBatchList(listId, query) {
                     <label style="font-weight:bold; font-size:13px; color:#555;">Time</label>
                     <select id="batch-time" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;"></select>
                 </div>
+                <div style="flex:1;">
+                    <label style="font-weight:bold; font-size:13px; color:#555;">LOTO</label>
+                    <select id="batch-loto" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;">
+                        <option value="">Select...</option>
+                        <option value="Yes">Yes</option>
+                        <option value="No">No</option>
+                    </select>
+                </div>
             </div>
 
             <div style="display:flex; flex-direction:column; max-height: 140px;">
@@ -8790,7 +8860,7 @@ function filterBatchList(listId, query) {
                 </div>
                 <div id="batch-trade-list" style="flex:1; border:1px solid #ccc; border-radius:4px; overflow-y:auto; padding:5px; background:#f9f9f9;"></div>
             </div>
-            
+
             <div style="display:flex; gap:15px; height: 240px;">
                 <div style="flex:1; display:flex; flex-direction:column;">
                     <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:5px;">
@@ -8814,9 +8884,35 @@ function filterBatchList(listId, query) {
             </div>
         </div>
 
-        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:20px; border-top:1px solid #eee; padding-top:15px;">
+        <div style="display:flex; justify-content:flex-end; gap:10px; border-top:1px solid #eee; padding-top:15px;">
             <button onclick="closeBatchAddModal()" style="padding:10px 15px; background:#f5f5f5; border:1px solid #ddd; border-radius:4px; cursor:pointer; font-weight:bold;">Cancel</button>
-            <button onclick="processBatchAdd()" style="padding:10px 15px; background:#2e7d32; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:bold;">Generate & Add Rows</button>
+            <button onclick="generateBatchPreview()" style="padding:10px 15px; background:#2e7d32; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:bold;">Generate Preview →</button>
+        </div>
+        </div>
+
+        <div id="batchStep2" style="display:none; flex-direction:column; flex:1; overflow:hidden; gap:10px;">
+            <p style="margin:0; font-size:13px; color:#666;"><strong id="batchPreviewCount"></strong> — review and edit before adding to the schedule. Remove any rows you don't want.</p>
+            <div style="flex:1; overflow:auto; border:1px solid #eee; border-radius:6px;">
+                <table style="width:100%; border-collapse:collapse; font-size:12.5px;">
+                    <thead>
+                        <tr style="background:#f1f3f4; position:sticky; top:0;">
+                            <th style="padding:7px 8px; text-align:left;">Time</th>
+                            <th style="padding:7px 8px; text-align:left;">Place</th>
+                            <th style="padding:7px 8px; text-align:left;">Activity</th>
+                            <th style="padding:7px 8px; text-align:left;">Asset</th>
+                            <th style="padding:7px 8px; text-align:left;">Trade</th>
+                            <th style="padding:7px 8px; text-align:left;">Notes</th>
+                            <th style="padding:7px 8px; text-align:left;">LOTO</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="batchPreviewBody"></tbody>
+                </table>
+            </div>
+            <div style="display:flex; justify-content:flex-end; gap:10px; border-top:1px solid #eee; padding-top:15px;">
+                <button onclick="backToBatchStep1()" style="padding:10px 15px; background:#f5f5f5; border:1px solid #ddd; border-radius:4px; cursor:pointer; font-weight:bold;">← Back</button>
+                <button onclick="commitBatchAdd()" style="padding:10px 15px; background:#2e7d32; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:bold;">Add to Schedule</button>
+            </div>
         </div>
     </div>
 </div>
