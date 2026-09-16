@@ -1867,12 +1867,21 @@ export class EquipmentTrackerView extends HTMLElement {
             <div id="filter-loading" style="padding: 10px; font-size: 12px; color: #777; text-align: center;">Loading...</div>
             <div id="val-container" style="overflow-y: auto; flex: 1; display: none;"></div>
             <div class="filter-actions" style="margin-top: 10px; display: flex; justify-content: space-between; border-top: 1px solid #eee; padding-top: 10px;">
-                <button class="filter-btn clear" onclick="this.getRootNode().host.clearFilter(${colIndex})">Clear</button>
-                <button class="filter-btn" onclick="this.getRootNode().host.applyFilter(${colIndex})">OK</button>
+                <button class="filter-btn clear" id="filter-clear-btn">Clear</button>
+                <button class="filter-btn" id="filter-ok-btn">OK</button>
             </div>
         `;
         document.body.appendChild(dropdown);
         this.currentDropdown = dropdown;
+
+        // This dropdown lives in the real document.body, not this element's
+        // shadow root (see the class comment above toggleFilter), so
+        // onclick="this.getRootNode().host.foo()" won't work here — getRootNode()
+        // on a light-DOM element returns the plain Document, which has no
+        // .host. Real addEventListener callbacks close over `this` correctly
+        // instead, same as the search/select-all/checkbox listeners below.
+        dropdown.querySelector('#filter-clear-btn').addEventListener('click', () => this.clearFilter(colIndex));
+        dropdown.querySelector('#filter-ok-btn').addEventListener('click', () => this.applyFilter(colIndex));
 
         // --- ASYNCHRONOUS RENDERING (Unfreezes the mouse) ---
         setTimeout(() => {
