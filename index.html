@@ -7140,15 +7140,16 @@ function addRowsToContainer(container, dayLabel, anchorBtn = null, startIdx = 0,
                 };
             }
 
-            // --- HISTORY LISTENERS ---
-            element.addEventListener('focus', function() {
-                this.dataset.previousValue = this.value || '';
-            });
-            element.addEventListener('blur', function() {
-                const prev = this.dataset.previousValue || '';
-                const curr = this.value || '';
-                if (prev !== curr) logEditHistory(rowNumericId, dayLabel, col, prev, curr);
-            });
+            // --- HISTORY: right-click a cell to see its edit history ---
+            // (Actual history logging happens in saveCell() on every real
+            // change, keyed by the same row_id/col_index this reads with —
+            // this just opens that view. There used to be a second,
+            // separate history-logging attempt here on focus/blur calling
+            // a logEditHistory() function that was never actually defined
+            // anywhere in this file, silently throwing a ReferenceError in
+            // the console on every cell blur without ever recording
+            // anything — removed as dead/broken code.)
+            element.addEventListener('contextmenu', (e) => showCellHistory(e, rowNumericId, col));
 
             // FINALLY: Add the element to the row in the configured order!
             rowDiv.appendChild(element);
