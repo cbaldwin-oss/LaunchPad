@@ -1309,7 +1309,31 @@ body.dark-mode .phase-row {
     background: linear-gradient(90deg, #1e1e1e, #2c2c2c) !important;
     border-left: 4px solid #4caf50 !important;
 }
-    
+
+/* ===== HELP MODAL "DOCK TO SIDE" MODE =====
+   Toggled by toggleHelpDock() (see script below) on any of the three help
+   modals (schedule/equipment/dashboard). The outer overlay covers the full
+   viewport either way (so the panel can still anchor to its right edge),
+   but in docked mode it turns transparent and click-through
+   (pointer-events: none) everywhere except the panel itself
+   (pointer-events: auto, re-enabled on .help-modal-panel), so the rest of
+   LaunchPad stays fully usable underneath while a guide is open. */
+.help-modal-docked {
+    background: transparent !important;
+    justify-content: flex-end !important;
+    align-items: stretch !important;
+    pointer-events: none !important;
+    padding: 16px !important;
+}
+.help-modal-docked .help-modal-panel {
+    pointer-events: auto !important;
+    width: 380px !important;
+    max-width: 92vw !important;
+    height: 100% !important;
+    max-height: none !important;
+    border-radius: 10px !important;
+    box-shadow: -6px 6px 28px rgba(0,0,0,0.35) !important;
+}
 </style>
 </head>
 <body>
@@ -1784,10 +1808,13 @@ body.dark-mode .phase-row {
 </div>
 
 <div id="schedule-help-modal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 10002; align-items: center; justify-content: center;">
-    <div style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); width: 900px; max-width: 95vw; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
+    <div class="help-modal-panel" style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); width: 900px; max-width: 95vw; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
         <div style="display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #eee; background: #2e7d32; color: white; flex-shrink: 0;">
             <h3 id="schedule-help-title" style="margin: 0; font-size: 18px;">Schedule Help &amp; Training</h3>
-            <button onclick="closeScheduleHelpModal()" style="background: none; border: none; cursor: pointer; font-size: 26px; color: white; line-height: 1; padding: 0;">&times;</button>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <button id="schedule-help-dock-btn" onclick="toggleHelpDock('schedule')" title="Dock to the side so you can use LaunchPad while following along" style="background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.4); color: white; border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;">⇥ Dock</button>
+                <button onclick="closeScheduleHelpModal()" style="background: none; border: none; cursor: pointer; font-size: 26px; color: white; line-height: 1; padding: 0;">&times;</button>
+            </div>
         </div>
 
         <div id="schedule-help-menu" style="flex: 1; overflow-y: auto; padding: 0;">
@@ -1852,10 +1879,13 @@ body.dark-mode .phase-row {
 </div>
 
 <div id="equipment-help-modal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 10002; align-items: center; justify-content: center;">
-    <div style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); width: 900px; max-width: 95vw; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
+    <div class="help-modal-panel" style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); width: 900px; max-width: 95vw; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
         <div style="display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #eee; background: #1565c0; color: white; flex-shrink: 0;">
             <h3 id="equipment-help-title" style="margin: 0; font-size: 18px;">Equipment Status Tracker Help &amp; Training</h3>
-            <button onclick="closeEquipmentHelpModal()" style="background: none; border: none; cursor: pointer; font-size: 26px; color: white; line-height: 1; padding: 0;">&times;</button>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <button id="equipment-help-dock-btn" onclick="toggleHelpDock('equipment')" title="Dock to the side so you can use LaunchPad while following along" style="background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.4); color: white; border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;">⇥ Dock</button>
+                <button onclick="closeEquipmentHelpModal()" style="background: none; border: none; cursor: pointer; font-size: 26px; color: white; line-height: 1; padding: 0;">&times;</button>
+            </div>
         </div>
 
         <div id="equipment-help-menu" style="flex: 1; overflow-y: auto; padding: 0;">
@@ -1920,10 +1950,13 @@ body.dark-mode .phase-row {
 </div>
 
 <div id="dashboard-help-modal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 10002; align-items: center; justify-content: center;">
-    <div style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); width: 900px; max-width: 95vw; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
+    <div class="help-modal-panel" style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); width: 900px; max-width: 95vw; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
         <div style="display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #eee; background: linear-gradient(135deg, #6a1b9a, #4527a0); color: white; flex-shrink: 0;">
             <h3 id="dashboard-help-title" style="margin: 0; font-size: 18px;">Dashboard Help &amp; Training</h3>
-            <button onclick="closeDashboardHelpModal()" style="background: none; border: none; cursor: pointer; font-size: 26px; color: white; line-height: 1; padding: 0;">&times;</button>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <button id="dashboard-help-dock-btn" onclick="toggleHelpDock('dashboard')" title="Dock to the side so you can use LaunchPad while following along" style="background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.4); color: white; border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;">⇥ Dock</button>
+                <button onclick="closeDashboardHelpModal()" style="background: none; border: none; cursor: pointer; font-size: 26px; color: white; line-height: 1; padding: 0;">&times;</button>
+            </div>
         </div>
 
         <div id="dashboard-help-menu" style="flex: 1; overflow-y: auto; padding: 0;">
@@ -4570,6 +4603,26 @@ function closeHelpModal() {
     document.getElementById('help-modal').style.display = 'none';
 }
 
+// ===== HELP MODAL "DOCK TO SIDE" =====
+// Shared by all three of the view-specific help modals below (Schedule/
+// Equipment/Dashboard). Docking shrinks the modal into a panel anchored to
+// the right edge and lets clicks pass through everywhere else (see the
+// .help-modal-docked / .help-modal-panel CSS), so a user can keep the
+// guide open on-screen while actually working the steps in LaunchPad
+// underneath it instead of having to close the guide to try each step.
+function toggleHelpDock(prefix) {
+    const modal = document.getElementById(`${prefix}-help-modal`);
+    if (!modal) return;
+    const isDocked = modal.classList.toggle('help-modal-docked');
+    const btn = document.getElementById(`${prefix}-help-dock-btn`);
+    if (btn) {
+        btn.innerHTML = isDocked ? '⛶ Expand' : '⇥ Dock';
+        btn.title = isDocked
+            ? 'Expand back to full view'
+            : 'Dock to the side so you can use LaunchPad while following along';
+    }
+}
+
 // ===== HELP (SCHEDULE SCREEN) =====
 // Same widget/modal pattern as the sign-in help above, but this one opens
 // on an overview + a menu of Scribe guides instead of jumping straight
@@ -4583,7 +4636,12 @@ function openScheduleHelpModal() {
 }
 
 function closeScheduleHelpModal() {
-    document.getElementById('schedule-help-modal').style.display = 'none';
+    const modal = document.getElementById('schedule-help-modal');
+    modal.style.display = 'none';
+    // Always reopen full-screen, not wherever a previous session left the dock state.
+    modal.classList.remove('help-modal-docked');
+    const dockBtn = document.getElementById('schedule-help-dock-btn');
+    if (dockBtn) dockBtn.innerHTML = '⇥ Dock';
 }
 
 function openScheduleHelpGuide(url, title) {
@@ -4609,7 +4667,11 @@ function openEquipmentHelpModal() {
 }
 
 function closeEquipmentHelpModal() {
-    document.getElementById('equipment-help-modal').style.display = 'none';
+    const modal = document.getElementById('equipment-help-modal');
+    modal.style.display = 'none';
+    modal.classList.remove('help-modal-docked');
+    const dockBtn = document.getElementById('equipment-help-dock-btn');
+    if (dockBtn) dockBtn.innerHTML = '⇥ Dock';
 }
 
 function openEquipmentHelpGuide(url, title) {
@@ -4635,7 +4697,11 @@ function openDashboardHelpModal() {
 }
 
 function closeDashboardHelpModal() {
-    document.getElementById('dashboard-help-modal').style.display = 'none';
+    const modal = document.getElementById('dashboard-help-modal');
+    modal.style.display = 'none';
+    modal.classList.remove('help-modal-docked');
+    const dockBtn = document.getElementById('dashboard-help-dock-btn');
+    if (dockBtn) dockBtn.innerHTML = '⇥ Dock';
 }
 
 function openDashboardHelpGuide(url, title) {
