@@ -337,6 +337,14 @@ input,select,textarea{font-family:inherit;}
 .gantt-day.weekend{background:#f7f7f7; color:#aaa;}
 .gantt-day .dow{font-size:10px; font-weight:600; color:var(--text-muted); text-transform:uppercase;}
 .gantt-day.today{background:var(--green-light); color:var(--green-dark);}
+/* Overview zoom's month-grouped header cell (see buildGanttHeaderHtml()) —
+   one per calendar month instead of one per day. */
+.gantt-month{
+    border-right:2px solid var(--grey-border2); text-align:center; box-sizing:border-box;
+    padding:8px 4px; font-size:12px; font-weight:700; color:var(--text-dark); overflow:hidden;
+    white-space:nowrap; text-overflow:ellipsis;
+}
+.gantt-month.today{background:var(--green-light); color:var(--green-dark);}
 
 .gantt-body{position:relative;}
 .gantt-row{display:flex; min-width:100%; border-bottom:3px solid var(--grey-border); position:relative; transition:height .05s;}
@@ -569,7 +577,8 @@ const MARKUP = `
         <option value="contractor">Group by Contractor</option>
         <option value="type">Group by Type</option>
     </select>
-    <select class="tool-btn small" id="dayWidthSelect" onchange="this.getRootNode().host.setDayWidth(this.value)" style="font-weight:600;" title="All zoom levels use day-based sizing — Wide just gives each day more horizontal room. Compact shows the asset name only (activity is color-coded, not labeled) at a smaller day width.">
+    <select class="tool-btn small" id="dayWidthSelect" onchange="this.getRootNode().host.setDayWidth(this.value)" style="font-weight:600;" title="All zoom levels use day-based sizing — Wide just gives each day more horizontal room. Compact shows the asset name only (activity is color-coded, not labeled). Overview is a long-range project view (months at a glance, grouped by month header, color-coded bars only) — like a P6/Smartsheet rolled-up timeline.">
+        <option value="14">Zoom: Overview</option>
         <option value="80" selected>Zoom: Compact</option>
         <option value="220">Zoom: Normal</option>
         <option value="360">Zoom: Wide</option>
@@ -1835,6 +1844,12 @@ export class BridgeView extends HTMLElement {
     // cut) — this only controls the activity-name label being hidden in
     // favor of color-coding at that zoom level.
     get isCompactZoom() { return this.DAY_WIDTH <= 60; }
+    // Overview is a strict subset of Compact (also true here) meant for
+    // seeing a long project's full span at once — day columns are too
+    // narrow even for the asset name, so bars fall back to color-only, and
+    // the header groups by month instead of showing each individual day
+    // (see buildGanttHeaderHtml()).
+    get isOverviewZoom() { return this.DAY_WIDTH <= 16; }
     xForItem(item) {
         return this.dayIndexForDate(new Date(item.start_ts)) * this.DAY_WIDTH;
     }
@@ -2012,6 +2027,29 @@ export class BridgeView extends HTMLElement {
     buildGanttHeaderHtml(groupBy, rowMinWidth) {
         const todayStr = new Date().toDateString();
         let headerHtml = `<div class="gantt-rowlabel-col">${this.labelForGroup(groupBy)}</div>`;
+        if (this.isOverviewZoom) {
+            // Long-range view: individual days are too narrow to be legible
+            // at this zoom, so the header groups by calendar month instead
+            // (like a P6/Smartsheet rolled-up timeline) — each month becomes
+            // one wide labeled cell sized to however many of its days fall
+            // within the current timeline range.
+            let i = 0;
+            while (i < this.TIMELINE_DAYS) {
+                const d = new Date(this.TIMELINE_START); d.setDate(d.getDate() + i);
+                const month = d.getMonth(), year = d.getFullYear();
+                let count = 0, containsToday = false;
+                while (i + count < this.TIMELINE_DAYS) {
+                    const dd = new Date(this.TIMELINE_START); dd.setDate(dd.getDate() + i + count);
+                    if (dd.getMonth() !== month || dd.getFullYear() !== year) break;
+                    if (dd.toDateString() === todayStr) containsToday = true;
+                    count++;
+                }
+                const width = count * this.DAY_WIDTH;
+                headerHtml += `<div class="gantt-month ${containsToday ? 'today' : ''}" style="flex:0 0 ${width}px; width:${width}px;" title="${d.toLocaleDateString(undefined,{month:'long',year:'numeric'})} — click a day at Compact/Normal zoom to see what's scheduled">${d.toLocaleDateString(undefined,{month:'short',year:'numeric'})}</div>`;
+                i += count;
+            }
+            return headerHtml;
+        }
         for (let i = 0; i < this.TIMELINE_DAYS; i++) {
             const d = new Date(this.TIMELINE_START); d.setDate(d.getDate() + i);
             const isWeekend = d.getDay() === 0 || d.getDay() === 6;
@@ -2236,12 +2274,15 @@ export class BridgeView extends HTMLElement {
         // Compact zoom still shows the asset name (that's the whole point of
         // being able to read the bar), but the activity is color-only there
         // (activityColor already encodes which activity it is) rather than
-        // also spelling it out in tiny text. Full asset/activity detail is
-        // still one hover away via the title tooltip either way.
+        // also spelling it out in tiny text. Overview zoom is narrower still
+        // (built for seeing a long project's whole span at once) — there's
+        // no room for any label there, so it falls all the way back to a
+        // plain color-coded bar. Full asset/activity detail is always one
+        // hover away via the title tooltip regardless of zoom.
         return `<div class="gantt-item ${overdue ? 'overdue' : ''} ${focused ? 'focused' : ''} ${dimmed ? 'dimmed' : ''} ${critical ? 'critical' : ''} ${multiselected ? 'multiselected' : ''} ${notReady ? 'not-ready' : ''}" data-id="${it.id}" style="left:${left}px; width:${width}px; top:${top}px; background:${color};" title="${escAttr(it.asset_name)} — ${escAttr(it.activity_name)}${overdue ? ' (past zone target end date)' : ''}${floatTitle}${launchpadLinked ? ' — linked to LaunchPad' : ''}${notReady ? ' — NOT READY (status open/incomplete)' : ''}">
             ${resizable ? `<div class="resize-handle left" data-id="${it.id}" data-edge="left"></div>` : ''}
             ${launchpadLinked ? `<span class="launchpad-badge" title="Linked to a LaunchPad row">📡</span>` : ''}
-            <span class="gi-asset">${escHtml(it.asset_name)}</span>
+            ${this.isOverviewZoom ? '' : `<span class="gi-asset">${escHtml(it.asset_name)}</span>`}
             ${this.isCompactZoom ? '' : `<span class="gi-activity">${escHtml(it.activity_name)}</span>`}
             ${resizable ? `<div class="resize-handle" data-id="${it.id}" data-edge="right"></div>` : ''}
             <div class="link-handle" data-id="${it.id}" title="Drag to link a successor activity"></div>
@@ -2655,22 +2696,50 @@ export class BridgeView extends HTMLElement {
         if (confirm('Remove this dependency link?')) this.removePredecessorLink(succId, predId);
     }
 
-    /* Successors can never start before their predecessor finishes. If a move
-       or resize pushes a predecessor's end past a successor's start, the
-       successor snaps forward to begin the moment the predecessor finishes
-       (same-day alignment), and the shift cascades down the chain. */
+    // The last calendar day-index (within TIMELINE_START's frame) an item is
+    // actually active on — itemEndMs() sits exactly on the boundary instant
+    // (e.g. 7am the day AFTER a whole-day activity's last active day), so
+    // this pulls back 1ms before flooring, landing on that last active day
+    // instead of the following one.
+    lastActiveDayIndex(item) {
+        return Math.floor(this.dayIndexForDate(new Date(this.itemEndMs(item) - 1)));
+    }
+    // 7am on a given day-index, as an absolute timestamp — the same
+    // start-of-day convention every item's start_ts already uses.
+    dayIndexToMs(dayIdx) {
+        const d = new Date(this.TIMELINE_START);
+        d.setDate(d.getDate() + dayIdx);
+        d.setHours(7, 0, 0, 0);
+        return d.getTime();
+    }
+    // A successor is always allowed to share the same calendar day as its
+    // predecessor (e.g. predecessor finishes that morning, successor picks
+    // up that afternoon) — so the earliest a successor may start is 7am on
+    // whichever predecessor's own LAST active day is latest, not the exact
+    // millisecond each predecessor finishes. Returns null with no predecessors.
+    minAllowedStartMs(predItems) {
+        if (!predItems || !predItems.length) return null;
+        return Math.max(...predItems.map(p => this.dayIndexToMs(this.lastActiveDayIndex(p))));
+    }
+
+    /* Successors can share the same day as their predecessor — they're only
+       force-moved when the predecessor now runs STRICTLY past the day the
+       successor is already sitting on (a real conflict, not just "the same
+       day"), and even then only far enough to clear it: the very next day
+       after the predecessor's own last active day, not all the way out to
+       the predecessor's exact finish time. The shift cascades down the chain. */
     async enforceDependencies(changedId, visited) {
         visited = visited || new Set();
         if (visited.has(changedId)) return;
         visited.add(changedId);
         const changed = this.DATA.items.find(i => i.id === changedId);
         if (!changed) return;
-        const changedEnd = this.itemEndMs(changed);
+        const predLastDay = this.lastActiveDayIndex(changed);
         const successors = this.DATA.items.filter(i => (i.predecessor_ids || []).includes(changedId));
         for (const succ of successors) {
-            const succStart = new Date(succ.start_ts).getTime();
-            if (succStart < changedEnd) {
-                succ.start_ts = new Date(changedEnd).toISOString();
+            const succDay = Math.floor(this.dayIndexForDate(new Date(succ.start_ts)));
+            if (predLastDay > succDay) {
+                succ.start_ts = new Date(this.dayIndexToMs(predLastDay + 1)).toISOString();
                 await this.DB.update(this.TABLES.items, succ.id, { start_ts: succ.start_ts });
                 // this successor's date just changed as a side effect of the
                 // cascade, not from being dragged directly — without this, its
@@ -2849,11 +2918,9 @@ export class BridgeView extends HTMLElement {
                 if (!item) continue;
                 item.start_ts = new Date(snap.origStart.getTime() + shiftMs).toISOString();
                 if (item.predecessor_ids && item.predecessor_ids.length) {
-                    const predEnds = item.predecessor_ids.map(pid => this.DATA.items.find(i => i.id === pid)).filter(Boolean).map(x => this.itemEndMs(x));
-                    if (predEnds.length) {
-                        const minStart = Math.max(...predEnds);
-                        if (new Date(item.start_ts).getTime() < minStart) item.start_ts = new Date(minStart).toISOString();
-                    }
+                    const predItems = item.predecessor_ids.map(pid => this.DATA.items.find(i => i.id === pid)).filter(Boolean);
+                    const minStart = this.minAllowedStartMs(predItems);
+                    if (minStart !== null && new Date(item.start_ts).getTime() < minStart) item.start_ts = new Date(minStart).toISOString();
                 }
                 await this.DB.update(this.TABLES.items, item.id, { start_ts: item.start_ts });
             }
@@ -2885,15 +2952,15 @@ export class BridgeView extends HTMLElement {
             item.duration_hours = Math.max(0.25, this.snapHours((newWidthPx / this.DAY_WIDTH) * 24));
         }
 
-        // an item can never sit behind its own predecessor — clamp forward if needed
+        // an item can never sit on a day before its own predecessor's last
+        // active day (same day as the predecessor is fine — see
+        // minAllowedStartMs()) — clamp forward if needed
         if (item.predecessor_ids && item.predecessor_ids.length) {
-            const predEnds = item.predecessor_ids.map(pid => this.DATA.items.find(i => i.id === pid)).filter(Boolean).map(x => this.itemEndMs(x));
-            if (predEnds.length) {
-                const minStart = Math.max(...predEnds);
-                if (new Date(item.start_ts).getTime() < minStart) {
-                    item.start_ts = new Date(minStart).toISOString();
-                    this.toast("Snapped to predecessor's finish — can't start before it.");
-                }
+            const predItems = item.predecessor_ids.map(pid => this.DATA.items.find(i => i.id === pid)).filter(Boolean);
+            const minStart = this.minAllowedStartMs(predItems);
+            if (minStart !== null && new Date(item.start_ts).getTime() < minStart) {
+                item.start_ts = new Date(minStart).toISOString();
+                this.toast("Snapped to its predecessor's day — can't start earlier than that.");
             }
         }
 
@@ -3091,10 +3158,10 @@ export class BridgeView extends HTMLElement {
         let startTs = new Date(startVal).toISOString();
         const predItems = this.currentItemPredecessors.map(pid => this.DATA.items.find(i => i.id === pid)).filter(Boolean);
         if (predItems.length) {
-            const minStart = Math.max(...predItems.map(x => this.itemEndMs(x)));
-            if (new Date(startTs).getTime() < minStart) {
+            const minStart = this.minAllowedStartMs(predItems);
+            if (minStart !== null && new Date(startTs).getTime() < minStart) {
                 startTs = new Date(minStart).toISOString();
-                this.toast("Start time adjusted — can't begin before its predecessor finishes.");
+                this.toast("Start date adjusted — can't begin before its predecessor's day.");
             }
         }
 
