@@ -1806,7 +1806,7 @@ body.help-docked #loading-overlay {
     <p id="grant-status" style="margin-top: 15px; font-size: 14px; display: none;"></p>
 </div>
 
-<div id="project-picker" style="display: none; flex-direction: column; text-align: center; background: white; padding: 0; border-radius: 14px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); color: #333; max-width: 600px; margin: 0 20px; width: 100%; overflow: hidden;">
+<div id="project-picker" style="display: none; flex-direction: column; text-align: center; background: white; padding: 0; border-radius: 14px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); color: #333; max-width: 600px; max-height: 88vh; margin: 0 20px; width: 100%; overflow: hidden;">
     <div style="position: relative; background: linear-gradient(135deg, #1b5e20, #2e7d32); padding: 34px 28px 28px; display: flex; align-items: center; justify-content: space-between; gap: 12px; overflow: hidden;">
         <img src="https://lh3.googleusercontent.com/u/0/d/1Wy_ftXtce-UG5jV-5vwS80lV1yt7QTbG" alt="" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); height: 260%; width: auto; opacity: 0.14; filter: brightness(0) invert(1); pointer-events: none;">
         <!-- Always visible regardless of how many projects are in the
@@ -1825,7 +1825,18 @@ body.help-docked #loading-overlay {
         </div>
         <span style="position: relative; font-size: 46px; flex-shrink: 0; display: inline-block; transform: rotate(-45deg);" title="LaunchPad">🚀</span>
     </div>
-    <div id="project-picker-list" style="padding: 28px 30px 20px; max-height: 65vh; overflow-y: auto; background: linear-gradient(rgba(255,255,255,0.85), rgba(255,255,255,0.85)), url('https://lh3.googleusercontent.com/u/0/d/1Wy_ftXtce-UG5jV-5vwS80lV1yt7QTbG') center/70% no-repeat;"></div>
+    <div id="project-picker-list" style="padding: 28px 30px 20px; flex: 1; min-height: 80px; overflow-y: auto; background: linear-gradient(rgba(255,255,255,0.85), rgba(255,255,255,0.85)), url('https://lh3.googleusercontent.com/u/0/d/1Wy_ftXtce-UG5jV-5vwS80lV1yt7QTbG') center/70% no-repeat;"></div>
+    <!-- Sticky footer, outside the scrollable list above — "Request access
+         to another project" used to be the last thing in that scrollable
+         area, so it was easy to miss below a long project list. Rendered
+         here instead (see renderProjectPicker()) so it's always visible
+         regardless of scroll position. flex-shrink:0 keeps it pinned at
+         its natural size while #project-picker-list (flex:1 above) is the
+         one that gives up space to it; its own max-height/overflow is a
+         safety net for when the request-access form is expanded (it's
+         fairly tall) so it scrolls internally instead of getting clipped
+         by #project-picker's overflow:hidden or pushed past max-height. -->
+    <div id="project-picker-footer" style="padding: 16px 30px; border-top: 1px solid #eee; background: white; flex-shrink: 0; max-height: 50vh; overflow-y: auto; text-align: left;"></div>
 </div>
 
 <div id="auth-prompt" style="display: none; text-align: center; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); color: #333; max-width: 400px; margin: 0 20px;">
@@ -5850,7 +5861,7 @@ function renderProjectPicker(projects, opts) {
         : `<input type="email" id="access-request-email" placeholder="Email address" style="padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:10px; box-sizing:border-box; font-size:15px;">`;
 
     const requestAccessSection = opts.showRequestAccess === false ? '' : `
-        <div style="margin-top: ${projects.length ? '18px' : '0'}; padding-top: ${projects.length ? '16px' : '0'}; border-top: ${projects.length ? '1px solid #eee' : 'none'}; text-align:left;">
+        <div style="text-align:left;">
             <a href="javascript:void(0)" onclick="toggleAccessRequestForm()" id="access-request-toggle" style="color:#2e7d32; font-weight:600; font-size:14px; text-decoration:none;">${projects.length ? '+ Request access to another project' : '+ Enter access code'}</a>
             <div id="access-request-form" style="display:${projects.length ? 'none' : 'block'}; margin-top:14px;">
                 <input type="text" id="access-code-input" placeholder="6-digit access code" maxlength="6" inputmode="numeric" oninput="handleAccessCodeInput()" style="padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:6px; box-sizing:border-box; font-size:15px; text-align:center; letter-spacing:3px;">
@@ -5873,10 +5884,15 @@ function renderProjectPicker(projects, opts) {
     `;
 
     const cancelLink = window.__pickerAllowCancel
-        ? `<div style="margin-top:16px; text-align:center;"><a href="javascript:void(0)" onclick="switchToLoginView()" style="font-size:13px; color:#999; text-decoration:none;">Back to Sign In</a></div>`
+        ? `<div style="margin-top:12px; text-align:center;"><a href="javascript:void(0)" onclick="switchToLoginView()" style="font-size:13px; color:#999; text-decoration:none;">Back to Sign In</a></div>`
         : '';
 
-    list.innerHTML = projectsHtml + requestAccessSection + cancelLink;
+    list.innerHTML = projectsHtml;
+    // Rendered in the sticky footer outside the scrollable list (see the
+    // #project-picker-footer markup) instead of appended after the
+    // projects, so "Request access to another project" is always visible
+    // instead of requiring a scroll past a long project list to find it.
+    document.getElementById('project-picker-footer').innerHTML = requestAccessSection + cancelLink;
     picker.style.display = 'flex';
 }
 
