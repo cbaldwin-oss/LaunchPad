@@ -4786,8 +4786,15 @@ function applyHelpDockWidth(modal, widthPx) {
 }
 
 function clearHelpDockSizing(modal) {
+    // NOTE: every panel's expanded width (900px) is itself an inline style
+    // in the HTML, the exact same style attribute applyHelpDockWidth()
+    // overwrites with !important — so removeProperty('width') here would
+    // delete that 900px value outright instead of restoring it (with no
+    // width left at all, the panel collapses to its content's minimum
+    // width, which is the "very thin popup" bug). Setting it back
+    // explicitly is what actually restores the expanded view.
     const panel = modal.querySelector('.help-modal-panel');
-    if (panel) panel.style.removeProperty('width');
+    if (panel) panel.style.width = '900px';
     const iframe = modal.querySelector('.help-guide-frame-wrap iframe');
     if (iframe) {
         iframe.style.removeProperty('width');
