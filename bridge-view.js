@@ -612,22 +612,10 @@ const MARKUP = `
     <div class="toolbar-spacer"></div>
 
     <!-- RIGHT SIDE: everything else -->
-    <select class="tool-btn small" id="groupBySelect" onchange="this.getRootNode().host.renderGantt()" style="font-weight:600;">
-        <option value="overall" selected>Group: Overall</option>
-        <option value="zone">Group by Zone</option>
-        <option value="area">Group by Area</option>
-        <option value="asset_type">Group by Asset Type</option>
-        <option value="contractor">Group by Contractor</option>
-        <option value="type">Group by Type</option>
-    </select>
-    <select class="tool-btn small" id="dayWidthSelect" onchange="this.getRootNode().host.setDayWidth(this.value)" style="font-weight:600;" title="All zoom levels use day-based sizing — Wide just gives each day more horizontal room. Compact shows the asset name only (activity is color-coded, not labeled). Overview and Overview Extended are long-range, P6/Smartsheet-style task lists — one thin row per activity, sorted chronologically, labeled by Asset — Activity on the left instead of grouped/packed rows. Overview groups its header by month; Overview Extended shows individual days.">
+    <select class="tool-btn small" id="dayWidthSelect" onchange="this.getRootNode().host.setDayWidth(this.value)" style="font-weight:600;" title="Overview groups its header by month and drops all text in favor of color-coded bars only — a bird's-eye view of the whole project. Overview Extended shows individual days and the asset name on each bar.">
         <option value="14">Zoom: Overview</option>
         <option value="45" selected>Zoom: Overview Extended</option>
-        <option value="80">Zoom: Compact</option>
-        <option value="220">Zoom: Normal</option>
-        <option value="360">Zoom: Wide</option>
     </select>
-    <button class="tool-btn small" id="expandToggleBtn" onclick="this.getRootNode().host.toggleExpandView()" title="Give every activity its own line, or collapse back to the packed view">⬍ Expand All Activities</button>
     <label class="tool-btn small" style="cursor:pointer; gap:6px; border-color:#f57c0033;" title="Show only the zero-float activities from today forward — the chain(s) that directly control how soon everything finishes. Everything else, including past work, is hidden.">
         <input type="checkbox" id="criticalPathToggle" onchange="this.getRootNode().host.toggleCriticalPath(this.checked)" style="margin:0;">
         🔥 Critical Path
@@ -645,17 +633,6 @@ const MARKUP = `
         </div>
     </div>
     <span id="saveIndicator">Ready</span>
-    <div class="menu-btn-wrap">
-        <button class="tool-btn small" id="launchpadMenuBtn" onclick="this.getRootNode().host.toggleMenu('launchpadMenu', event)">📡 LaunchPad ▾</button>
-        <div class="menu-dropdown right" id="launchpadMenu">
-            <div class="menu-item" id="launchpadSyncMenuItem" onclick="this.getRootNode().host.toggleLaunchPadSync()">📡 Sync to LaunchPad: Off</div>
-            <div class="menu-item" onclick="this.getRootNode().host.closeAllMenus(); this.getRootNode().host.pullFromLaunchPad()">⬇️ Pull from LaunchPad</div>
-            <div class="menu-item" onclick="this.getRootNode().host.closeAllMenus(); this.getRootNode().host.refreshAllStatuses()">🔄 Refresh Status</div>
-            <div class="menu-item" title="Finds and fixes items still pointing at a LaunchPad row that no longer exists (leftover from a move that didn't fully clean up), then re-pushes them" onclick="this.getRootNode().host.closeAllMenus(); this.getRootNode().host.repairLaunchPadLinks()">🔧 Repair LaunchPad Links</div>
-        </div>
-    </div>
-    <a id="openSheetLink" href="#" target="_blank" style="display:none; font-size:12px; color:var(--green-dark); font-weight:600; text-decoration:none;">Open Sheet ↗</a>
-    <button class="tool-btn small" onclick="this.getRootNode().host.syncToGoogleSheet()">📤 Sync to Sheets</button>
     <div class="menu-btn-wrap">
         <button class="tool-btn small" onclick="this.getRootNode().host.toggleMenu('reportMenu', event)">📊 Report ▾</button>
         <div class="menu-dropdown right" id="reportMenu">
@@ -1083,7 +1060,9 @@ export class BridgeView extends HTMLElement {
         this.autoScrollRAF = null;
         this.autoScrollState = null;
         this.currentItemPredecessors = [];
-        this.LAUNCHPAD_SYNC_ENABLED = this.loadLaunchPadSyncEnabled();
+        // Always on now that the manual toggle button is gone — LaunchPad
+        // push/pull is core functionality, not an opt-in.
+        this.LAUNCHPAD_SYNC_ENABLED = true;
         this.STATUS_CACHE = {}; // "asset|||activity" -> { result, url } | 'pending' | 'error'
         this.RESULT_CACHE = {}; // launchpad_id -> result string | null, cached so repeated lookups (e.g. across several predecessors) don't re-fetch
         this.statusRefreshInFlight = false;
@@ -1276,6 +1255,32 @@ export class BridgeView extends HTMLElement {
         // "{PROJECT_KEY}BackEndData" table in this same Supabase project —
         // see the LAUNCHPAD SYNC section below for the full field mapping.
         this.LAUNCHPAD_TABLE = `${this.PROJECT_KEY}BackEndData`;
+    }
+
+    // fetchLaunchPadStatus() used to call a single hardcoded Apps Script URL
+    // (LAUNCHPAD_STATUS_SCRIPT_URL) regardless of which project was actually
+    // loaded — that URL belongs to whichever project this file was
+    // originally built against (PROJECT_KEY's own fallback default), so for
+    // any OTHER project it was querying an entirely different project's
+    // checklist data, which obviously never matches this project's real
+    // activities — always "NA", no matter what. Each project has its own
+    // Apps Script URL in launchpad_projects.google_script_url (the same
+    // place LaunchPad's own sync pipeline reads it from); this fetches that
+    // and uses it instead, falling back to the old hardcoded one only if
+    // this project has none on file.
+    async _resolveStatusScriptUrl() {
+        this.GOOGLE_SCRIPT_URL = LAUNCHPAD_STATUS_SCRIPT_URL;
+        if (!this._supabase) return;
+        try {
+            const { data, error } = await this._supabase
+                .from('launchpad_projects')
+                .select('google_script_url')
+                .eq('project_key', this.PROJECT_KEY)
+                .maybeSingle();
+            if (!error && data && data.google_script_url) this.GOOGLE_SCRIPT_URL = data.google_script_url;
+        } catch (e) {
+            console.error('Could not resolve this project\'s Apps Script URL — status lookups will use the fallback default', e);
+        }
     }
 
     _initSupabase() {
@@ -1560,6 +1565,7 @@ export class BridgeView extends HTMLElement {
         }
         await this.reloadAllData();
         await this.fetchAssetLookupMaps();
+        await this._resolveStatusScriptUrl();
         this.initTimelineRangeInputs();
         this.buildTypePicker('itemTypePicker');
         this.buildTypePicker('bulkTypePicker');
@@ -1571,18 +1577,16 @@ export class BridgeView extends HTMLElement {
         this.renderLegend();
         this.renderGantt();
         this.initWaterfallSyncedScroll();
-        const existingSheetId = localStorage.getItem('pullplan_gsheet_id');
-        if (existingSheetId) {
-            const link = this.$('openSheetLink');
-            link.href = `https://docs.google.com/spreadsheets/d/${existingSheetId}/edit`;
-            link.style.display = 'inline';
-        }
         this.updateLaunchPadSyncBtn();
         this.setSaveIndicator('ready', 'Ready');
         if (this._supabase) {
             this.pullFromLaunchPad().catch(err => console.error('Background LaunchPad pull failed', err));
             this.refreshAllStatuses().catch(err => console.error('Background status refresh failed', err));
             this.initLaunchPadRealtimeSync();
+            // Repair Links no longer has a menu button to trigger it
+            // manually — running it once on load keeps that self-healing
+            // happening automatically instead of only on request.
+            this.repairLaunchPadLinks().catch(err => console.error('Background LaunchPad link repair failed', err));
         }
     }
 
@@ -1900,12 +1904,14 @@ export class BridgeView extends HTMLElement {
         // reopen the dropdown that was just used
         this.$(`dd-${key}`).classList.add('open');
         this.renderGantt();
+        this.scrollWaterfallToTop();
     }
 
     clearAllFilters() {
         FILTER_DEFS.forEach(d => this.FILTERS[d.key].clear());
         this.renderFilterBar();
         this.renderGantt();
+        this.scrollWaterfallToTop();
     }
 
     /* ---- Type legend + type swatch pickers (used in modals) ---- */
@@ -2246,7 +2252,10 @@ export class BridgeView extends HTMLElement {
     // Waiting 220ms after typing pauses collapses that into a single render.
     debouncedRenderGantt() {
         clearTimeout(this.__ganttSearchDebounceTimer);
-        this.__ganttSearchDebounceTimer = setTimeout(() => this.renderGantt(), 220);
+        this.__ganttSearchDebounceTimer = setTimeout(() => {
+            this.renderGantt();
+            this.scrollWaterfallToTop();
+        }, 220);
     }
 
     // Overview/Overview Extended's rows are sorted chronologically — one
@@ -2263,9 +2272,23 @@ export class BridgeView extends HTMLElement {
         const wrap = this.$('ganttWrap');
         if (!wrap || wrap._syncedScrollBound) return;
         wrap._syncedScrollBound = true;
+        let lastScrollTop = wrap.scrollTop;
         let ticking = false;
         wrap.addEventListener('scroll', () => {
-            if (!this.isWaterfallZoom || ticking) return;
+            // #ganttWrap scrolls BOTH axes, so a manual horizontal scroll —
+            // or this handler's own scrollLeft assignment below — fires
+            // this exact same event. Reacting to those too immediately
+            // snapped scrollLeft back to the top row's position on every
+            // horizontal scroll attempt, which made it impossible to
+            // manually look further right/left than wherever the top row
+            // happened to be (couldn't scroll to "today + 5 days", couldn't
+            // get back to the very top). Only reacting when scrollTOP
+            // itself actually moved — genuine vertical scrolling — fixes
+            // both: horizontal scrolling is left alone, and this handler's
+            // own left-only adjustment never re-triggers itself.
+            const scrollTopChanged = wrap.scrollTop !== lastScrollTop;
+            lastScrollTop = wrap.scrollTop;
+            if (!this.isWaterfallZoom || !scrollTopChanged || ticking) return;
             ticking = true;
             requestAnimationFrame(() => {
                 this.syncWaterfallHorizontalScroll(wrap);
@@ -2291,26 +2314,34 @@ export class BridgeView extends HTMLElement {
         // the viewport, so that width has to be added back in here.
         const itemLeft = parseFloat(itemEl.style.left) || 0;
         const targetScrollLeft = Math.max(0, 260 + itemLeft - 40);
-        if (Math.abs(wrap.scrollLeft - targetScrollLeft) > 4) {
-            wrap.scrollTo({ left: targetScrollLeft, behavior: 'smooth' });
-        }
+        // Instant, not smooth — a multi-frame smooth-scroll animation
+        // fires several more 'scroll' events of its own while it plays,
+        // which is exactly the kind of feedback this needs to avoid.
+        if (Math.abs(wrap.scrollLeft - targetScrollLeft) > 4) wrap.scrollLeft = targetScrollLeft;
+    }
+    // Called after any filter/search/critical-path change (see
+    // toggleFilterValue, clearAllFilters, toggleCriticalPath, the search
+    // box) so the view always lands on whatever's now actually first/
+    // relevant, instead of staying wherever it was scrolled — which could
+    // easily now be showing a mostly-empty stretch if the change just
+    // removed everything that used to be visible there. Must run AFTER
+    // renderGantt() has rebuilt the row list, not before.
+    scrollWaterfallToTop() {
+        if (!this.isWaterfallZoom) return;
+        const wrap = this.$('ganttWrap');
+        if (!wrap) return;
+        wrap.scrollTop = 0;
+        this.syncWaterfallHorizontalScroll(wrap);
     }
 
     renderGantt() {
         this.style.setProperty('--daywidth', this.DAY_WIDTH + 'px');
-        // Overview and Overview Extended always render one row per activity
-        // in chronological order below — grouping and "Expand All
-        // Activities" don't apply there, so they're disabled rather than
-        // left sitting around looking like they should do something. Done
-        // here (every render) rather than only in setDayWidth() so it's
-        // also correct on first mount — the default zoom is now Overview
-        // Extended, and setDayWidth() never runs until the dropdown itself
-        // is touched.
-        const groupBySelect = this.$('groupBySelect');
-        const expandBtn = this.$('expandToggleBtn');
-        if (groupBySelect) groupBySelect.disabled = this.isWaterfallZoom;
-        if (expandBtn) expandBtn.disabled = this.isWaterfallZoom;
-        const groupBy = groupBySelect.value;
+        // Grouping and "Expand All Activities" no longer have any UI (only
+        // Overview/Overview Extended remain, which always render one row
+        // per activity — see the isWaterfallZoom branch below) — 'overall'
+        // is just the harmless default groupKeyFor()/zoneEndMarkerHtml()
+        // etc. fall back on, since that whole code path is unreachable now.
+        const groupBy = 'overall';
 
         try {
             this.criticalPathData = this.computeCriticalPath();
@@ -2433,7 +2464,13 @@ export class BridgeView extends HTMLElement {
     /* ---- Fullscreen single-row view: always shows the row at its natural
        full height (every item visible, no manual shrink) at a larger scale. ---- */
     openRowFullscreen(gname) {
-        const groupBy = this.$('groupBySelect').value;
+        // Dead code now that grouping has no UI (only Overview/Overview
+        // Extended remain, and their row-expand button is never rendered —
+        // see buildRowHtml()'s opts.displayLabel check) — left in place
+        // rather than deleted in case grouping ever comes back, guarded so
+        // it can't throw if something still manages to call it.
+        const groupBySelect = this.$('groupBySelect');
+        const groupBy = groupBySelect ? groupBySelect.value : 'overall';
         if (groupBy === 'overall') { this.toast('Already showing everything — switch to another grouping to filter down to one space.'); return; }
         if (this.FILTERS[groupBy]) {
             this.FILTERS[groupBy].clear();
@@ -2881,6 +2918,7 @@ export class BridgeView extends HTMLElement {
     toggleCriticalPath(checked) {
         this.showCriticalPath = checked;
         this.renderGantt();
+        this.scrollWaterfallToTop();
     }
 
     isAncestor(candidateId, startId, visited) {
@@ -3063,13 +3101,20 @@ export class BridgeView extends HTMLElement {
        arrows from cutting through other activities.
        ========================================================================= */
 
+    // No button calls this anymore (removed along with Compact/Normal/
+    // Wide zoom, which was the only place a packed/grouped view — the
+    // thing this toggle affected — could ever be shown). Left in place
+    // rather than deleted in case grouped views come back; guarded so it
+    // can't throw if something still manages to call it.
     toggleExpandView() {
         this.expandedView = !this.expandedView;
         const btn = this.$('expandToggleBtn');
-        btn.textContent = this.expandedView ? '⬆ Collapse' : '⬍ Expand All Activities';
-        btn.title = this.expandedView
-            ? 'Return to the packed view (still keeps linked chains cascading cleanly)'
-            : 'Give every activity its own line, or collapse back to the packed view';
+        if (btn) {
+            btn.textContent = this.expandedView ? '⬆ Collapse' : '⬍ Expand All Activities';
+            btn.title = this.expandedView
+                ? 'Return to the packed view (still keeps linked chains cascading cleanly)'
+                : 'Give every activity its own line, or collapse back to the packed view';
+        }
         this.renderGantt();
     }
 
@@ -4398,7 +4443,7 @@ export class BridgeView extends HTMLElement {
         if (this.STATUS_CACHE[key] && this.STATUS_CACHE[key] !== 'error') return this.STATUS_CACHE[key];
         this.STATUS_CACHE[key] = 'pending';
         try {
-            const url = `${LAUNCHPAD_STATUS_SCRIPT_URL}?action=lookup&col3=${encodeURIComponent(activity)}&col4=${encodeURIComponent(asset)}`;
+            const url = `${this.GOOGLE_SCRIPT_URL || LAUNCHPAD_STATUS_SCRIPT_URL}?action=lookup&col3=${encodeURIComponent(activity)}&col4=${encodeURIComponent(asset)}`;
             const res = await fetch(url);
             const data = await res.json();
             this.STATUS_CACHE[key] = (data && data.result) ? { result: data.result, url: data.url || null } : { result: 'NA', url: null };
@@ -4814,9 +4859,8 @@ export class BridgeView extends HTMLElement {
             this.setSaveIndicator('dirty', 'Pushing schedule...');
             await this.writeScheduleToSheet(token, sheetId);
             this.setSaveIndicator('ready', 'Synced to Google Sheets');
-            const link = this.$('openSheetLink');
-            link.href = `https://docs.google.com/spreadsheets/d/${sheetId}/edit`;
-            link.style.display = 'inline';
+            const link = this.$('openSheetLink'); // no button calls this function anymore (removed along with "Sync to Sheets") — guarded in case that changes
+            if (link) { link.href = `https://docs.google.com/spreadsheets/d/${sheetId}/edit`; link.style.display = 'inline'; }
             this.toast('Schedule pushed to Google Sheets');
         } catch (err) {
             console.error(err);
