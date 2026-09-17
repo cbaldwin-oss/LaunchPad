@@ -618,6 +618,7 @@ const MARKUP = `
             <div class="menu-item" id="launchpadSyncMenuItem" onclick="this.getRootNode().host.toggleLaunchPadSync()">📡 Sync to LaunchPad: Off</div>
             <div class="menu-item" onclick="this.getRootNode().host.closeAllMenus(); this.getRootNode().host.pullFromLaunchPad()">⬇️ Pull from LaunchPad</div>
             <div class="menu-item" onclick="this.getRootNode().host.closeAllMenus(); this.getRootNode().host.refreshAllStatuses()">🔄 Refresh Status</div>
+            <div class="menu-item" title="Finds and fixes items still pointing at a LaunchPad row that no longer exists (leftover from a move that didn't fully clean up), then re-pushes them" onclick="this.getRootNode().host.closeAllMenus(); this.getRootNode().host.repairLaunchPadLinks()">🔧 Repair LaunchPad Links</div>
         </div>
     </div>
     <a id="openSheetLink" href="#" target="_blank" style="display:none; font-size:12px; color:var(--green-dark); font-weight:600; text-decoration:none;">Open Sheet ↗</a>
@@ -4044,6 +4045,50 @@ export class BridgeView extends HTMLElement {
         this.setSaveIndicator('ready', 'Ready');
         this.toast(`Pushed ${ok} item(s) to LaunchPad${fail ? `, ${fail} failed — see console` : ''}`, 5000);
         this.renderGantt();
+    }
+
+    /* One-time repair for links left stale by the old race-condition bug
+       (fixed above in syncItemToLaunchPad/maybeSyncToLaunchPad) — before
+       that fix, a move could finish having updated item.launchpad_id to a
+       row that a *concurrent* sync then immediately deleted (or never
+       actually created), leaving Bridge convinced it owns a row that no
+       longer exists. Every future sync for that item then keeps quietly
+       upserting under that same dead id — which either does nothing
+       visible (the row doesn't exist to update) or, worse, resurrects a
+       row at the WRONG (old) position, which is exactly "moved, but the
+       old one is still there." This only clears a link when the row it
+       points at is verifiably gone — it never touches a link whose row
+       still exists, even if that row's day looks different (that's a
+       legitimate LaunchPad-side edit for Pull from LaunchPad to bring
+       back, not something to silently overwrite here). */
+    async repairLaunchPadLinks() {
+        if (!this._supabase) { this.toast('Connect to Supabase first — see the header subtitle.'); return; }
+        const linkedItems = this.DATA.items.filter(it => it.launchpad_id);
+        if (!linkedItems.length) { this.toast('No LaunchPad-linked items to check.'); return; }
+        this.setSaveIndicator('dirty', 'Checking LaunchPad links...');
+        const { data: rows, error } = await this._supabase.from(this.LAUNCHPAD_TABLE).select('id');
+        if (error) {
+            console.error('LaunchPad link check failed', error);
+            this.setSaveIndicator('error', 'Check failed');
+            this.toast('Could not check LaunchPad links — see console.');
+            return;
+        }
+        const liveIds = new Set((rows || []).map(r => String(r.id)));
+        let cleared = 0;
+        for (const item of linkedItems) {
+            if (liveIds.has(String(item.launchpad_id))) continue;
+            item.launchpad_id = null;
+            item.launchpad_day_label = null;
+            await this.DB.update(this.TABLES.items, item.id, { launchpad_id: null, launchpad_day_label: null });
+            cleared++;
+        }
+        if (!cleared) {
+            this.setSaveIndicator('ready', 'Ready');
+            this.toast('All LaunchPad links check out — nothing stale to repair.');
+            return;
+        }
+        this.toast(`Found ${cleared} broken LaunchPad link(s) — re-pushing to fix ${cleared === 1 ? 'it' : 'them'} now...`, 4500);
+        await this.syncAllToLaunchPad();
     }
 
     toggleLaunchPadSync() {
