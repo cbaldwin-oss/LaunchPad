@@ -373,6 +373,7 @@ input,select,textarea{font-family:inherit;}
 .gantt-gridline{flex:0 0 var(--daywidth); border-right:1px solid #f0f0f0;}
 .gantt-gridline.weekend{background:rgba(0,0,0,0.02);}
 .gantt-gridline.today{background:rgba(46,125,50,0.06);}
+.gantt-gridline.month{border-right:2px solid var(--grey-border2);}
 
 .gantt-item{
     position:absolute; min-height:36px; height:auto; border-radius:6px; color:#fff; font-size:11.5px;
@@ -2313,6 +2314,30 @@ export class BridgeView extends HTMLElement {
     gridlinesHtml() {
         const todayStr = new Date().toDateString();
         let html = '';
+        if (this.isOverviewZoom) {
+            // Overview's header groups by month (see buildGanttHeaderHtml())
+            // — drawing one hairline gridline per individual day underneath
+            // that, at a 14px day width, packed ~30 to a month, is what was
+            // making the whole thing look like a dense, glitchy hatch
+            // pattern ("cells too thin"). One gridline per month instead,
+            // matching the header's own granularity.
+            let i = 0;
+            while (i < this.TIMELINE_DAYS) {
+                const d = new Date(this.TIMELINE_START); d.setDate(d.getDate() + i);
+                const month = d.getMonth(), year = d.getFullYear();
+                let count = 0, containsToday = false;
+                while (i + count < this.TIMELINE_DAYS) {
+                    const dd = new Date(this.TIMELINE_START); dd.setDate(dd.getDate() + i + count);
+                    if (dd.getMonth() !== month || dd.getFullYear() !== year) break;
+                    if (dd.toDateString() === todayStr) containsToday = true;
+                    count++;
+                }
+                const width = count * this.DAY_WIDTH;
+                html += `<div class="gantt-gridline month ${containsToday ? 'today' : ''}" style="flex:0 0 ${width}px; width:${width}px;"></div>`;
+                i += count;
+            }
+            return html;
+        }
         for (let i = 0; i < this.TIMELINE_DAYS; i++) {
             const d = new Date(this.TIMELINE_START); d.setDate(d.getDate() + i);
             const isWeekend = d.getDay() === 0 || d.getDay() === 6;
