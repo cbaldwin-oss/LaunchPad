@@ -2850,8 +2850,11 @@ export class BridgeView extends HTMLElement {
                 // this successor's date just changed as a side effect of the
                 // cascade, not from being dragged directly — without this, its
                 // LaunchPad row would silently fall out of sync: it stays on
-                // its old day there while Pull Planner shows it on the new one
-                this.maybeSyncToLaunchPad(succ);
+                // its old day there while Pull Planner shows it on the new one.
+                // Awaited (not fire-and-forget) so this fully lands — including
+                // its own old-row cleanup — before anything downstream can
+                // start a second sync for the same item.
+                await this.maybeSyncToLaunchPad(succ);
                 await this.enforceDependencies(succ.id, visited);
             }
         }
@@ -3032,7 +3035,10 @@ export class BridgeView extends HTMLElement {
             }
             for (const snap of this.dragCtx.groupSnapshot) await this.enforceDependencies(snap.id);
             if (this.LAUNCHPAD_SYNC_ENABLED) {
-                for (const snap of this.dragCtx.groupSnapshot) this.maybeSyncToLaunchPad(this.DATA.items.find(i => i.id === snap.id));
+                // Sequential, not fire-and-forget — several of these all
+                // needing a fresh slot on the same day at once is exactly
+                // the scenario that used to race (see syncItemToLaunchPad()).
+                for (const snap of this.dragCtx.groupSnapshot) await this.maybeSyncToLaunchPad(this.DATA.items.find(i => i.id === snap.id));
             }
             this.setSaveIndicator('ready', 'Saved');
             this.renderGantt();
@@ -3666,7 +3672,11 @@ export class BridgeView extends HTMLElement {
             }
         }
         if (this.LAUNCHPAD_SYNC_ENABLED) {
-            for (const id of insertedIds) this.maybeSyncToLaunchPad(this.DATA.items.find(i => i.id === id));
+            // Sequential — a bulk add can easily put several new items on
+            // the same day, all needing a fresh slot at once (the race
+            // syncItemToLaunchPad()'s queue closes, but no need to rely on
+            // it here when a plain await avoids the race in the first place).
+            for (const id of insertedIds) await this.maybeSyncToLaunchPad(this.DATA.items.find(i => i.id === id));
         }
         this.setSaveIndicator('ready', 'Saved');
         this.toast(`${this.bulkPreviewRows.length} item(s) added${linkCount ? `, ${linkCount} linked as predecessor/successor` : ''}`);
@@ -3952,7 +3962,28 @@ export class BridgeView extends HTMLElement {
         return data.find(row => !linkedIds.has(row.id)) || null;
     }
 
+    // Two saves for the SAME item can genuinely overlap — a drag-end save
+    // racing a dependency cascade's save for the same successor, or a
+    // fast group-drag firing several of these before the first lands —
+    // and if both read item.launchpad_id/launchpad_day_label before either
+    // has written its update, both compute the same "day changed" old id
+    // and both try to claim a fresh slot, silently orphaning one of the
+    // rows. Chaining every call for a given item onto whatever's already
+    // in flight for it makes them run one at a time instead, closing that
+    // race entirely.
     async syncItemToLaunchPad(item) {
+        if (!item) return false;
+        this._launchpadSyncQueue = this._launchpadSyncQueue || new Map();
+        const prior = this._launchpadSyncQueue.get(item.id) || Promise.resolve();
+        const run = prior.catch(() => {}).then(() => this._syncItemToLaunchPadCore(item));
+        this._launchpadSyncQueue.set(item.id, run);
+        try {
+            return await run;
+        } finally {
+            if (this._launchpadSyncQueue.get(item.id) === run) this._launchpadSyncQueue.delete(item.id);
+        }
+    }
+    async _syncItemToLaunchPadCore(item) {
         if (!this._supabase) return false;
         const dayLabel = new Date(item.start_ts).toISOString().slice(0, 10);
         let numericId;
@@ -3984,8 +4015,16 @@ export class BridgeView extends HTMLElement {
         const { error } = await this._supabase.from(this.LAUNCHPAD_TABLE).upsert([row]);
         if (error) { console.error('LaunchPad sync failed', error); return false; }
         if (oldIdToRemove !== null) {
-            const { error: cleanupError } = await this._supabase.from(this.LAUNCHPAD_TABLE).delete().eq('id', oldIdToRemove);
-            if (cleanupError) console.error('LaunchPad old-row cleanup failed (new row is correct, but the old one may still be there)', cleanupError);
+            let cleanupError = (await this._supabase.from(this.LAUNCHPAD_TABLE).delete().eq('id', oldIdToRemove)).error;
+            if (cleanupError) {
+                // the delete failing here IS the "moved but the old one is
+                // still there" bug — worth one retry before giving up
+                cleanupError = (await this._supabase.from(this.LAUNCHPAD_TABLE).delete().eq('id', oldIdToRemove)).error;
+            }
+            if (cleanupError) {
+                console.error('LaunchPad old-row cleanup failed (new row is correct, but the old one may still be there)', cleanupError);
+                this.toast(`"${item.asset_name} — ${item.activity_name}" moved, but its old LaunchPad row couldn't be removed — check LaunchPad for a leftover duplicate on its previous day.`, 7000);
+            }
         }
         item.launchpad_id = numericId;
         item.launchpad_day_label = dayLabel;
@@ -4201,8 +4240,18 @@ export class BridgeView extends HTMLElement {
         this.openModal('dayDetailModal');
     }
 
-    maybeSyncToLaunchPad(item) {
-        if (this.LAUNCHPAD_SYNC_ENABLED && item) this.syncItemToLaunchPad(item).catch(err => console.error('LaunchPad auto-sync failed', err));
+    // async and awaitable now (not just fire-and-forget) so a caller that
+    // needs to sync several items in sequence — instead of letting them
+    // race each other, see syncItemToLaunchPad()'s comment — can await
+    // each one before starting the next. Callers that don't await it still
+    // work exactly as before; the error is always caught here either way.
+    async maybeSyncToLaunchPad(item) {
+        if (!this.LAUNCHPAD_SYNC_ENABLED || !item) return;
+        try {
+            await this.syncItemToLaunchPad(item);
+        } catch (err) {
+            console.error('LaunchPad auto-sync failed', err);
+        }
     }
 
     // Pulls the current state of {PROJECT_KEY}BackEndData and reconciles it with the
