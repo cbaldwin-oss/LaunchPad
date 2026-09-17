@@ -2447,6 +2447,22 @@ export class BridgeView extends HTMLElement {
         // measuring positions for the connector lines, so they never end up
         // drawn against stale/pre-reflow coordinates
         requestAnimationFrame(() => this.renderConnections());
+        // renderGantt() runs for lots of reasons that have nothing to do with
+        // the user scrolling — a background LaunchPad pull, the periodic
+        // status refresh, a filter change, the realtime subscription — and
+        // initWaterfallSyncedScroll()'s own sync only reacts to actual
+        // scroll events. Any of those other renders can rebuild the DOM
+        // with a different item now sitting at the same scrollTop, leaving
+        // the horizontal position stale relative to whatever row visually
+        // ends up on top — exactly the "top row's real date is scrolled
+        // past" bug. Re-syncing after every render (not just every scroll)
+        // closes that gap regardless of what triggered it.
+        if (this.isWaterfallZoom) {
+            requestAnimationFrame(() => {
+                const wrap = this.$('ganttWrap');
+                if (wrap) this.syncWaterfallHorizontalScroll(wrap);
+            });
+        }
         // defensive re-measure: clientWidth taken synchronously above can race
         // with flex layout settling (particularly right after load), leaving
         // rows sized to their own content instead of the full viewport — widen

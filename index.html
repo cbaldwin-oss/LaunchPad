@@ -5479,8 +5479,15 @@ function initRealtimeSync() {
 
 function updateRowInUI(row) {
     // FIX: Match the ID format used in addRowsToContainer (row-wrapper-ID)
-    const rowEl = document.getElementById(`row-wrapper-${row.id}`);
-    if (!rowEl) return;
+    let rowEl = document.getElementById(`row-wrapper-${row.id}`);
+    if (!rowEl) {
+        // The row's day hasn't been batch-rendered yet (see WEEKS_PER_BATCH
+        // below) — extend rendering just far enough to cover it, then retry
+        // once, instead of silently dropping a real-time update on the floor.
+        if (!ensureWeekRenderedForDayLabel(row.day_label)) return;
+        rowEl = document.getElementById(`row-wrapper-${row.id}`);
+        if (!rowEl) return;
+    }
 
     rowEl.setAttribute('data-occupied', 'true');
     // Column Name Mapping
@@ -7721,6 +7728,36 @@ function renderNextWeekBatch() {
     }
 }
 
+// Real-time updates and applyScheduleDataToDom() both target DOM containers
+// (`rows-${day_label}` / `row-wrapper-${id}`) that only exist for weeks
+// already batch-rendered above. A Bridge dependency cascade can easily push
+// a downstream activity's day far past whatever the user has scrolled to so
+// far — without this, that write would land in Supabase fine but never show
+// up here until the user happened to scroll that far down. This reuses the
+// exact same batching renderNextWeekBatch() already does for the scroll
+// sentinel, just triggered on demand instead of on scroll.
+function ensureWeekRenderedForDayLabel(dayLabel) {
+    if (document.getElementById(`rows-${dayLabel}`)) return true;
+
+    // Look Ahead views deliberately only render a narrow window around
+    // today (see renderLookAheadWeeks) — a day outside that window is
+    // meant to stay hidden, not force-rendered.
+    if (currentView === 'view2' || currentView === 'view3') return false;
+
+    const baseDate = new Date(START_DATE + "T00:00:00");
+    const target = new Date(dayLabel + "T00:00:00");
+    const msPerDay = 24 * 60 * 60 * 1000;
+    const weekOffset = Math.floor((target - baseDate) / msPerDay / 7);
+    if (isNaN(weekOffset) || weekOffset < 0 || weekOffset >= WEEKS_TO_SHOW) return false;
+
+    let guard = 0;
+    while (__scheduleWeeksRendered <= weekOffset && __scheduleWeeksRendered < WEEKS_TO_SHOW && guard < 1000) {
+        renderNextWeekBatch();
+        guard++;
+    }
+    return !!document.getElementById(`rows-${dayLabel}`);
+}
+
 const __weekLoadObserver = new IntersectionObserver((entries) => {
     entries.forEach(entry => {
         if (entry.isIntersecting) {
@@ -8868,7 +8905,10 @@ function applyScheduleDataToDom(data) {
     data.forEach(row => {
         if (deletingRows.has(row.id)) return;
 
-        const rowsDiv = document.getElementById(`rows-${row.day_label}`);
+        let rowsDiv = document.getElementById(`rows-${row.day_label}`);
+        if (!rowsDiv && ensureWeekRenderedForDayLabel(row.day_label)) {
+            rowsDiv = document.getElementById(`rows-${row.day_label}`);
+        }
         if (rowsDiv && rowsDiv.innerHTML === '') {
             const addBtn = createAddRowsButton(rowsDiv, row.day_label);
             addRowsToContainer(rowsDiv, row.day_label, addBtn); 
