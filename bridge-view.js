@@ -876,6 +876,7 @@ Pump-101, Install Piping, 1, Mech, Zone A, Level 1, 2026-08-03, Apex Mechanical,
                     <input type="text" id="newActivityName" placeholder="New activity name">
                     <button class="tool-btn primary small" onclick="this.getRootNode().host.addListItem('activities')">Add</button>
                 </div>
+                <button class="tool-btn small" style="margin-top:10px; width:100%;" title="Removes any activity option not currently used by a Bridge item or a LaunchPad schedule row — keeps the picker list matching what's actually in use instead of accumulating every name ever typed" onclick="this.getRootNode().host.cleanUpActivitiesList()">🧹 Remove Unused Activities</button>
             </div>
             <div class="tab-panel" id="listsTab-contractors">
                 <div id="contractorListRows"></div>
@@ -1569,6 +1570,7 @@ export class BridgeView extends HTMLElement {
         this.renderFilterBar();
         this.renderLegend();
         this.renderGantt();
+        this.initWaterfallSyncedScroll();
         const existingSheetId = localStorage.getItem('pullplan_gsheet_id');
         if (existingSheetId) {
             const link = this.$('openSheetLink');
@@ -2245,6 +2247,53 @@ export class BridgeView extends HTMLElement {
     debouncedRenderGantt() {
         clearTimeout(this.__ganttSearchDebounceTimer);
         this.__ganttSearchDebounceTimer = setTimeout(() => this.renderGantt(), 220);
+    }
+
+    // Overview/Overview Extended's rows are sorted chronologically — one
+    // row per activity — so whichever row sits at the top of the viewport
+    // corresponds to a specific point in the project's timeline. Without
+    // this, scrolling down through later and later rows leaves the
+    // horizontal (date) scroll wherever it happened to already be, so the
+    // actual bars for whatever you've scrolled to are usually off-screen
+    // to the right. #ganttWrap is the one element that scrolls both axes
+    // (see the CSS), so this listens there once — attached here in
+    // initApp(), not inside renderGantt() (which reruns on every render),
+    // since #ganttWrap itself is never recreated, only its contents are.
+    initWaterfallSyncedScroll() {
+        const wrap = this.$('ganttWrap');
+        if (!wrap || wrap._syncedScrollBound) return;
+        wrap._syncedScrollBound = true;
+        let ticking = false;
+        wrap.addEventListener('scroll', () => {
+            if (!this.isWaterfallZoom || ticking) return;
+            ticking = true;
+            requestAnimationFrame(() => {
+                this.syncWaterfallHorizontalScroll(wrap);
+                ticking = false;
+            });
+        });
+    }
+    syncWaterfallHorizontalScroll(wrap) {
+        const wrapRect = wrap.getBoundingClientRect();
+        const headerH = this.$('ganttHeader')?.getBoundingClientRect().height || 0;
+        const rows = wrap.querySelectorAll('.gantt-row');
+        let topRow = null;
+        for (const row of rows) {
+            // first row not (mostly) scrolled up past the sticky header —
+            // that's the one currently "at the top of the screen"
+            if (row.getBoundingClientRect().bottom > wrapRect.top + headerH + 4) { topRow = row; break; }
+        }
+        const itemEl = topRow && topRow.querySelector('.gantt-item');
+        if (!itemEl) return;
+        // itemEl's own `left` is relative to the track, which visually
+        // starts right after the sticky label column (always 260px wide
+        // in waterfall mode — see .gantt-rowlabel.wide) — not relative to
+        // the viewport, so that width has to be added back in here.
+        const itemLeft = parseFloat(itemEl.style.left) || 0;
+        const targetScrollLeft = Math.max(0, 260 + itemLeft - 40);
+        if (Math.abs(wrap.scrollLeft - targetScrollLeft) > 4) {
+            wrap.scrollTo({ left: targetScrollLeft, behavior: 'smooth' });
+        }
     }
 
     renderGantt() {
@@ -3172,9 +3221,14 @@ export class BridgeView extends HTMLElement {
         if (isGroupDrag) {
             // one shared time-shift applied to every selected item's own
             // original start, so the whole group moves together while each
-            // keeps its own duration and relative offset from the others
-            const dayDelta = dx / this.DAY_WIDTH;
-            const shiftMs = Math.round(dayDelta * 24 * 4) / 4 * 3600000;
+            // keeps its own duration and relative offset from the others.
+            // Snapped to a whole number of days (same reasoning as the
+            // single-item move above) — every item's original start_ts was
+            // already 7am-anchored, so a clean whole-day shift keeps it
+            // that way instead of drifting onto an odd time that pixel/
+            // rounding noise could then read as the wrong day.
+            const dayDelta = Math.round(dx / this.DAY_WIDTH);
+            const shiftMs = dayDelta * 86400000;
             this.setSaveIndicator('dirty', 'Saving...');
             for (const snap of this.dragCtx.groupSnapshot) {
                 const item = this.DATA.items.find(i => i.id === snap.id);
@@ -3203,18 +3257,26 @@ export class BridgeView extends HTMLElement {
         const item = this.DATA.items.find(i => i.id === id);
 
         if (mode === 'move') {
-            const dayDelta = (this.dragCtx.origLeft + dx) / this.DAY_WIDTH;
-            const newStart = new Date(this.TIMELINE_START.getTime() + Math.round(dayDelta * 24 * 4) / 4 * 3600000);
-            item.start_ts = newStart.toISOString();
+            // Snaps to the WHOLE day the mouse is actually over — rounding
+            // to the nearest 15 MINUTES of a fractional day position (the
+            // old math) let ordinary pixel/rounding noise land a hair
+            // either side of a day boundary, which Math.floor()-based day
+            // math elsewhere then read as the day before or after wherever
+            // it was actually dropped. Every item's start is 7am by
+            // convention throughout this app anyway (see dayIndexToMs()),
+            // so there's no real precision lost by snapping straight to
+            // that instead of preserving whatever odd time the pixel math
+            // produced.
+            const dayDelta = Math.round((this.dragCtx.origLeft + dx) / this.DAY_WIDTH);
+            item.start_ts = new Date(this.dayIndexToMs(dayDelta)).toISOString();
         } else if (mode === 'resize-right') {
             const newWidthPx = Math.max(20, this.dragCtx.origWidth + dx);
             item.duration_hours = Math.max(0.25, this.snapHours((newWidthPx / this.DAY_WIDTH) * 24));
         } else if (mode === 'resize-left') {
             const newLeftPx = this.dragCtx.origLeft + dx;
             const newWidthPx = Math.max(20, this.dragCtx.origWidth - dx);
-            const dayDelta = newLeftPx / this.DAY_WIDTH;
-            const newStart = new Date(this.TIMELINE_START.getTime() + Math.round(dayDelta * 24 * 4) / 4 * 3600000);
-            item.start_ts = newStart.toISOString();
+            const dayDelta = Math.round(newLeftPx / this.DAY_WIDTH);
+            item.start_ts = new Date(this.dayIndexToMs(dayDelta)).toISOString();
             item.duration_hours = Math.max(0.25, this.snapHours((newWidthPx / this.DAY_WIDTH) * 24));
         }
 
@@ -3970,6 +4032,47 @@ export class BridgeView extends HTMLElement {
         this.buildTypePicker('bulkTypePicker');
         this.renderFilterBar();
         this.renderGantt();
+    }
+
+    // The Activities picker (dropdownoptions.Activities) is shared with
+    // LaunchPad's own Schedule module, and accumulates every name anyone's
+    // ever typed into it — from either side — with no cleanup, which is
+    // how it ends up showing far more options than are actually in play at
+    // once. This prunes it back down to only what's currently used,
+    // checking BOTH Bridge's own items and LaunchPad's schedule rows (not
+    // just Bridge's) before calling something "unused", since removing a
+    // name Schedule still relies on would be a real loss even though no
+    // Bridge item happens to use it right now — removing it from this
+    // picker doesn't touch any existing row's own stored value either way,
+    // it only stops offering it as a suggestion for NEW entries.
+    async cleanUpActivitiesList() {
+        if (!this._supabase) { this.toast('Connect to Supabase first — see the header subtitle.'); return; }
+        this.setSaveIndicator('dirty', 'Checking activities...');
+        const inUse = new Set(this.DATA.items.map(i => (i.activity_name || '').trim().toLowerCase()).filter(Boolean));
+        try {
+            const { data: rows, error } = await this._supabase.from(this.LAUNCHPAD_TABLE).select('activity');
+            if (!error && rows) rows.forEach(r => { if (r.activity) inUse.add(r.activity.trim().toLowerCase()); });
+        } catch (e) {
+            console.error('LaunchPad activity usage check failed (continuing with Bridge-only data)', e);
+        }
+        const toRemove = this.DATA.activities.filter(a => !inUse.has((a.name || '').trim().toLowerCase()));
+        if (!toRemove.length) {
+            this.setSaveIndicator('ready', 'Ready');
+            this.toast('Every activity in the list is already in use — nothing to remove.');
+            return;
+        }
+        const preview = toRemove.slice(0, 15).map(a => a.name).join(', ') + (toRemove.length > 15 ? `, +${toRemove.length - 15} more` : '');
+        if (!confirm(`Remove ${toRemove.length} unused activity option(s) from the list?\n\n${preview}\n\nActivities still used by any Bridge item or LaunchPad schedule row are kept — this only removes ones that aren't used anywhere right now.`)) {
+            this.setSaveIndicator('ready', 'Ready');
+            return;
+        }
+        for (const a of toRemove) {
+            await this.DB.remove(this.TABLES.activities, a.id);
+        }
+        this.DATA.activities = this.DATA.activities.filter(a => inUse.has((a.name || '').trim().toLowerCase()));
+        this.afterListChange();
+        this.setSaveIndicator('ready', 'Ready');
+        this.toast(`Removed ${toRemove.length} unused activity option(s).`, 4000);
     }
 
     /* =========================================================================
