@@ -28,6 +28,14 @@
 // iframe) with a plain public method, notifyVisible(), that the shell now
 // calls directly once it shows this tab — see the file-header comment on
 // notifyVisible() below for why a fresh render is needed at that point.
+//
+// One-time setup: run sync/move_schedule_row.sql in the Supabase SQL
+// editor. It backs the LaunchPad push (_syncItemToLaunchPadCore() below)
+// for the case where an activity's date changes, moving it to a new
+// day-encoded row and removing the old one as a single atomic database
+// operation instead of two separate network round-trips. Without it, that
+// still works via an older two-step fallback, just without the same
+// guarantee against a dropped connection leaving a stale duplicate behind.
 
 const SUPABASE_URL = "https://rcnxetcomdrlxvlarqoc.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJjbnhldGNvbWRybHh2bGFycW9jIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY0NDIyMjksImV4cCI6MjA5MjAxODIyOX0.gP37sT5OrCOVRZXekMrBZHm5mtfnr6JrC2YGflWsDQU";
@@ -4013,19 +4021,45 @@ export class BridgeView extends HTMLElement {
             numericId = this.launchPadNumericId(dayLabel, idx);
         }
         const row = this.itemToLaunchPadRow(item, numericId, dayLabel);
-        const { error } = await this._supabase.from(this.LAUNCHPAD_TABLE).upsert([row]);
-        if (error) { console.error('LaunchPad sync failed', error); return false; }
         if (oldIdToRemove !== null) {
-            let cleanupError = (await this._supabase.from(this.LAUNCHPAD_TABLE).delete().eq('id', oldIdToRemove)).error;
-            if (cleanupError) {
-                // the delete failing here IS the "moved but the old one is
-                // still there" bug — worth one retry before giving up
-                cleanupError = (await this._supabase.from(this.LAUNCHPAD_TABLE).delete().eq('id', oldIdToRemove)).error;
+            // The write-new-row and delete-old-row used to be two separate
+            // round-trips from here — if the browser dropped the connection,
+            // the tab closed, or another move overlapped between them, one
+            // could land without the other, leaving the exact "moved but
+            // the old one is still there" bug behind with no way to recover
+            // short of the Repair LaunchPad Links tool. move_schedule_row()
+            // (see sync/move_schedule_row.sql) does both writes inside one
+            // Postgres function call, so they either both happen or neither
+            // does — there's no half-moved state left in the table anymore.
+            const { error: moveError } = await this._supabase.rpc('move_schedule_row', {
+                p_table: this.LAUNCHPAD_TABLE,
+                p_old_id: oldIdToRemove,
+                p_new_id: numericId,
+                p_day_label: dayLabel,
+                p_activity: row.activity,
+                p_asset: row.asset,
+                p_notes: row.notes
+            });
+            if (moveError) {
+                // Falls back to the old two-step approach so this still
+                // works even before sync/move_schedule_row.sql has been run
+                // against this project's Supabase — but that's a degraded
+                // path now, not the normal one, so it's worth surfacing.
+                console.error('move_schedule_row RPC failed — have you run sync/move_schedule_row.sql yet? Falling back to a two-step move.', moveError);
+                const { error: upsertError } = await this._supabase.from(this.LAUNCHPAD_TABLE).upsert([row]);
+                if (upsertError) { console.error('LaunchPad sync failed', upsertError); return false; }
+                let cleanupError = (await this._supabase.from(this.LAUNCHPAD_TABLE).delete().eq('id', oldIdToRemove)).error;
+                if (cleanupError) {
+                    cleanupError = (await this._supabase.from(this.LAUNCHPAD_TABLE).delete().eq('id', oldIdToRemove)).error;
+                }
+                if (cleanupError) {
+                    console.error('LaunchPad old-row cleanup failed (new row is correct, but the old one may still be there)', cleanupError);
+                    this.toast(`"${item.asset_name} — ${item.activity_name}" moved, but its old LaunchPad row couldn't be removed — check LaunchPad for a leftover duplicate on its previous day.`, 7000);
+                }
             }
-            if (cleanupError) {
-                console.error('LaunchPad old-row cleanup failed (new row is correct, but the old one may still be there)', cleanupError);
-                this.toast(`"${item.asset_name} — ${item.activity_name}" moved, but its old LaunchPad row couldn't be removed — check LaunchPad for a leftover duplicate on its previous day.`, 7000);
-            }
+        } else {
+            const { error } = await this._supabase.from(this.LAUNCHPAD_TABLE).upsert([row]);
+            if (error) { console.error('LaunchPad sync failed', error); return false; }
         }
         item.launchpad_id = numericId;
         item.launchpad_day_label = dayLabel;
