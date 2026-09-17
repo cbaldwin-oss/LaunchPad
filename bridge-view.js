@@ -199,6 +199,7 @@ const FILTER_DEFS = [
     { key: 'type', label: 'Type', field: 'type' },
     { key: 'zone', label: 'Zone', field: 'zone' },
     { key: 'asset_type', label: 'Asset Type', field: 'asset_type' },
+    { key: 'asset', label: 'Asset', field: 'asset_name' },
     { key: 'activity', label: 'Activity', field: 'activity_name' },
     { key: 'area', label: 'Area', field: 'area' }
 ];
@@ -380,6 +381,10 @@ input,select,textarea{font-family:inherit;}
     border:1px solid rgba(0,0,0,0.15); z-index:110; text-shadow:0 1px 2px rgba(0,0,0,0.55);
 }
 .gantt-item:hover{filter:brightness(0.96); z-index:150;}
+/* Overview + Overview Extended (one bar per row) — as thin as the label
+   content allows, down to a bare color sliver when there's no label at all. */
+.gantt-item.thin{min-height:16px; padding:1px 4px; border-radius:3px; box-shadow:none;}
+.gantt-item.thin .gi-asset{font-size:9px; line-height:1.15;}
 .gantt-item.dragging{opacity:0.75; cursor:grabbing; z-index:250; box-shadow:0 6px 16px rgba(0,0,0,0.35);}
 .gantt-item.overdue{box-shadow:0 0 0 2px var(--red), 0 1px 3px rgba(0,0,0,0.25);}
 .gantt-item.focused{box-shadow:0 0 0 3px var(--green-dark), 0 2px 8px rgba(0,0,0,0.35); z-index:170;}
@@ -581,8 +586,9 @@ const MARKUP = `
         <option value="contractor">Group by Contractor</option>
         <option value="type">Group by Type</option>
     </select>
-    <select class="tool-btn small" id="dayWidthSelect" onchange="this.getRootNode().host.setDayWidth(this.value)" style="font-weight:600;" title="All zoom levels use day-based sizing — Wide just gives each day more horizontal room. Compact shows the asset name only (activity is color-coded, not labeled). Overview is a long-range project view (months at a glance, grouped by month header, color-coded bars only) — like a P6/Smartsheet rolled-up timeline.">
+    <select class="tool-btn small" id="dayWidthSelect" onchange="this.getRootNode().host.setDayWidth(this.value)" style="font-weight:600;" title="All zoom levels use day-based sizing — Wide just gives each day more horizontal room. Compact shows the asset name only (activity is color-coded, not labeled). Overview and Overview Extended are long-range, P6/Smartsheet-style task lists — one thin row per activity, sorted chronologically, labeled by Asset — Activity on the left instead of grouped/packed rows. Overview groups its header by month; Overview Extended shows individual days.">
         <option value="14">Zoom: Overview</option>
+        <option value="45">Zoom: Overview Extended</option>
         <option value="80" selected>Zoom: Compact</option>
         <option value="220">Zoom: Normal</option>
         <option value="360">Zoom: Wide</option>
@@ -1006,6 +1012,7 @@ export class BridgeView extends HTMLElement {
             type: new Set(),
             zone: new Set(),
             asset_type: new Set(),
+            asset: new Set(),
             activity: new Set(),
             area: new Set()
         };
@@ -1765,6 +1772,7 @@ export class BridgeView extends HTMLElement {
         else if (key === 'zone') allValues = this.DATA.zones.map(z => z.name);
         else if (key === 'area') allValues = this.DATA.areas.map(a => a.name);
         else if (key === 'activity') allValues = this.DATA.activities.map(a => a.name);
+        else if (key === 'asset') allValues = this.DATA.assets.map(a => a.name);
         else if (key === 'asset_type') allValues = [...new Set(this.DATA.items.map(i => i.asset_type).filter(Boolean))];
         allValues = [...new Set([...allValues, ...Object.keys(counts)])].sort();
 
@@ -1835,14 +1843,14 @@ export class BridgeView extends HTMLElement {
     setDayWidth(v) {
         this.DAY_WIDTH = parseInt(v, 10);
         this.style.setProperty('--daywidth', this.DAY_WIDTH + 'px');
-        // Overview always renders one row per activity in chronological
-        // order (see renderGantt()) — grouping and "Expand All Activities"
-        // don't apply there, so they're disabled rather than left sitting
-        // around looking like they should do something.
+        // Overview and Overview Extended always render one row per activity
+        // in chronological order (see renderGantt()) — grouping and "Expand
+        // All Activities" don't apply there, so they're disabled rather
+        // than left sitting around looking like they should do something.
         const groupBySelect = this.$('groupBySelect');
         const expandBtn = this.$('expandToggleBtn');
-        if (groupBySelect) groupBySelect.disabled = this.isOverviewZoom;
-        if (expandBtn) expandBtn.disabled = this.isOverviewZoom;
+        if (groupBySelect) groupBySelect.disabled = this.isWaterfallZoom;
+        if (expandBtn) expandBtn.disabled = this.isWaterfallZoom;
         this.renderGantt();
     }
 
@@ -1850,17 +1858,24 @@ export class BridgeView extends HTMLElement {
         const ms = d.setHours ? d - this.TIMELINE_START : new Date(d) - this.TIMELINE_START;
         return ms / 86400000;
     }
-    // Below Normal(220)/Wide(360) with plenty of margin — safely identifies
-    // the Compact zoom preset even if its exact pixel value gets tuned later.
-    // Every day still gets its own full-width column in Compact (no days are
-    // cut) — this only controls the activity-name label being hidden in
-    // favor of color-coding at that zoom level.
-    get isCompactZoom() { return this.DAY_WIDTH <= 60; }
-    // Overview is a strict subset of Compact (also true here) meant for
-    // seeing a long project's full span at once — day columns are too
-    // narrow even for the asset name, so bars fall back to color-only, and
-    // the header groups by month instead of showing each individual day
-    // (see buildGanttHeaderHtml()).
+    // Below Normal(220)/Wide(360) with plenty of margin — covers Overview
+    // (14), Overview Extended (45) and Compact (80) alike, safely
+    // identifying all three even if their exact pixel values get tuned
+    // later. Every day still gets its own full-width column at every zoom
+    // level (no days are cut) — this only controls the activity-name label
+    // being hidden in favor of color-coding.
+    get isCompactZoom() { return this.DAY_WIDTH <= 90; }
+    // True for Overview AND Overview Extended — both render as a
+    // long-range, one-row-per-activity waterfall task list (see
+    // renderGantt()) instead of the normal grouped/packed rows, and both
+    // get the thinnest possible row height (see estimateItemHeight()/
+    // computeLaneOffsets()) since there's exactly one bar per row.
+    get isWaterfallZoom() { return this.DAY_WIDTH <= 50; }
+    // Overview only (not Extended) — narrow enough that even the asset name
+    // has no room, so bars fall back to pure color, and the header groups
+    // by month instead of showing each individual day (see
+    // buildGanttHeaderHtml()). Overview Extended shows real day columns and
+    // keeps the asset name, same as Compact does.
     get isOverviewZoom() { return this.DAY_WIDTH <= 16; }
     xForItem(item) {
         return this.dayIndexForDate(new Date(item.start_ts)) * this.DAY_WIDTH;
@@ -1942,7 +1957,15 @@ export class BridgeView extends HTMLElement {
         const charsPerLine = Math.max(4, Math.floor(usable / avgCharPx));
         return Math.max(1, Math.ceil((text || '').length / charsPerLine));
     }
+    // Overview/Overview Extended render one bar per row (see renderGantt())
+    // and hide part or all of the text label (see itemBarHtml()) — sizing
+    // for wrapped asset/activity text that isn't even being shown would
+    // leave those rows needlessly tall, so this returns a small fixed
+    // height there instead: bare color bar (Overview) or single-line asset
+    // name only (Overview Extended/Compact, no activity text to wrap).
     estimateItemHeight(it, widthPx) {
+        if (this.isOverviewZoom) return 16;
+        if (this.isCompactZoom) return 20;
         const assetLines = this.estimateTextLines(it.asset_name, widthPx, 6.0);
         const activityLines = this.estimateTextLines(it.activity_name, widthPx, 5.4);
         const assetLineH = 10.5 * 1.2, activityLineH = 9.5 * 1.2;
@@ -1953,8 +1976,17 @@ export class BridgeView extends HTMLElement {
     // works out each item's actual pixel _top from the tallest real content
     // in each lane band — a lane with a long name gets more room without
     // affecting any other lane's spacing or where connector lines land —
-    // and returns the row's total natural height.
+    // and returns the row's total natural height. Overview/Overview
+    // Extended use much tighter padding/gaps on top of the shorter bars
+    // from estimateItemHeight() above, since every row there holds exactly
+    // one activity and the whole point is fitting a long project on screen.
     computeLaneOffsets(sorted, laneCountHint) {
+        const thin = this.isWaterfallZoom;
+        const padTop = thin ? 2 : ROW_PAD_TOP;
+        const padBottom = thin ? 2 : ROW_PAD_BOTTOM;
+        const gap = thin ? 1 : ITEM_GAP;
+        const minRowH = thin ? (this.isOverviewZoom ? 20 : 24) : ROW_MIN_H;
+        const defaultLaneH = thin ? 16 : 36;
         const laneMaxH = {};
         sorted.forEach(it => {
             const w = (it._blockWidth !== undefined) ? it._blockWidth : this.widthForItem(it);
@@ -1963,13 +1995,13 @@ export class BridgeView extends HTMLElement {
         });
         const laneCount = laneCountHint || (Object.keys(laneMaxH).length ? Math.max(...Object.keys(laneMaxH).map(Number)) + 1 : 1);
         const laneTop = {};
-        let cursor = ROW_PAD_TOP;
+        let cursor = padTop;
         for (let l = 0; l < laneCount; l++) {
             laneTop[l] = cursor;
-            cursor += (laneMaxH[l] || 36) + ITEM_GAP;
+            cursor += (laneMaxH[l] || defaultLaneH) + gap;
         }
         sorted.forEach(it => { it._top = laneTop[it._lane]; });
-        return Math.max(ROW_MIN_H, cursor - ITEM_GAP + ROW_PAD_BOTTOM);
+        return Math.max(minRowH, cursor - gap + padBottom);
     }
 
     // Presentation-only reordering: lanes that contain any today-or-future
@@ -2039,9 +2071,10 @@ export class BridgeView extends HTMLElement {
     buildGanttHeaderHtml(groupBy, rowMinWidth) {
         const todayStr = new Date().toDateString();
         // Matches .gantt-rowlabel.wide below, so the header's own label
-        // column stays aligned with Overview's wider per-item row labels.
-        const rowLabelColText = this.isOverviewZoom ? 'Asset — Activity' : this.labelForGroup(groupBy);
-        let headerHtml = `<div class="gantt-rowlabel-col ${this.isOverviewZoom ? 'wide' : ''}">${rowLabelColText}</div>`;
+        // column stays aligned with the wider per-item row labels used by
+        // both Overview and Overview Extended's waterfall layout.
+        const rowLabelColText = this.isWaterfallZoom ? 'Asset — Activity' : this.labelForGroup(groupBy);
+        let headerHtml = `<div class="gantt-rowlabel-col ${this.isWaterfallZoom ? 'wide' : ''}">${rowLabelColText}</div>`;
         if (this.isOverviewZoom) {
             // Long-range view: individual days are too narrow to be legible
             // at this zoom, so the header groups by calendar month instead
@@ -2160,13 +2193,13 @@ export class BridgeView extends HTMLElement {
         }
         const groups = {};
         const displayLabels = {};
-        if (this.isOverviewZoom) {
-            // Overview reads like a classic P6/Smartsheet task list — one
-            // row per activity (not grouped/packed together with others),
-            // labeled by its own asset + activity name, in chronological
-            // "waterfall" order down the page rather than grouped by
-            // zone/type/etc. Grouping and "Expand All Activities" don't
-            // apply at this zoom level.
+        if (this.isWaterfallZoom) {
+            // Overview and Overview Extended read like a classic P6/
+            // Smartsheet task list — one row per activity (not
+            // grouped/packed together with others), labeled by its own
+            // asset + activity name, in chronological "waterfall" order
+            // down the page rather than grouped by zone/type/etc. Grouping
+            // and "Expand All Activities" don't apply at these zoom levels.
             items.slice().sort((a, b) => new Date(a.start_ts) - new Date(b.start_ts)).forEach(it => {
                 groups[it.id] = [it];
                 displayLabels[it.id] = `${it.asset_name} — ${it.activity_name}`;
@@ -2179,10 +2212,11 @@ export class BridgeView extends HTMLElement {
         }
         this.LAST_GROUPS = groups; this.LAST_GROUPBY = groupBy;
 
-        // Overview's per-item keys are already in the chronological order
-        // they were inserted above — Object.keys() preserves that, so only
-        // the grouped modes need the extra alphabetical sort.
-        const groupNames = this.isOverviewZoom ? Object.keys(groups) : Object.keys(groups).sort();
+        // The waterfall modes' per-item keys are already in the
+        // chronological order they were inserted above — Object.keys()
+        // preserves that, so only the grouped modes need the extra
+        // alphabetical sort.
+        const groupNames = this.isWaterfallZoom ? Object.keys(groups) : Object.keys(groups).sort();
 
         try {
             let bodyHtml = '';
@@ -2318,8 +2352,10 @@ export class BridgeView extends HTMLElement {
         // (built for seeing a long project's whole span at once) — there's
         // no room for any label there, so it falls all the way back to a
         // plain color-coded bar. Full asset/activity detail is always one
-        // hover away via the title tooltip regardless of zoom.
-        return `<div class="gantt-item ${overdue ? 'overdue' : ''} ${focused ? 'focused' : ''} ${dimmed ? 'dimmed' : ''} ${critical ? 'critical' : ''} ${multiselected ? 'multiselected' : ''} ${notReady ? 'not-ready' : ''}" data-id="${it.id}" style="left:${left}px; width:${width}px; top:${top}px; background:${color};" title="${escAttr(it.asset_name)} — ${escAttr(it.activity_name)}${overdue ? ' (past zone target end date)' : ''}${floatTitle}${launchpadLinked ? ' — linked to LaunchPad' : ''}${notReady ? ' — NOT READY (status open/incomplete)' : ''}">
+        // hover away via the title tooltip regardless of zoom. The "thin"
+        // class (Overview + Overview Extended) drops min-height/padding so
+        // each one-per-row bar takes as little vertical space as possible.
+        return `<div class="gantt-item ${this.isWaterfallZoom ? 'thin' : ''} ${overdue ? 'overdue' : ''} ${focused ? 'focused' : ''} ${dimmed ? 'dimmed' : ''} ${critical ? 'critical' : ''} ${multiselected ? 'multiselected' : ''} ${notReady ? 'not-ready' : ''}" data-id="${it.id}" style="left:${left}px; width:${width}px; top:${top}px; background:${color};" title="${escAttr(it.asset_name)} — ${escAttr(it.activity_name)}${overdue ? ' (past zone target end date)' : ''}${floatTitle}${launchpadLinked ? ' — linked to LaunchPad' : ''}${notReady ? ' — NOT READY (status open/incomplete)' : ''}">
             ${resizable ? `<div class="resize-handle left" data-id="${it.id}" data-edge="left"></div>` : ''}
             ${launchpadLinked ? `<span class="launchpad-badge" title="Linked to a LaunchPad row">📡</span>` : ''}
             ${this.isOverviewZoom ? '' : `<span class="gi-asset">${escHtml(it.asset_name)}</span>`}
@@ -2688,7 +2724,7 @@ export class BridgeView extends HTMLElement {
 
         const bodyRect = bodyEl.getBoundingClientRect();
         const itemEls = bodyEl.querySelectorAll('.gantt-item');
-        const rectById = {}, groupById = {};
+        const rectById = {};
         itemEls.forEach(el => {
             const r = el.getBoundingClientRect();
             rectById[el.dataset.id] = {
@@ -2696,8 +2732,6 @@ export class BridgeView extends HTMLElement {
                 top: r.top - bodyRect.top, bottom: r.bottom - bodyRect.top,
                 midY: r.top - bodyRect.top + r.height / 2
             };
-            const rowEl = el.closest('.gantt-row');
-            groupById[el.dataset.id] = rowEl ? rowEl.dataset.group : null;
         });
 
         let paths = svg.querySelector('defs').outerHTML;
@@ -2709,11 +2743,18 @@ export class BridgeView extends HTMLElement {
                 const predRect = rectById[predId];
                 const succRect = rectById[succId];
                 if (!predRect || !succRect) return;
-                // skip connections that cross between different spaces (rows) —
-                // both ends must currently be rendered in the same swim-lane
-                if (!groupById[predId] || groupById[predId] !== groupById[succId]) return;
+                // Connections used to be skipped outright whenever the
+                // predecessor and successor weren't in the exact same row
+                // (e.g. different zones when grouped by zone, or — always,
+                // by construction — Overview's one-row-per-activity
+                // waterfall layout). pickTrunkX()/branchConnectorPath()
+                // are plain geometry with no same-row assumption baked in,
+                // so routing a connector across rows/groups works the same
+                // way as routing between two lanes in one row — just using
+                // every other rendered item as a potential obstacle instead
+                // of only same-row ones.
                 const obstacles = Object.keys(rectById)
-                    .filter(id => id !== predId && id !== succId && groupById[id] === groupById[predId])
+                    .filter(id => id !== predId && id !== succId)
                     .map(id => rectById[id]);
 
                 let d;
