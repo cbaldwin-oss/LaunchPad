@@ -2305,17 +2305,24 @@ export class BridgeView extends HTMLElement {
             // down the page rather than grouped by zone/type/etc. Grouping
             // and "Expand All Activities" don't apply at these zoom levels.
             //
-            // Anything that finished entirely before the visible range's
-            // start is hidden by default — a long project accumulates
-            // hundreds of completed activities, and scrolling past all of
-            // them to reach what's actually upcoming isn't useful. This
-            // isn't a separate on/off switch: it's just honoring whatever
-            // window the Timeline Range bar (bottom of the page) is
-            // currently set to — that Start date IS the "pick a time
-            // window to look at" control; moving it earlier brings past
-            // activities back into view.
+            // Anything scheduled to START before the visible range's start
+            // is hidden by default — including one that's still ongoing
+            // into today, which is why this checks the item's OWN start
+            // date, not itemEndMs(): a filter on "hasn't finished yet"
+            // still let a row through with nothing but a sliver of its bar
+            // (or just the link-handle) peeking in at the left edge, which
+            // is exactly the "still showing items from the past day"
+            // symptom — a row with no usable visible content is worse than
+            // just not showing it. A long project accumulates hundreds of
+            // completed activities, and scrolling past all of them to
+            // reach what's actually upcoming isn't useful. This isn't a
+            // separate on/off switch: it's just honoring whatever window
+            // the Timeline Range bar (bottom of the page) is currently set
+            // to — that Start date IS the "pick a time window to look at"
+            // control; moving it earlier brings past activities back into
+            // view (in full, not just a clipped edge).
             const rangeStartMs = this.TIMELINE_START.getTime();
-            const visibleItems = items.filter(it => this.itemEndMs(it) > rangeStartMs);
+            const visibleItems = items.filter(it => new Date(it.start_ts).getTime() >= rangeStartMs);
             if (!visibleItems.length) {
                 bodyEl.innerHTML = `<div class="empty-state"><div class="emoji">🗓️</div>Nothing scheduled on or after ${this.TIMELINE_START.toLocaleDateString()}.<br>Move the Timeline Range's Start date (bottom of the page) earlier to see past activities.</div>`;
                 this.LAST_GROUPS = {}; this.LAST_GROUPBY = groupBy;
@@ -2596,7 +2603,15 @@ export class BridgeView extends HTMLElement {
                     window.removeEventListener('pointerup', onUp);
                     this.stopAutoScroll();
                     tempPath.remove();
-                    const targetEl = document.elementFromPoint(ev.clientX, ev.clientY);
+                    // document.elementFromPoint() doesn't pierce shadow
+                    // boundaries — from the top-level document it just
+                    // returns this component's own host element (or
+                    // whatever light-DOM ancestor sits there), never the
+                    // actual .gantt-item underneath, so targetItemEl was
+                    // always null and the link never attached no matter
+                    // where you dropped it. shadowRoot.elementFromPoint()
+                    // is the shadow-DOM-aware equivalent.
+                    const targetEl = (this.shadowRoot || document).elementFromPoint(ev.clientX, ev.clientY);
                     const targetItemEl = targetEl && targetEl.closest ? targetEl.closest('.gantt-item') : null;
                     if (targetItemEl && targetItemEl.dataset.id !== sourceId) {
                         this.addPredecessorLink(targetItemEl.dataset.id, sourceId);
