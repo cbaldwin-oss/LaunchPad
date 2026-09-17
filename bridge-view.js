@@ -323,6 +323,7 @@ input,select,textarea{font-family:inherit;}
 .gantt-header{
     display:flex; min-width:100%; position:sticky; top:0; z-index:300; background:#fff; border-bottom:2px solid var(--grey-border);
 }
+.gantt-rowlabel-col.wide{flex-basis:260px;}
 .gantt-rowlabel-col{
     flex:0 0 200px; position:sticky; left:0; z-index:350; background:#f7f8f7;
     border-right:2px solid var(--grey-border); display:flex; align-items:center;
@@ -354,6 +355,9 @@ input,select,textarea{font-family:inherit;}
     border-right:2px solid var(--grey-border); padding:10px 30px 10px 14px; font-size:12.5px; font-weight:700;
     color:var(--text-dark); display:flex; align-items:flex-start; min-height:56px; position:sticky;
 }
+/* Overview zoom's per-item "Asset — Activity" labels run a bit longer than
+   a typical group name, so that row gets a little more room. */
+.gantt-rowlabel.wide{flex-basis:260px;}
 .row-expand-btn{
     position:absolute; top:6px; right:6px; background:none; border:none; cursor:pointer;
     font-size:15px; color:#bbb; padding:2px 4px; border-radius:4px; line-height:1;
@@ -1831,6 +1835,14 @@ export class BridgeView extends HTMLElement {
     setDayWidth(v) {
         this.DAY_WIDTH = parseInt(v, 10);
         this.style.setProperty('--daywidth', this.DAY_WIDTH + 'px');
+        // Overview always renders one row per activity in chronological
+        // order (see renderGantt()) — grouping and "Expand All Activities"
+        // don't apply there, so they're disabled rather than left sitting
+        // around looking like they should do something.
+        const groupBySelect = this.$('groupBySelect');
+        const expandBtn = this.$('expandToggleBtn');
+        if (groupBySelect) groupBySelect.disabled = this.isOverviewZoom;
+        if (expandBtn) expandBtn.disabled = this.isOverviewZoom;
         this.renderGantt();
     }
 
@@ -2026,7 +2038,10 @@ export class BridgeView extends HTMLElement {
 
     buildGanttHeaderHtml(groupBy, rowMinWidth) {
         const todayStr = new Date().toDateString();
-        let headerHtml = `<div class="gantt-rowlabel-col">${this.labelForGroup(groupBy)}</div>`;
+        // Matches .gantt-rowlabel.wide below, so the header's own label
+        // column stays aligned with Overview's wider per-item row labels.
+        const rowLabelColText = this.isOverviewZoom ? 'Asset — Activity' : this.labelForGroup(groupBy);
+        let headerHtml = `<div class="gantt-rowlabel-col ${this.isOverviewZoom ? 'wide' : ''}">${rowLabelColText}</div>`;
         if (this.isOverviewZoom) {
             // Long-range view: individual days are too narrow to be legible
             // at this zoom, so the header groups by calendar month instead
@@ -2076,10 +2091,18 @@ export class BridgeView extends HTMLElement {
         opts = opts || {};
         const height = opts.forceNatural ? laidOut.totalHeight : (this.rowHeightOverrides[gname] || laidOut.totalHeight);
         const rowMinWidth = opts.rowMinWidth || (totalWidth + 200);
+        // In Overview zoom, gname is a per-item id (not a filterable
+        // zone/type/etc. name) and displayLabel carries the actual
+        // "Asset — Activity" text to show — the row-expand ("show only
+        // this row") button doesn't have a matching filter to apply for a
+        // single item, so it's left out there.
+        const labelHtml = opts.displayLabel
+            ? escHtml(opts.displayLabel)
+            : `${escHtml(gname)} <span style="color:#aaa; font-weight:500; margin-left:2px;">(${laidOut.items.length})</span>`;
         return `<div class="gantt-row" data-group="${escAttr(gname)}" style="height:${height}px; min-width:${rowMinWidth}px;">
-            <div class="gantt-rowlabel" style="height:${height}px;">
-                <span>${escHtml(gname)} <span style="color:#aaa; font-weight:500; margin-left:2px;">(${laidOut.items.length})</span></span>
-                <button class="row-expand-btn" title="Show only this row (filters down to it, same as clicking its filter chip)" onclick="this.getRootNode().host.openRowFullscreen('${gname.replace(/'/g, "\\'")}')">⛶</button>
+            <div class="gantt-rowlabel ${opts.displayLabel ? 'wide' : ''}" style="height:${height}px;">
+                <span>${labelHtml}</span>
+                ${!opts.displayLabel ? `<button class="row-expand-btn" title="Show only this row (filters down to it, same as clicking its filter chip)" onclick="this.getRootNode().host.openRowFullscreen('${gname.replace(/'/g, "\\'")}')">⛶</button>` : ''}
                 ${!opts.noResize ? `<div class="row-resize-handle" data-group="${escAttr(gname)}" title="Drag to resize"></div>` : ''}
             </div>
             <div class="gantt-track" style="width:${totalWidth}px; height:${height}px;">
@@ -2136,19 +2159,36 @@ export class BridgeView extends HTMLElement {
             return;
         }
         const groups = {};
-        items.forEach(it => {
-            const k = this.groupKeyFor(it, groupBy);
-            (groups[k] = groups[k] || []).push(it);
-        });
+        const displayLabels = {};
+        if (this.isOverviewZoom) {
+            // Overview reads like a classic P6/Smartsheet task list — one
+            // row per activity (not grouped/packed together with others),
+            // labeled by its own asset + activity name, in chronological
+            // "waterfall" order down the page rather than grouped by
+            // zone/type/etc. Grouping and "Expand All Activities" don't
+            // apply at this zoom level.
+            items.slice().sort((a, b) => new Date(a.start_ts) - new Date(b.start_ts)).forEach(it => {
+                groups[it.id] = [it];
+                displayLabels[it.id] = `${it.asset_name} — ${it.activity_name}`;
+            });
+        } else {
+            items.forEach(it => {
+                const k = this.groupKeyFor(it, groupBy);
+                (groups[k] = groups[k] || []).push(it);
+            });
+        }
         this.LAST_GROUPS = groups; this.LAST_GROUPBY = groupBy;
 
-        const groupNames = Object.keys(groups).sort();
+        // Overview's per-item keys are already in the chronological order
+        // they were inserted above — Object.keys() preserves that, so only
+        // the grouped modes need the extra alphabetical sort.
+        const groupNames = this.isOverviewZoom ? Object.keys(groups) : Object.keys(groups).sort();
 
         try {
             let bodyHtml = '';
             groupNames.forEach(gname => {
                 const laidOut = this.layoutLanes(groups[gname]);
-                bodyHtml += this.buildRowHtml(gname, laidOut, totalWidth, groupBy, { rowMinWidth });
+                bodyHtml += this.buildRowHtml(gname, laidOut, totalWidth, groupBy, { rowMinWidth, displayLabel: displayLabels[gname] });
             });
             bodyEl.innerHTML = bodyHtml;
         } catch (err) {
