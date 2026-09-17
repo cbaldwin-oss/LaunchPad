@@ -2308,12 +2308,19 @@ export class BridgeView extends HTMLElement {
         }
         const itemEl = topRow && topRow.querySelector('.gantt-item');
         if (!itemEl) return;
-        // itemEl's own `left` is relative to the track, which visually
-        // starts right after the sticky label column (always 260px wide
-        // in waterfall mode — see .gantt-rowlabel.wide) — not relative to
-        // the viewport, so that width has to be added back in here.
+        // itemEl's own `left` is measured from the START of .gantt-track,
+        // which itself sits 260px into the row (right after the sticky
+        // label column — .gantt-row is a flex row of [.gantt-rowlabel.wide
+        // (260px) , .gantt-track]). So the item's on-screen position at
+        // scrollLeft=0 is already 260+itemLeft — that 260 must NOT be added
+        // again when computing scrollLeft, or the target ends up 260px too
+        // large and the view sits that far right of where the item actually
+        // is (it previously landed *behind* the sticky label instead of
+        // just past it, which is what made the top row's bar unreachable
+        // no matter how far left you scrolled). scrollLeft = documentX -
+        // desiredViewportX, i.e. (260+itemLeft) - (260+40) = itemLeft - 40.
         const itemLeft = parseFloat(itemEl.style.left) || 0;
-        const targetScrollLeft = Math.max(0, 260 + itemLeft - 40);
+        const targetScrollLeft = Math.max(0, itemLeft - 40);
         // Instant, not smooth — a multi-frame smooth-scroll animation
         // fires several more 'scroll' events of its own while it plays,
         // which is exactly the kind of feedback this needs to avoid.
