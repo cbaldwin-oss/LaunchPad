@@ -366,7 +366,15 @@ input,select,textarea{font-family:inherit;}
 }
 /* Overview zoom's per-item "Asset — Activity" labels run a bit longer than
    a typical group name, so that row gets a little more room. */
-.gantt-rowlabel.wide{flex-basis:260px;}
+/* Overview/Overview Extended's per-item rows can be as short as ~16-24px
+   tall (see computeLaneOffsets()'s "thin" branch) — the base rule's fixed
+   min-height:56px above made the label box taller than its own row
+   regardless, so it visually bled into (and got painted over by) the next
+   row's own opaque, sticky-positioned label — "asset — activity cut off
+   at the bottom", and the same overflow is what made the row divider
+   (.gantt-row's border-bottom, which already spans the full row including
+   this label column) look like it wasn't reaching the label side at all. */
+.gantt-rowlabel.wide{flex-basis:260px; min-height:0; padding-top:3px; padding-bottom:3px; align-items:center;}
 .row-expand-btn{
     position:absolute; top:6px; right:6px; background:none; border:none; cursor:pointer;
     font-size:15px; color:#bbb; padding:2px 4px; border-radius:4px; line-height:1;
@@ -394,6 +402,14 @@ input,select,textarea{font-family:inherit;}
    content allows, down to a bare color sliver when there's no label at all. */
 .gantt-item.thin{min-height:16px; padding:1px 4px; border-radius:3px; box-shadow:none;}
 .gantt-item.thin .gi-asset{font-size:9px; line-height:1.15;}
+/* The link-handle (drag-to-connect) is opacity:0 until the item is
+   hovered elsewhere — fine at normal bar sizes, but a hover-then-hit-a-
+   12px-circle sequence is much harder to pull off on these much smaller
+   thin bars, especially since half the circle hangs outside a box that
+   might only be ~24px wide to begin with. Left always visible here
+   instead of hover-gated, so it's actually findable/grabbable. */
+.gantt-item.thin .link-handle{opacity:0.8; width:10px; height:10px; right:-5px;}
+.gantt-item.thin:hover .link-handle{opacity:1;}
 .gantt-item.dragging{opacity:0.75; cursor:grabbing; z-index:250; box-shadow:0 6px 16px rgba(0,0,0,0.35);}
 .gantt-item.overdue{box-shadow:0 0 0 2px var(--red), 0 1px 3px rgba(0,0,0,0.25);}
 .gantt-item.focused{box-shadow:0 0 0 3px var(--green-dark), 0 2px 8px rgba(0,0,0,0.35); z-index:170;}
@@ -597,8 +613,8 @@ const MARKUP = `
     </select>
     <select class="tool-btn small" id="dayWidthSelect" onchange="this.getRootNode().host.setDayWidth(this.value)" style="font-weight:600;" title="All zoom levels use day-based sizing — Wide just gives each day more horizontal room. Compact shows the asset name only (activity is color-coded, not labeled). Overview and Overview Extended are long-range, P6/Smartsheet-style task lists — one thin row per activity, sorted chronologically, labeled by Asset — Activity on the left instead of grouped/packed rows. Overview groups its header by month; Overview Extended shows individual days.">
         <option value="14">Zoom: Overview</option>
-        <option value="45">Zoom: Overview Extended</option>
-        <option value="80" selected>Zoom: Compact</option>
+        <option value="45" selected>Zoom: Overview Extended</option>
+        <option value="80">Zoom: Compact</option>
         <option value="220">Zoom: Normal</option>
         <option value="360">Zoom: Wide</option>
     </select>
@@ -1026,7 +1042,7 @@ export class BridgeView extends HTMLElement {
             activity: new Set(),
             area: new Set()
         };
-        this.DAY_WIDTH = 80;        // matches the "Zoom: Compact" default in #dayWidthSelect
+        this.DAY_WIDTH = 45;        // matches the "Zoom: Overview Extended" default in #dayWidthSelect
         this.TIMELINE_START = null; // Date, midnight
         this.TIMELINE_DAYS = 42;    // 6-week rolling window
         this.dragCtx = null;
@@ -1853,14 +1869,6 @@ export class BridgeView extends HTMLElement {
     setDayWidth(v) {
         this.DAY_WIDTH = parseInt(v, 10);
         this.style.setProperty('--daywidth', this.DAY_WIDTH + 'px');
-        // Overview and Overview Extended always render one row per activity
-        // in chronological order (see renderGantt()) — grouping and "Expand
-        // All Activities" don't apply there, so they're disabled rather
-        // than left sitting around looking like they should do something.
-        const groupBySelect = this.$('groupBySelect');
-        const expandBtn = this.$('expandToggleBtn');
-        if (groupBySelect) groupBySelect.disabled = this.isWaterfallZoom;
-        if (expandBtn) expandBtn.disabled = this.isWaterfallZoom;
         this.renderGantt();
     }
 
@@ -1968,14 +1976,23 @@ export class BridgeView extends HTMLElement {
         return Math.max(1, Math.ceil((text || '').length / charsPerLine));
     }
     // Overview/Overview Extended render one bar per row (see renderGantt())
-    // and hide part or all of the text label (see itemBarHtml()) — sizing
-    // for wrapped asset/activity text that isn't even being shown would
-    // leave those rows needlessly tall, so this returns a small fixed
-    // height there instead: bare color bar (Overview) or single-line asset
-    // name only (Overview Extended/Compact, no activity text to wrap).
+    // and hide part or all of the text label (see itemBarHtml()). Overview
+    // itself shows no text at all, so it's always a small fixed height. But
+    // Overview Extended/Compact DO show the asset name — a flat fixed
+    // height there (ignoring how many lines a longer name actually wraps
+    // to) was the bug behind "asset — activity cut off at the bottom": a
+    // longer name needs more room than a short one, and forcing every row
+    // to the same height let the overflow spill into (and get visually
+    // painted over by) the next row — same fix as .gantt-rowlabel.wide's
+    // min-height above, just for the bar's own text instead of the row
+    // label's.
     estimateItemHeight(it, widthPx) {
         if (this.isOverviewZoom) return 16;
-        if (this.isCompactZoom) return 20;
+        if (this.isCompactZoom) {
+            const assetLines = this.estimateTextLines(it.asset_name, widthPx, 5.2);
+            const lineH = 9 * 1.15;
+            return Math.max(16, 4 + assetLines * lineH);
+        }
         const assetLines = this.estimateTextLines(it.asset_name, widthPx, 6.0);
         const activityLines = this.estimateTextLines(it.activity_name, widthPx, 5.4);
         const assetLineH = 10.5 * 1.2, activityLineH = 9.5 * 1.2;
@@ -1995,7 +2012,11 @@ export class BridgeView extends HTMLElement {
         const padTop = thin ? 2 : ROW_PAD_TOP;
         const padBottom = thin ? 2 : ROW_PAD_BOTTOM;
         const gap = thin ? 1 : ITEM_GAP;
-        const minRowH = thin ? (this.isOverviewZoom ? 20 : 24) : ROW_MIN_H;
+        // Even Overview's bars are a bare color sliver, its row LABEL
+        // (Asset — Activity, ~12.5px bold) still needs enough headroom for
+        // one full line — 22/24px comfortably fits it without falling back
+        // into the old 56px floor this replaced.
+        const minRowH = thin ? (this.isOverviewZoom ? 22 : 24) : ROW_MIN_H;
         const defaultLaneH = thin ? 16 : 36;
         const laneMaxH = {};
         sorted.forEach(it => {
@@ -2167,7 +2188,19 @@ export class BridgeView extends HTMLElement {
 
     renderGantt() {
         this.style.setProperty('--daywidth', this.DAY_WIDTH + 'px');
-        const groupBy = this.$('groupBySelect').value;
+        // Overview and Overview Extended always render one row per activity
+        // in chronological order below — grouping and "Expand All
+        // Activities" don't apply there, so they're disabled rather than
+        // left sitting around looking like they should do something. Done
+        // here (every render) rather than only in setDayWidth() so it's
+        // also correct on first mount — the default zoom is now Overview
+        // Extended, and setDayWidth() never runs until the dropdown itself
+        // is touched.
+        const groupBySelect = this.$('groupBySelect');
+        const expandBtn = this.$('expandToggleBtn');
+        if (groupBySelect) groupBySelect.disabled = this.isWaterfallZoom;
+        if (expandBtn) expandBtn.disabled = this.isWaterfallZoom;
+        const groupBy = groupBySelect.value;
 
         try {
             this.criticalPathData = this.computeCriticalPath();
