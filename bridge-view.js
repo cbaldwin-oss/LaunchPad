@@ -374,7 +374,16 @@ input,select,textarea{font-family:inherit;}
    at the bottom", and the same overflow is what made the row divider
    (.gantt-row's border-bottom, which already spans the full row including
    this label column) look like it wasn't reaching the label side at all. */
-.gantt-rowlabel.wide{flex-basis:260px; min-height:0; padding-top:3px; padding-bottom:3px; align-items:center;}
+.gantt-rowlabel.wide{
+    flex-basis:260px; min-height:0; padding-top:3px; padding-bottom:3px; align-items:center;
+    /* Explicit divider of its own, rather than relying only on the shared
+       .gantt-row border-bottom below — that border is easy to lose behind
+       this column's own opaque, sticky, higher-z-index background if there's
+       ever even a pixel of height mismatch between a row and its label's
+       real content, so this guarantees a visible line under every
+       Asset — Activity row regardless. */
+    border-bottom:1px solid var(--grey-border2);
+}
 .row-expand-btn{
     position:absolute; top:6px; right:6px; background:none; border:none; cursor:pointer;
     font-size:15px; color:#bbb; padding:2px 4px; border-radius:4px; line-height:1;
@@ -1004,6 +1013,12 @@ Pump-101, Install Piping, 1, Mech, Zone A, Level 1, 2026-08-03, Apex Mechanical,
         <input type="checkbox" id="useLastActivityEnd" onchange="this.getRootNode().host.applyTimelineRange()" style="margin:0;">
         Use last activity as end date
     </label>
+    <span style="width:1px; align-self:stretch; background:var(--grey-border);"></span>
+    <span style="font-weight:600; color:#888;">Quick view:</span>
+    <button type="button" class="tool-btn small" onclick="this.getRootNode().host.applyTimelineRangePreset('week')">This Week</button>
+    <button type="button" class="tool-btn small" onclick="this.getRootNode().host.applyTimelineRangePreset('month')">This Month</button>
+    <button type="button" class="tool-btn small" onclick="this.getRootNode().host.applyTimelineRangePreset('quarter')">3 Months</button>
+    <button type="button" class="tool-btn small" onclick="this.getRootNode().host.applyTimelineRangePreset('full')">Full Project</button>
 </div>
 
 <div id="toast"></div>
@@ -1565,7 +1580,34 @@ export class BridgeView extends HTMLElement {
         if (this._supabase) {
             this.pullFromLaunchPad().catch(err => console.error('Background LaunchPad pull failed', err));
             this.refreshAllStatuses().catch(err => console.error('Background status refresh failed', err));
+            this.initLaunchPadRealtimeSync();
         }
+    }
+
+    // Without this, the ONLY way Bridge ever found out about an activity
+    // being moved/edited directly in the Schedule module was someone
+    // manually clicking "Pull from LaunchPad" — an edit made there could
+    // sit unreflected in Bridge indefinitely. Subscribes to live changes on
+    // the LaunchPad schedule table and runs the same reconciliation pullFromLaunchPad()
+    // already does, automatically. Debounced (rather than pulling on every
+    // single row event) since a burst of changes — someone dragging several
+    // cells, or the sync workflow writing many rows — would otherwise
+    // trigger a full reconciliation pass per row instead of one pass after
+    // things settle. This also fires from Bridge's own pushes (writing to
+    // the table broadcasts back to every subscriber, itself included), but
+    // that's a harmless no-op pull since bestRow already matches what was
+    // just written.
+    initLaunchPadRealtimeSync() {
+        if (!this._supabase || !this.LAUNCHPAD_TABLE) return;
+        this._supabase
+            .channel(`bridge-schedule-sync-${this.LAUNCHPAD_TABLE}`)
+            .on('postgres_changes', { event: '*', schema: 'public', table: this.LAUNCHPAD_TABLE }, () => {
+                clearTimeout(this._launchpadPullDebounce);
+                this._launchpadPullDebounce = setTimeout(() => {
+                    this.pullFromLaunchPad().catch(err => console.error('Realtime-triggered LaunchPad pull failed', err));
+                }, 1200);
+            })
+            .subscribe();
     }
 
     // Mirrors LaunchPad's own assetToPlaceMap approach exactly: fetch every
@@ -1648,6 +1690,25 @@ export class BridgeView extends HTMLElement {
         this.TIMELINE_START = start;
         this.TIMELINE_DAYS = days;
         this.renderGantt();
+    }
+    // The Start/End inputs above already let someone pick any window, but
+    // typing two dates every time you just want "this week" or "everything"
+    // is friction most people won't bother with — these are the same
+    // mechanism (they just fill in the inputs and call applyTimelineRange()),
+    // one click instead of two date entries.
+    applyTimelineRangePreset(preset) {
+        const start = this.computeTimelineStart();
+        const useLastCheckbox = this.$('useLastActivityEnd');
+        this.$('rangeStartInput').value = start.toISOString().slice(0, 10);
+        if (preset === 'full') {
+            useLastCheckbox.checked = true;
+        } else {
+            const days = { week: 6, month: 29, quarter: 89 }[preset] ?? 6;
+            const end = new Date(start.getTime() + days * 86400000);
+            useLastCheckbox.checked = false;
+            this.$('rangeEndInput').value = end.toISOString().slice(0, 10);
+        }
+        this.applyTimelineRange();
     }
     initTimelineRangeInputs() {
         const start = this.computeTimelineStart();
@@ -2243,7 +2304,24 @@ export class BridgeView extends HTMLElement {
             // asset + activity name, in chronological "waterfall" order
             // down the page rather than grouped by zone/type/etc. Grouping
             // and "Expand All Activities" don't apply at these zoom levels.
-            items.slice().sort((a, b) => new Date(a.start_ts) - new Date(b.start_ts)).forEach(it => {
+            //
+            // Anything that finished entirely before the visible range's
+            // start is hidden by default — a long project accumulates
+            // hundreds of completed activities, and scrolling past all of
+            // them to reach what's actually upcoming isn't useful. This
+            // isn't a separate on/off switch: it's just honoring whatever
+            // window the Timeline Range bar (bottom of the page) is
+            // currently set to — that Start date IS the "pick a time
+            // window to look at" control; moving it earlier brings past
+            // activities back into view.
+            const rangeStartMs = this.TIMELINE_START.getTime();
+            const visibleItems = items.filter(it => this.itemEndMs(it) > rangeStartMs);
+            if (!visibleItems.length) {
+                bodyEl.innerHTML = `<div class="empty-state"><div class="emoji">🗓️</div>Nothing scheduled on or after ${this.TIMELINE_START.toLocaleDateString()}.<br>Move the Timeline Range's Start date (bottom of the page) earlier to see past activities.</div>`;
+                this.LAST_GROUPS = {}; this.LAST_GROUPBY = groupBy;
+                return;
+            }
+            visibleItems.slice().sort((a, b) => new Date(a.start_ts) - new Date(b.start_ts)).forEach(it => {
                 groups[it.id] = [it];
                 displayLabels[it.id] = `${it.asset_name} — ${it.activity_name}`;
             });
@@ -2494,7 +2572,16 @@ export class BridgeView extends HTMLElement {
                     tempPath.setAttribute('class', 'conn-temp');
                     svg.appendChild(tempPath);
                 }
-                function onMove(ev) {
+                // Arrow functions — not plain `function` declarations — this
+                // is what actually broke the connect-drag. As a plain
+                // function, `this` inside a window pointermove/pointerup
+                // callback resolves to `window`, not this component, so
+                // `this.updateAutoScroll(...)` below threw a TypeError on
+                // the very first pointermove, before ever reaching the
+                // tempPath.setAttribute() line that draws the visible
+                // dragging line — it silently never appeared, and onUp
+                // threw the same way before ever calling addPredecessorLink.
+                const onMove = (ev) => {
                     this.updateAutoScroll(ev.clientX, ev.clientY, { horizontal: true, vertical: true }, () => onMove(ev));
                     // re-measure fresh each time — bodyEl's position relative to
                     // the viewport shifts as #ganttWrap auto-scrolls, so a
@@ -2503,8 +2590,8 @@ export class BridgeView extends HTMLElement {
                     const x2 = ev.clientX - freshBodyRect.left;
                     const y2 = ev.clientY - freshBodyRect.top;
                     tempPath.setAttribute('d', `M${x1},${y1} L${x2},${y2}`);
-                }
-                function onUp(ev) {
+                };
+                const onUp = (ev) => {
                     window.removeEventListener('pointermove', onMove);
                     window.removeEventListener('pointerup', onUp);
                     this.stopAutoScroll();
@@ -2515,7 +2602,7 @@ export class BridgeView extends HTMLElement {
                         this.addPredecessorLink(targetItemEl.dataset.id, sourceId);
                     }
                     this.linkDragCtx = null;
-                }
+                };
                 window.addEventListener('pointermove', onMove);
                 window.addEventListener('pointerup', onUp);
             });
@@ -2955,7 +3042,17 @@ export class BridgeView extends HTMLElement {
         root = root || document;
         root.querySelectorAll('.gantt-item').forEach(el => {
             el.addEventListener('pointerdown', (e) => {
-                if (e.target.classList.contains('resize-handle')) return; // handled separately
+                // Both handled separately by their own listeners (see
+                // attachLinkHandlers() below) — those call stopPropagation()
+                // too, which should already keep this from also firing, but
+                // excluding them here directly means a move-drag can never
+                // start racing a connect-drag for the same pointerdown even
+                // if that propagation-stopping ever doesn't apply (e.g. a
+                // future capture-phase listener added upstream). Two drag
+                // systems both listening on window at once is exactly how
+                // "the connector line never shows" happens — the move-drag
+                // silently wins instead.
+                if (e.target.classList.contains('resize-handle') || e.target.closest('.link-handle')) return;
                 this.startDrag(e, el, 'move');
             });
             el.addEventListener('click', (e) => {
