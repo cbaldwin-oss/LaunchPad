@@ -846,6 +846,7 @@ Pump-101, Install Piping, 1, Mech, Zone A, Level 1, 2026-08-03, Apex Mechanical,
                     <input type="text" id="newAssetName" placeholder="New asset name">
                     <button class="tool-btn primary small" onclick="this.getRootNode().host.addListItem('assets')">Add</button>
                 </div>
+                <button class="tool-btn small" style="margin-top:10px; width:100%;" title="Bridge is the source of truth for which activities exist. This first pulls in anything typed directly into the Scheduler that Bridge doesn't know about yet, then clears any Scheduler row still left over with no matching Bridge activity." onclick="this.getRootNode().host.reconcileScheduleWithBridge()">🧹 Reconcile Scheduler with Bridge</button>
             </div>
             <div class="tab-panel" id="listsTab-activities">
                 <div id="activityListRows"></div>
@@ -1268,19 +1269,209 @@ export class BridgeView extends HTMLElement {
     // place LaunchPad's own sync pipeline reads it from); this fetches that
     // and uses it instead, falling back to the old hardcoded one only if
     // this project has none on file.
-    async _resolveStatusScriptUrl() {
+    // Resolves this project's `launchpad_projects` row once, before any
+    // schedule data loads. Two things come out of it:
+    //  - GOOGLE_SCRIPT_URL (unchanged from before — see the "NA status" fix)
+    //  - UNIFIED_SCHEDULE: once a project's schedule_items/BackEndData
+    //    tables have been merged (see sync/unify_backend_schedule.sql),
+    //    Bridge reads/writes BackEndData directly instead of its own
+    //    schedule_items table, and the whole push/pull sync layer below
+    //    goes dormant for that project. This MUST resolve, and TABLES.items/
+    //    ItemsDB must be set, before reloadAllData() runs — otherwise the
+    //    very first load would still hit the wrong table.
+    async _resolveProjectFlags() {
         this.GOOGLE_SCRIPT_URL = LAUNCHPAD_STATUS_SCRIPT_URL;
-        if (!this._supabase) return;
-        try {
-            const { data, error } = await this._supabase
-                .from('launchpad_projects')
-                .select('google_script_url')
-                .eq('project_key', this.PROJECT_KEY)
-                .maybeSingle();
-            if (!error && data && data.google_script_url) this.GOOGLE_SCRIPT_URL = data.google_script_url;
-        } catch (e) {
-            console.error('Could not resolve this project\'s Apps Script URL — status lookups will use the fallback default', e);
+        this.UNIFIED_SCHEDULE = false;
+        if (this._supabase) {
+            try {
+                const { data, error } = await this._supabase
+                    .from('launchpad_projects')
+                    .select('google_script_url, unified_schedule')
+                    .eq('project_key', this.PROJECT_KEY)
+                    .maybeSingle();
+                if (!error && data) {
+                    if (data.google_script_url) this.GOOGLE_SCRIPT_URL = data.google_script_url;
+                    this.UNIFIED_SCHEDULE = !!data.unified_schedule;
+                }
+            } catch (e) {
+                console.error('Could not resolve this project\'s config (Apps Script URL / unified-schedule flag) — using fallbacks', e);
+            }
         }
+        if (this.UNIFIED_SCHEDULE) this.TABLES.items = this.LAUNCHPAD_TABLE;
+        this._setupItemsDB();
+    }
+
+    // Single indirection point for every item CRUD call site, so the rest
+    // of the app (rendering, drag/drop, dependency cascade) never has to
+    // know or care whether this project has been merged onto BackEndData
+    // yet — it just calls this.ItemsDB.fetchAll/insert/update/remove(...)
+    // exactly like it used to call this.DB.*(this.TABLES.items, ...).
+    _setupItemsDB() {
+        if (!this.UNIFIED_SCHEDULE) {
+            // Unchanged behavior — just renamed. schedule_items still has
+            // its own uuid id, created_at/updated_at columns, etc., so this
+            // keeps using the generic DB adapter exactly as before.
+            this.ItemsDB = {
+                fetchAll: () => this.DB.fetchAll(this.TABLES.items),
+                insert: row => this.DB.insert(this.TABLES.items, row),
+                update: (id, patch) => this.DB.update(this.TABLES.items, id, patch),
+                remove: id => this.DB.remove(this.TABLES.items, id)
+            };
+            return;
+        }
+        // Unified mode: BackEndData has no created_at/updated_at columns
+        // and its rows are keyed by the day-encoded bigint id scheme (see
+        // launchPadNumericId()/findFreeLaunchPadIndex() below), not a
+        // Postgres-assigned uuid — this deliberately does NOT delegate to
+        // the generic self.DB (which assumes both of those things), it's a
+        // small bespoke implementation instead.
+        this.ItemsDB = {
+            fetchAll: async () => {
+                if (!this._supabase) return [];
+                const { data, error } = await this._supabase.from(this.LAUNCHPAD_TABLE).select('*').order('day_label', { ascending: true }).order('id', { ascending: true });
+                if (error) { console.error('ItemsDB.fetchAll failed', error); return []; }
+                // An empty Scheduler placeholder slot (no activity typed
+                // into it yet) isn't a real Bridge item.
+                return (data || []).filter(row => !!row.activity).map(row => this.backEndRowToItem(row));
+            },
+            insert: async (item) => {
+                const dayLabel = new Date(item.start_ts).toISOString().slice(0, 10);
+                const idx = await this.findFreeLaunchPadIndex(dayLabel);
+                if (idx === null) { console.error(`ItemsDB.insert: no free row slot for ${dayLabel}`); return null; }
+                const numericId = this.launchPadNumericId(dayLabel, idx);
+                const row = this.itemToBackEndRow(item, numericId, dayLabel);
+                const { data, error } = await this._supabase.from(this.LAUNCHPAD_TABLE).insert([row]).select();
+                if (error) { console.error('ItemsDB.insert failed', error); return null; }
+                return this.backEndRowToItem(data[0]);
+            },
+            update: async (id, patch) => {
+                const current = this.DATA.items.find(it => it.id === id);
+                const dayLabel = patch.start_ts ? new Date(patch.start_ts).toISOString().slice(0, 10) : (current ? current.launchpad_day_label : null);
+                const dayChanged = current && dayLabel && dayLabel !== current.launchpad_day_label;
+                const merged = { ...current, ...patch };
+                if (dayChanged) {
+                    const idx = await this.findFreeLaunchPadIndex(dayLabel);
+                    if (idx === null) { console.error(`ItemsDB.update: no free row slot for ${dayLabel}`); return null; }
+                    const newId = this.launchPadNumericId(dayLabel, idx);
+                    // move_unified_schedule_row copies the OLD row's
+                    // Scheduler-owned fields (time/status/result/duration/
+                    // loto) forward itself, server-side — only Bridge's own
+                    // fields are passed here. That's deliberate: Bridge
+                    // doesn't know those values (they're Scheduler-only),
+                    // and the whole point of this RPC over the plain
+                    // move_schedule_row is to NOT lose them on a move.
+                    const { error } = await this._supabase.rpc('move_unified_schedule_row', {
+                        p_table: this.LAUNCHPAD_TABLE,
+                        p_old_id: Number(id),
+                        p_new_id: newId,
+                        p_day_label: dayLabel,
+                        p_activity: merged.activity_name || '',
+                        p_asset: merged.asset_name || '',
+                        p_notes: merged.notes || '',
+                        p_place: merged.zone || '',
+                        p_trade_partners: merged.contractor_name || '',
+                        p_duration_hours: merged.duration_hours || 24,
+                        p_bridge_type: merged.type || '',
+                        p_area: merged.area || '',
+                        p_asset_type: merged.asset_type || '',
+                        p_predecessor_ids: JSON.stringify((merged.predecessor_ids || []).map(Number))
+                    });
+                    if (error) { console.error('ItemsDB.update (day change) failed — has sync/unify_backend_schedule.sql been run for this project?', error); return null; }
+                    if (current) {
+                        const oldIdStr = current.id;
+                        current.id = String(newId);
+                        current.launchpad_id = String(newId);
+                        current.launchpad_day_label = dayLabel;
+                        // Unlike schedule_items' stable uuid id, a unified
+                        // item's id IS the day-encoded id — a day change
+                        // necessarily churns it. Any OTHER item whose
+                        // predecessor_ids pointed at the old id would
+                        // otherwise silently reference a row that's about
+                        // to be deleted. Remap those forward (same idea as
+                        // the dedup remap in pullFromLaunchPad's Step 0).
+                        for (const it of this.DATA.items) {
+                            if (it.id !== current.id && Array.isArray(it.predecessor_ids) && it.predecessor_ids.includes(oldIdStr)) {
+                                it.predecessor_ids = it.predecessor_ids.map(pid => pid === oldIdStr ? current.id : pid);
+                                await this.ItemsDB.update(it.id, { predecessor_ids: it.predecessor_ids });
+                            }
+                        }
+                    }
+                    return current;
+                }
+                const row = this.itemToBackEndRow(merged, Number(id), dayLabel);
+                delete row.id;
+                const { error } = await this._supabase.from(this.LAUNCHPAD_TABLE).update(row).eq('id', Number(id));
+                if (error) { console.error('ItemsDB.update failed', error); return null; }
+                return current;
+            },
+            remove: async (id) => {
+                const { error } = await this._supabase.from(this.LAUNCHPAD_TABLE).delete().eq('id', Number(id));
+                if (error) { console.error('ItemsDB.remove failed', error); return false; }
+                return true;
+            }
+        };
+    }
+
+    // BackEndData row -> Bridge's in-memory item shape. Mirrors the exact
+    // field mapping pullFromLaunchPad()'s "import" branch already uses
+    // (asset<->asset_name, activity<->activity_name, place<->zone,
+    // trade_partners<->contractor_name), plus the 5 Bridge-only columns
+    // added by sync/unify_backend_schedule.sql.
+    //
+    // item.id is deliberately a STRING (String(row.id)), not the raw
+    // bigint — every drag/link/select handler in this file compares ids via
+    // data-id DOM attributes (always strings) and ===, exactly like it
+    // already does for schedule_items' uuid ids. Coercing back to a number
+    // happens in exactly one place: right at the Supabase call inside
+    // ItemsDB above.
+    //
+    // launchpad_id/launchpad_day_label are mirrored to the item's own
+    // id/day_label rather than left unset — that's what keeps
+    // findMatchingUnlinkedLaunchPadRow, the "linked to LaunchPad" badge, and
+    // any other launchpad_id-gated logic working correctly without having
+    // to special-case every one of those call sites for unified mode: a
+    // unified item legitimately IS always "linked" to itself.
+    backEndRowToItem(row) {
+        return {
+            id: String(row.id),
+            asset_name: row.asset || '',
+            activity_name: row.activity || '',
+            duration_hours: parseFloat(row.duration_hours) || 24,
+            start_ts: new Date(row.day_label + 'T07:00').toISOString(),
+            type: row.bridge_type || (this.DATA.types[0]?.name || 'Other'),
+            zone: row.place || '',
+            area: row.area || '',
+            asset_type: row.asset_type || '',
+            contractor_name: row.trade_partners || '',
+            notes: row.notes || '',
+            predecessor_ids: Array.isArray(row.predecessor_ids) ? row.predecessor_ids.map(String)
+                : (typeof row.predecessor_ids === 'string' ? (JSON.parse(row.predecessor_ids || '[]')).map(String) : []),
+            launchpad_id: String(row.id),
+            launchpad_day_label: row.day_label
+        };
+    }
+
+    // Bridge item -> a BackEndData row patch. Only ever includes the
+    // columns Bridge actually owns — day/time/place/activity/asset/notes/
+    // trade_partners plus the 5 Bridge-only columns — never status/result/
+    // loto, which belong to Scheduler alone. Leaving those keys out
+    // entirely (not setting them to '') is what keeps Postgres's
+    // ON CONFLICT DO UPDATE SET / plain UPDATE from touching them.
+    itemToBackEndRow(item, numericId, dayLabel) {
+        return {
+            id: numericId,
+            day_label: dayLabel,
+            activity: item.activity_name || '',
+            asset: item.asset_name || '',
+            place: item.zone || '',
+            trade_partners: item.contractor_name || '',
+            notes: item.notes || '',
+            duration_hours: item.duration_hours || 24,
+            bridge_type: item.type || '',
+            area: item.area || '',
+            asset_type: item.asset_type || '',
+            predecessor_ids: (item.predecessor_ids || []).map(Number)
+        };
     }
 
     _initSupabase() {
@@ -1563,9 +1754,12 @@ export class BridgeView extends HTMLElement {
         } else {
             this.$('projectSubtitle').textContent = 'Connected to Supabase';
         }
+        // Must resolve UNIFIED_SCHEDULE (and set TABLES.items/ItemsDB
+        // accordingly) before reloadAllData() below, or the very first load
+        // would hit the wrong table.
+        await this._resolveProjectFlags();
         await this.reloadAllData();
         await this.fetchAssetLookupMaps();
-        await this._resolveStatusScriptUrl();
         this.initTimelineRangeInputs();
         this.buildTypePicker('itemTypePicker');
         this.buildTypePicker('bulkTypePicker');
@@ -1580,13 +1774,19 @@ export class BridgeView extends HTMLElement {
         this.updateLaunchPadSyncBtn();
         this.setSaveIndicator('ready', 'Ready');
         if (this._supabase) {
-            this.pullFromLaunchPad().catch(err => console.error('Background LaunchPad pull failed', err));
             this.refreshAllStatuses().catch(err => console.error('Background status refresh failed', err));
             this.initLaunchPadRealtimeSync();
-            // Repair Links no longer has a menu button to trigger it
-            // manually — running it once on load keeps that self-healing
-            // happening automatically instead of only on request.
-            this.repairLaunchPadLinks().catch(err => console.error('Background LaunchPad link repair failed', err));
+            // The whole push/pull reconciliation layer only makes sense
+            // while this project still has two separate tables. Once
+            // UNIFIED_SCHEDULE is on, ItemsDB already reads/writes
+            // BackEndData directly — there's nothing left to pull or repair.
+            if (!this.UNIFIED_SCHEDULE) {
+                this.pullFromLaunchPad().catch(err => console.error('Background LaunchPad pull failed', err));
+                // Repair Links no longer has a menu button to trigger it
+                // manually — running it once on load keeps that self-healing
+                // happening automatically instead of only on request.
+                this.repairLaunchPadLinks().catch(err => console.error('Background LaunchPad link repair failed', err));
+            }
         }
     }
 
@@ -1610,7 +1810,17 @@ export class BridgeView extends HTMLElement {
             .on('postgres_changes', { event: '*', schema: 'public', table: this.LAUNCHPAD_TABLE }, () => {
                 clearTimeout(this._launchpadPullDebounce);
                 this._launchpadPullDebounce = setTimeout(() => {
-                    this.pullFromLaunchPad().catch(err => console.error('Realtime-triggered LaunchPad pull failed', err));
+                    // Unified projects: BackEndData IS this.ItemsDB's own
+                    // table, so a change there (including one Scheduler
+                    // just typed directly) is a change to Bridge's own item
+                    // list — just reload it, no reconciliation heuristics
+                    // needed since there's exactly one row per activity by
+                    // construction. Legacy projects keep the existing
+                    // two-table reconciliation pull.
+                    const reload = this.UNIFIED_SCHEDULE
+                        ? this.reloadAllData().then(() => { this.renderFilterBar(); this.renderGantt(); })
+                        : this.pullFromLaunchPad();
+                    reload.catch(err => console.error('Realtime-triggered LaunchPad sync failed', err));
                 }, 1200);
             })
             .subscribe();
@@ -1642,7 +1852,7 @@ export class BridgeView extends HTMLElement {
 
     async reloadAllData() {
         const [items, assets, activities, contractors, zones, areas, types] = await Promise.all([
-            this.DB.fetchAll(this.TABLES.items), this.DB.fetchAll(this.TABLES.assets), this.DB.fetchAll(this.TABLES.activities),
+            this.ItemsDB.fetchAll(), this.DB.fetchAll(this.TABLES.assets), this.DB.fetchAll(this.TABLES.activities),
             this.DB.fetchAll(this.TABLES.contractors), this.DB.fetchAll(this.TABLES.zones), this.DB.fetchAll(this.TABLES.areas), this.DB.fetchAll(this.TABLES.types)
         ]);
         // Supabase/PostgREST often serializes `numeric` columns as strings (to
@@ -2604,7 +2814,10 @@ export class BridgeView extends HTMLElement {
         const multiselected = this.multiSelectedIds.has(it.id);
         const floatVal = this.criticalPathData ? this.criticalPathData.floatById[it.id] : null;
         const floatTitle = floatVal !== null && floatVal !== undefined ? ` — float ${hoursToDays(floatVal)}d${floatVal <= 0.01 ? ' (critical path)' : ''}` : '';
-        const launchpadLinked = !!it.launchpad_id;
+        // In unified mode every item trivially "is" its own LaunchPad row —
+        // the badge only means something when there are two separate rows
+        // to link.
+        const launchpadLinked = !this.UNIFIED_SCHEDULE && !!it.launchpad_id;
         const notReady = this.isStatusNotReady(it.asset_name, it.activity_name);
         // Compact zoom still shows the asset name (that's the whole point of
         // being able to read the bar), but the activity is color-only there
@@ -2962,7 +3175,7 @@ export class BridgeView extends HTMLElement {
         if (target.predecessor_ids.includes(sourceId)) { this.toast('Already linked.'); return; }
         if (this.isAncestor(targetId, sourceId)) { this.toast("Can't link — that would create a circular dependency."); return; }
         target.predecessor_ids.push(sourceId);
-        await this.DB.update(this.TABLES.items, targetId, { predecessor_ids: target.predecessor_ids });
+        await this.ItemsDB.update(targetId, { predecessor_ids: target.predecessor_ids });
         this.toast(`Linked: "${source.asset_name}" → "${target.asset_name}"`);
         await this.enforceDependencies(sourceId);
         // immediately focus the chain that was just created, so the grey-out
@@ -2975,7 +3188,7 @@ export class BridgeView extends HTMLElement {
         const target = this.DATA.items.find(i => i.id === targetId);
         if (!target) return;
         target.predecessor_ids = (target.predecessor_ids || []).filter(id => id !== sourceId);
-        await this.DB.update(this.TABLES.items, targetId, { predecessor_ids: target.predecessor_ids });
+        await this.ItemsDB.update(targetId, { predecessor_ids: target.predecessor_ids });
         this.renderGantt();
     }
 
@@ -3100,7 +3313,7 @@ export class BridgeView extends HTMLElement {
             const succDay = Math.floor(this.dayIndexForDate(new Date(succ.start_ts)));
             if (predLastDay > succDay) {
                 succ.start_ts = new Date(this.dayIndexToMs(predLastDay + 1)).toISOString();
-                await this.DB.update(this.TABLES.items, succ.id, { start_ts: succ.start_ts });
+                await this.ItemsDB.update(succ.id, { start_ts: succ.start_ts });
                 // this successor's date just changed as a side effect of the
                 // cascade, not from being dragged directly — without this, its
                 // LaunchPad row would silently fall out of sync: it stays on
@@ -3307,7 +3520,7 @@ export class BridgeView extends HTMLElement {
                     const minStart = this.minAllowedStartMs(predItems);
                     if (minStart !== null && new Date(item.start_ts).getTime() < minStart) item.start_ts = new Date(minStart).toISOString();
                 }
-                await this.DB.update(this.TABLES.items, item.id, { start_ts: item.start_ts });
+                await this.ItemsDB.update(item.id, { start_ts: item.start_ts });
             }
             for (const snap of this.dragCtx.groupSnapshot) await this.enforceDependencies(snap.id);
             if (this.LAUNCHPAD_SYNC_ENABLED) {
@@ -3361,7 +3574,7 @@ export class BridgeView extends HTMLElement {
         }
 
         this.setSaveIndicator('dirty', 'Saving...');
-        await this.DB.update(this.TABLES.items, id, { start_ts: item.start_ts, duration_hours: item.duration_hours });
+        await this.ItemsDB.update(id, { start_ts: item.start_ts, duration_hours: item.duration_hours });
         await this.enforceDependencies(id);
         this.maybeSyncToLaunchPad(item);
         this.setSaveIndicator('ready', 'Saved');
@@ -3463,11 +3676,13 @@ export class BridgeView extends HTMLElement {
     async deleteItemById(id) {
         if (!confirm('Delete this schedule item?')) return;
         const item = this.DATA.items.find(i => i.id === id);
-        await this.DB.remove(this.TABLES.items, id);
+        await this.ItemsDB.remove(id);
         this.DATA.items = this.DATA.items.filter(i => i.id !== id);
         this.multiSelectedIds.delete(id);
         this.updateMultiSelectIndicator();
-        if (item && item.launchpad_id && this._supabase) {
+        if (!this.UNIFIED_SCHEDULE && item && item.launchpad_id && this._supabase) {
+            // Unified mode: ItemsDB.remove() above already deleted this same
+            // row (launchpad_id === id there) — nothing separate to clean up.
             const { error } = await this._supabase.from(this.LAUNCHPAD_TABLE).delete().eq('id', item.launchpad_id);
             if (error) console.error('LaunchPad row delete failed', error);
         }
@@ -3475,7 +3690,7 @@ export class BridgeView extends HTMLElement {
         for (const it of this.DATA.items) {
             if (it.predecessor_ids && it.predecessor_ids.includes(id)) {
                 it.predecessor_ids = it.predecessor_ids.filter(pid => pid !== id);
-                await this.DB.update(this.TABLES.items, it.id, { predecessor_ids: it.predecessor_ids });
+                await this.ItemsDB.update(it.id, { predecessor_ids: it.predecessor_ids });
             }
         }
         this.$('detailPanel').classList.remove('open');
@@ -3577,11 +3792,11 @@ export class BridgeView extends HTMLElement {
         this.setSaveIndicator('dirty', 'Saving...');
         let savedId = id;
         if (id) {
-            await this.DB.update(this.TABLES.items, id, payload);
+            await this.ItemsDB.update(id, payload);
             const idx = this.DATA.items.findIndex(i => i.id === id);
             if (idx > -1) this.DATA.items[idx] = { ...this.DATA.items[idx], ...payload };
         } else {
-            const saved = await this.DB.insert(this.TABLES.items, payload);
+            const saved = await this.ItemsDB.insert(payload);
             savedId = saved ? saved.id : uid();
             this.DATA.items.push(saved ? { ...saved, duration_hours: payload.duration_hours } : { id: savedId, ...payload });
         }
@@ -3918,7 +4133,7 @@ export class BridgeView extends HTMLElement {
                 type: r.type, zone: r.zone, area: r.area || '', start_ts: r.start,
                 asset_type: '', contractor_name: r.contractor || '', notes: r.notes || ''
             };
-            const saved = await this.DB.insert(this.TABLES.items, payload);
+            const saved = await this.ItemsDB.insert(payload);
             const newItem = saved ? { ...saved, duration_hours: payload.duration_hours } : { id: uid(), ...payload };
             this.DATA.items.push(newItem);
             insertedIds.push(newItem.id);
@@ -3946,7 +4161,7 @@ export class BridgeView extends HTMLElement {
                 succItem.predecessor_ids.push(predId);
                 linkCount++;
             }
-            await this.DB.update(this.TABLES.items, succId, { predecessor_ids: succItem.predecessor_ids });
+            await this.ItemsDB.update(succId, { predecessor_ids: succItem.predecessor_ids });
             // A WBS import brings its own Start Date per row — the whole
             // point of "use the start date as the original" is that it's
             // NOT recalculated from a predecessor's finish time, so skip
@@ -4413,6 +4628,7 @@ export class BridgeView extends HTMLElement {
        back, not something to silently overwrite here). */
     async repairLaunchPadLinks() {
         if (!this._supabase) { this.toast('Connect to Supabase first — see the header subtitle.'); return; }
+        if (this.UNIFIED_SCHEDULE) { this.toast('This project reads BackEndData directly — no separate links to repair.'); return; }
         const linkedItems = this.DATA.items.filter(it => it.launchpad_id);
         if (!linkedItems.length) { this.toast('No LaunchPad-linked items to check.'); return; }
         this.setSaveIndicator('dirty', 'Checking LaunchPad links...');
@@ -4641,7 +4857,9 @@ export class BridgeView extends HTMLElement {
     // each one before starting the next. Callers that don't await it still
     // work exactly as before; the error is always caught here either way.
     async maybeSyncToLaunchPad(item) {
-        if (!this.LAUNCHPAD_SYNC_ENABLED || !item) return;
+        // Unified projects write BackEndData directly via ItemsDB — there's
+        // no separate LaunchPad row left to push to.
+        if (this.UNIFIED_SCHEDULE || !this.LAUNCHPAD_SYNC_ENABLED || !item) return;
         try {
             await this.syncItemToLaunchPad(item);
         } catch (err) {
@@ -4671,6 +4889,7 @@ export class BridgeView extends HTMLElement {
     //      imported item.
     async pullFromLaunchPad() {
         if (!this._supabase) { this.toast('Connect to Supabase first.'); return; }
+        if (this.UNIFIED_SCHEDULE) { this.toast('This project reads BackEndData directly — nothing separate to pull.'); return; }
         this.setSaveIndicator('dirty', 'Pulling from LaunchPad...');
         const { data, error } = await this._supabase.from(this.LAUNCHPAD_TABLE).select('*');
         if (error) { console.error('LaunchPad pull failed', error); this.setSaveIndicator('error', 'Pull failed'); this.toast('Pull from LaunchPad failed — see console.'); return; }
@@ -4799,6 +5018,63 @@ export class BridgeView extends HTMLElement {
         } else {
             this.toast('Nothing new from LaunchPad — everything already matches.');
         }
+    }
+
+    // Bridge is meant to be the source of truth for which activities exist —
+    // but pullFromLaunchPad() above is one-directional in the sense that it
+    // only ever ADDS or matches rows, it never removes one. A Scheduler row
+    // that no longer corresponds to anything in Bridge (its Bridge item was
+    // deleted, or the row is leftover cruft from before this sync pipeline
+    // existed) just sits there forever, which is exactly how "Scheduler
+    // shows more items than Bridge" drifts in over time. This runs the same
+    // pull first — so anything genuinely new typed directly into the
+    // Scheduler gets absorbed into Bridge, never wiped by mistake — and
+    // only THEN clears whatever's still left over with no matching Bridge
+    // item. Deleting rows is destructive/hard to undo, so unlike the
+    // fully-automatic pull/repair above, this stays a manually-triggered
+    // tool (see the "Reconcile Scheduler with Bridge" button in Manage
+    // Lists) with a confirmation preview, same pattern as deleteItemById().
+    //
+    // Piloting on the CASB project only for now, per request — the
+    // clearing half is a no-op for every other project until this has been
+    // proven out there; the additive pull above still runs for everyone.
+    async reconcileScheduleWithBridge() {
+        if (!this._supabase) { this.toast('Connect to Supabase first.'); return; }
+        if (this.UNIFIED_SCHEDULE) { this.toast('This project already reads/writes BackEndData directly — nothing to reconcile.'); return; }
+        this.setSaveIndicator('dirty', 'Reconciling with Bridge...');
+        await this.pullFromLaunchPad();
+
+        const { data, error } = await this._supabase.from(this.LAUNCHPAD_TABLE).select('*');
+        if (error) {
+            console.error('Reconcile: LaunchPad fetch failed', error);
+            this.setSaveIndicator('error', 'Reconcile failed');
+            this.toast('Reconcile failed — see console.');
+            return;
+        }
+
+        const linkedIds = new Set(this.DATA.items.filter(it => it.launchpad_id != null).map(it => String(it.launchpad_id)));
+        const isOccupied = row => !!(row.activity || row.asset || row.notes || row.status || row.trade_partners || row.time || row.place || row.result || row.loto);
+        const orphans = (data || []).filter(row => isOccupied(row) && !linkedIds.has(String(row.id)));
+
+        this.setSaveIndicator('ready', 'Ready');
+        if (!orphans.length) {
+            this.toast('Reconcile: Scheduler already matches Bridge — nothing to clear.');
+            return;
+        }
+
+        const preview = orphans.slice(0, 12)
+            .map(r => `${r.day_label}: ${r.asset || '(no asset)'} — ${r.activity || '(no activity)'}`)
+            .join('\n') + (orphans.length > 12 ? `\n...and ${orphans.length - 12} more` : '');
+        const ok = confirm(`Bridge has no matching activity for ${orphans.length} row(s) currently shown in the Scheduler:\n\n${preview}\n\nClear them from the Scheduler so it matches Bridge? This cannot be undone.`);
+        if (!ok) return;
+
+        let cleared = 0;
+        for (const row of orphans) {
+            const { error: delErr } = await this._supabase.from(this.LAUNCHPAD_TABLE).delete().eq('id', row.id);
+            if (delErr) console.error('Reconcile: failed to clear orphaned row', row.id, delErr);
+            else cleared++;
+        }
+        this.toast(`Reconcile: cleared ${cleared} Scheduler row(s) with no matching Bridge activity${cleared < orphans.length ? ` (${orphans.length - cleared} failed — see console)` : ''}.`, 7000);
     }
 
     /* =========================================================================
