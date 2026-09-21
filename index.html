@@ -2266,10 +2266,20 @@ function toggleDarkMode() {
         }
     });
 
-    // equipment-tracker-view is a custom element now, not an iframe — call
-    // its dark-mode method directly instead of posting a message.
+    // equipment-tracker-view, bridge-view, and tamperseal-view are custom
+    // elements now, not iframes — call their dark-mode method directly
+    // instead of posting a message (the iframe broadcast above can't reach
+    // them at all; this is what made Bridge and Tamper Seals never
+    // respond to the toggle even though Equipment Tracker did).
     const equipmentTrackerEl = document.querySelector('equipment-tracker-view');
     if (equipmentTrackerEl) equipmentTrackerEl.setDarkMode(isDark);
+    const bridgeEl = document.querySelector('bridge-view');
+    if (bridgeEl) bridgeEl.setDarkMode(isDark);
+    const tamperSealEl = document.querySelector('tamperseal-view');
+    if (tamperSealEl) tamperSealEl.setDarkMode(isDark);
+    // Dashboard is a plain JS class instance (dashboard.js), not a custom
+    // element — ensureDashboardMounted() stores it here once it's loaded.
+    if (window.caDashboardInstance) window.caDashboardInstance.setDarkMode(isDark);
 
     // Re-run the color logic on every colored cell so already-rendered rows
     // immediately pick up the correct light/dark colors instead of waiting

@@ -579,6 +579,101 @@ input,select,textarea{font-family:inherit;}
     .gantt-rowlabel-col, .gantt-rowlabel{position:static !important;}
 }
 
+/* ===== DARK MODE OVERRIDES =====
+   Mirrors the exact palette equipment-tracker-view.js's own
+   :host(.dark-mode) block already uses, so the whole app reads as one
+   consistent dark theme rather than each module inventing its own shade.
+   Two layers: redefining the semantic custom properties from :host above
+   (--text-dark, --grey-bg, etc.) re-themes everything that already
+   references them for free; the explicit per-selector rules below catch
+   the surfaces that were hardcoded to a literal color instead (#fff,
+   #fcfcfc, #f9f9f9...). */
+:host(.dark-mode){
+    --green-dark:#81c784;
+    --text-dark:#e0e0e0;
+    --text-muted:#aaaaaa;
+    --grey-border:#3a3a3a;
+    --grey-border2:#333333;
+    --grey-bg:#2c2c2c;
+    background-color:#121212 !important;
+    color:#e0e0e0 !important;
+}
+
+:host(.dark-mode) .header,
+:host(.dark-mode) .toolbar,
+:host(.dark-mode) .legend,
+:host(.dark-mode) .gantt-wrap,
+:host(.dark-mode) .gantt-header,
+:host(.dark-mode) .gantt-rowlabel,
+:host(.dark-mode) .filter-dropdown,
+:host(.dark-mode) .menu-dropdown,
+:host(.dark-mode) .combo-list,
+:host(.dark-mode) .modal-box,
+:host(.dark-mode) .detail-panel,
+:host(.dark-mode) .timeline-range-bar,
+:host(.dark-mode) .checkbox-scroll-list,
+:host(.dark-mode) .baseline-canvas-wrap{
+    background-color:#1e1e1e !important;
+    color:#e0e0e0 !important;
+}
+
+:host(.dark-mode) .gantt-row{border-bottom-color:#333 !important;}
+:host(.dark-mode) .gantt-row:nth-child(even) .gantt-row-bg{background:#1a1a1a !important;}
+:host(.dark-mode) .gantt-gridline{border-right-color:#2a2a2a !important;}
+:host(.dark-mode) .gantt-gridline.weekend{background:rgba(255,255,255,0.03) !important;}
+:host(.dark-mode) .gantt-gridline.today{background:rgba(76,175,80,0.12) !important;}
+
+/* Activity colors on gantt bars come from an inline style set by JS
+   (activityColor()) — dimming/desaturating rather than trying to enumerate
+   every possible color is the same trick equipment-tracker-view.js uses
+   for its own status cells. */
+:host(.dark-mode) .gantt-item{
+    filter:brightness(0.8) saturate(0.85) contrast(1.05);
+    border-color:rgba(255,255,255,0.2) !important;
+}
+
+:host(.dark-mode) input,
+:host(.dark-mode) select,
+:host(.dark-mode) textarea{
+    background-color:#2c2c2c !important;
+    color:#e0e0e0 !important;
+    border-color:#444 !important;
+}
+:host(.dark-mode) input:focus,
+:host(.dark-mode) select:focus,
+:host(.dark-mode) textarea:focus{
+    background-color:#383838 !important;
+}
+
+:host(.dark-mode) .tool-btn{background-color:#2c2c2c !important; color:#e0e0e0 !important; border-color:#555 !important;}
+:host(.dark-mode) .tool-btn:hover{background-color:#383838 !important;}
+:host(.dark-mode) .tool-btn.primary{background-color:var(--green) !important; color:#fff !important; border-color:var(--green) !important;}
+
+:host(.dark-mode) .filter-chip-btn{background-color:#2c2c2c !important; border-color:#444 !important; color:#e0e0e0 !important;}
+:host(.dark-mode) .filter-chip-btn.active{background-color:#1b3d1e !important; border-color:var(--green) !important; color:#81c784 !important;}
+:host(.dark-mode) .filter-option:hover,
+:host(.dark-mode) .menu-item:hover,
+:host(.dark-mode) .combo-list .opt:hover{background-color:#2c2c2c !important;}
+:host(.dark-mode) .token-chip{background-color:#2c2c2c !important; border-color:#444 !important;}
+:host(.dark-mode) .token-chip.selected{background-color:#1b3d1e !important; border-color:var(--green) !important; color:#81c784 !important;}
+
+:host(.dark-mode) .modal-head,
+:host(.dark-mode) .modal-foot{border-color:#333 !important;}
+:host(.dark-mode) .modal-close{color:#aaa !important;}
+:host(.dark-mode) .form-row label{color:#aaa !important;}
+
+:host(.dark-mode) .tabs{border-bottom-color:#333 !important;}
+:host(.dark-mode) .tab-btn{color:#aaa !important;}
+
+:host(.dark-mode) .list-mgr-row,
+:host(.dark-mode) .preview-table td{border-bottom-color:#333 !important;}
+:host(.dark-mode) .preview-table th{background-color:#2c2c2c !important;}
+:host(.dark-mode) .preview-table tr:hover td{background-color:#2a2a2a !important;}
+:host(.dark-mode) .checkbox-scroll-list label:hover{background-color:#2a2a2a !important;}
+
+:host(.dark-mode) #toast{background-color:#333 !important;}
+:host(.dark-mode) ::-webkit-scrollbar-thumb{background:#555 !important;}
+
 ::-webkit-scrollbar{height:10px; width:10px;}
 ::-webkit-scrollbar-thumb{background:#ccc; border-radius:5px;}
 ::-webkit-scrollbar-thumb:hover{background:#aaa;}
@@ -1209,6 +1304,13 @@ export class BridgeView extends HTMLElement {
         this._resolveParams();
         this.shadowRoot.innerHTML = STYLE + MARKUP;
         this._initSupabase();
+        // Bridge previously had no dark-mode support at all — index.html's
+        // toggleDarkMode() only ever reached it via postMessage to an
+        // <iframe>, which stopped existing once this became a custom
+        // element. Read the same shared preference equipment-tracker-view.js
+        // already does, so a fresh mount starts in the right theme instead
+        // of always defaulting to light until the toggle is clicked again.
+        if (localStorage.getItem('launchpad_dark_mode') === 'enabled') this.classList.add('dark-mode');
 
         document.addEventListener('click', this._outsideClickHandler);
         document.addEventListener('keydown', this._keydownHandler);
@@ -1580,6 +1682,13 @@ export class BridgeView extends HTMLElement {
 
     _handleKeydown(e) {
         if (e.key === 'Escape' && this.multiSelectedIds.size) this.clearMultiSelect();
+    }
+
+    // index.html's toggleDarkMode() calls this directly (same pattern as
+    // equipment-tracker-view.js's own setDarkMode()) since a custom element
+    // isn't reachable via the iframe postMessage broadcast it also sends.
+    setDarkMode(isDark) {
+        this.classList.toggle('dark-mode', !!isDark);
     }
 
     _setupViewerRoleGating() {

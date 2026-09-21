@@ -742,6 +742,74 @@ input:not([type="checkbox"]), textarea, select {
     width: auto;      /* Maintains the image's aspect ratio */
     object-fit: contain;
 }
+
+/* ===== DARK MODE OVERRIDES =====
+   Had no dark-mode support at all before this. Same palette as
+   bridge-view.js/equipment-tracker-view.js's own :host(.dark-mode) blocks,
+   for one consistent theme across the app. */
+:host(.dark-mode){
+    background-color: #121212 !important;
+    color: #e0e0e0 !important;
+}
+
+:host(.dark-mode) .cell-row,
+:host(.dark-mode) .rows-container,
+:host(.dark-mode) .area-container,
+:host(.dark-mode) .asset-header,
+:host(.dark-mode) .modal-content{
+    background-color: #1e1e1e !important;
+    color: #e0e0e0 !important;
+    border-color: #333 !important;
+}
+:host(.dark-mode) .cell-row{ border-bottom-color: #333 !important; }
+:host(.dark-mode) .asset-header:hover{ background-color: #2a2a2a !important; }
+:host(.dark-mode) .asset-container{ border-color: #333 !important; }
+
+:host(.dark-mode) .cell-row select,
+:host(.dark-mode) .cell-row textarea,
+:host(.dark-mode) .status-cell{
+    background-color: #2c2c2c !important;
+    color: #e0e0e0 !important;
+    border-right-color: #444 !important;
+}
+
+/* Status colors (row-intact/broken/removed/custom, and the .bg-* cell
+   classes below) are deliberately left exactly as they were — matches
+   index.html's own dark-mode treatment of these same colors: they're
+   semantic status indicators, not neutral chrome, and should read the same
+   in either theme. Re-asserted here (verbatim, same values) only because
+   these need to win the specificity/source-order tie against the more
+   general .cell-row/select/textarea dark rules above, which would
+   otherwise paint over them. */
+:host(.dark-mode) .row-intact{ background-color: #c8e6c9 !important; }
+:host(.dark-mode) .row-intact textarea, :host(.dark-mode) .row-intact select{ background-color: #c8e6c9 !important; color: #000000 !important; }
+:host(.dark-mode) .row-broken{ background-color: #ffcdd2 !important; }
+:host(.dark-mode) .row-broken textarea, :host(.dark-mode) .row-broken select{ background-color: #ffcdd2 !important; color: #000000 !important; }
+:host(.dark-mode) .row-removed{ background-color: #f5f5f5 !important; color: #757575 !important; }
+:host(.dark-mode) .row-removed textarea, :host(.dark-mode) .row-removed select{ background-color: #f5f5f5 !important; color: #000000 !important; }
+:host(.dark-mode) .row-custom-status{ background-color: var(--row-status-color) !important; }
+:host(.dark-mode) .row-custom-status textarea, :host(.dark-mode) .row-custom-status select{ background-color: var(--row-status-color) !important; color: #000000 !important; }
+:host(.dark-mode) .bg-green{ background-color: #c8e6c9 !important; color: #1b5e20 !important; }
+:host(.dark-mode) .bg-red{ background-color: #ffcdd2 !important; color: #b71c1c !important; }
+:host(.dark-mode) .bg-yellow{ background-color: #fff9c4 !important; color: #f57f17 !important; }
+
+:host(.dark-mode) input,
+:host(.dark-mode) select,
+:host(.dark-mode) textarea{
+    background-color: #2c2c2c !important;
+    color: #e0e0e0 !important;
+    border-color: #444 !important;
+}
+
+:host(.dark-mode) .filter-btn{ background: #2c2c2c !important; color: #e0e0e0 !important; border-color: #555 !important; }
+:host(.dark-mode) .filter-btn:hover{ background: #383838 !important; }
+:host(.dark-mode) .filter-label{ color: #aaa !important; }
+
+:host(.dark-mode) .modal-overlay{ background: rgba(0,0,0,0.7) !important; }
+:host(.dark-mode) .modal-content h3{ color: #e0e0e0 !important; }
+
+:host(.dark-mode) #saveIndicator{ color: #81c784 !important; }
+:host(.dark-mode) ::-webkit-scrollbar-thumb{ background: #555 !important; }
 </style>
 `;
 
@@ -1042,6 +1110,12 @@ export class TamperSealView extends HTMLElement {
         this._resolveParams();
         this.shadowRoot.innerHTML = STYLE + MARKUP;
         this._initSupabase();
+        // Previously had no dark-mode support at all — index.html's
+        // toggleDarkMode() only ever reached this view via postMessage to an
+        // <iframe>, which stopped existing once this became a custom
+        // element. Read the same shared preference the other views do, so a
+        // fresh mount starts in the right theme.
+        if (localStorage.getItem('launchpad_dark_mode') === 'enabled') this.classList.add('dark-mode');
         window.addEventListener('resize', this._onResize);
         this.init();
     }
@@ -1107,6 +1181,14 @@ export class TamperSealView extends HTMLElement {
     // inside the postMessage handler.
     openSettings() {
         if (this.canManageColumns) this.openColumnSettingsModal();
+    }
+
+    // index.html's toggleDarkMode() calls this directly (same pattern as
+    // equipment-tracker-view.js's/bridge-view.js's own setDarkMode()) since
+    // a custom element isn't reachable via the iframe postMessage broadcast
+    // it also sends.
+    setDarkMode(isDark) {
+        this.classList.toggle('dark-mode', !!isDark);
     }
 
 

@@ -16,15 +16,68 @@ export class CriticalArcDashboard {
     // Theme Constants
     this.FONT = 'Barlow, sans-serif';
     this.COND = 'Barlow Condensed, sans-serif';
+    // green/red/yellow/blue are semantic status colors (Open/Closed,
+    // Passed/Failed, discipline coding, etc.) — deliberately the SAME in
+    // both themes, matching how index.html/bridge-view.js/tamperseal-view.js
+    // all treat their own status colors. text/muted/border/panel are
+    // structural chrome instead, and get overwritten by applyTheme() below
+    // whenever the theme changes — every chart already reads gridline/tick
+    // colors from this.C.border/this.C.muted (see baseLayout()), so
+    // updating these two values is what re-themes every chart's axes too.
     this.C = { text:'#F0F0F0', muted:'#8A8F98', border:'#3E4248', panel:'#2D3035', green:'#39B54A', red:'#E04040', yellow:'#F4B942', blue:'#4A90D9' };
+    // This dashboard was built dark-only (no light theme existed at all)
+    // until this. Shares the exact same localStorage key every other
+    // module's dark-mode toggle already reads/writes.
+    this.darkMode = localStorage.getItem('launchpad_dark_mode') === 'enabled';
+    this.THEMES = {
+      dark:  { bg:'#23262B', panel:'#2D3035', border:'#3E4248', line:'#34383E', text:'#F0F0F0', muted:'#8A8F98', inputBg:'#23262B', metaText:'#5A5F68', tdText:'#D8DCE1', tdBorder:'#2A2D32', hoverRow:'#282B30' },
+      light: { bg:'#F4F5F7', panel:'#FFFFFF', border:'#DADDE1', line:'#EBEDF0', text:'#1A1D21', muted:'#5F6672', inputBg:'#FFFFFF', metaText:'#7A8088', tdText:'#2B2F33', tdBorder:'#E4E6E9', hoverRow:'#EFF1F3' }
+    };
     this.CFG = { displayModeBar: false, responsive: true };
   }
 
   async mount() {
     this.injectCSS();
     this.injectHTML();
+    this.applyTheme();
     this.bindEvents();
     await this.init();
+  }
+
+  // Called on mount (using whatever localStorage already said) and again
+  // whenever index.html's toggleDarkMode() calls setDarkMode() below.
+  // Updates this.C's structural colors (so any chart re-rendered after this
+  // point picks up the new gridline/tick colors) and the CSS custom
+  // properties on .ca-wrapper (so every var(--bg)/var(--panel)/etc. rule in
+  // injectCSS()'s stylesheet repaints immediately, with no need to
+  // duplicate or regenerate that stylesheet per theme).
+  applyTheme() {
+    const t = this.darkMode ? this.THEMES.dark : this.THEMES.light;
+    Object.assign(this.C, { text: t.text, muted: t.muted, border: t.border, panel: t.panel });
+    const wrapper = this.container.querySelector('.ca-wrapper');
+    if (!wrapper) return;
+    wrapper.style.setProperty('--bg', t.bg);
+    wrapper.style.setProperty('--panel', t.panel);
+    wrapper.style.setProperty('--border', t.border);
+    wrapper.style.setProperty('--line', t.line);
+    wrapper.style.setProperty('--text', t.text);
+    wrapper.style.setProperty('--muted', t.muted);
+    wrapper.style.setProperty('--input-bg', t.inputBg);
+    wrapper.style.setProperty('--meta-text', t.metaText);
+    wrapper.style.setProperty('--td-text', t.tdText);
+    wrapper.style.setProperty('--td-border', t.tdBorder);
+    wrapper.style.setProperty('--hover-row', t.hoverRow);
+  }
+
+  // index.html's toggleDarkMode() calls this directly, same pattern as the
+  // other three views' own setDarkMode() methods. Charts bake their axis
+  // colors into the layout object at render time (Plotly doesn't re-read
+  // JS variables live), so re-running renderAll() is what actually
+  // repaints already-drawn charts instead of just the surrounding chrome.
+  setDarkMode(isDark) {
+    this.darkMode = !!isDark;
+    this.applyTheme();
+    if (this.STATE.data) this.renderAll();
   }
 
   // DOM Query Helper to restrict lookups to this specific dashboard container
@@ -39,7 +92,7 @@ export class CriticalArcDashboard {
     style.id = 'ca-dashboard-styles';
     style.innerHTML = `
       
-      .ca-wrapper { --bg: #23262B; --panel: #2D3035; --border: #3E4248; --line: #34383E; --text: #F0F0F0; --muted: #8A8F98; --green: #39B54A; --red: #E04040; --yellow: #F4B942; --blue: #4A90D9; }
+      .ca-wrapper { --bg: #23262B; --panel: #2D3035; --border: #3E4248; --line: #34383E; --text: #F0F0F0; --muted: #8A8F98; --green: #39B54A; --red: #E04040; --yellow: #F4B942; --blue: #4A90D9; --input-bg: #23262B; --meta-text: #5A5F68; --td-text: #D8DCE1; --td-border: #2A2D32; --hover-row: #282B30; }
       .ca-wrapper { background: var(--bg); color: var(--text); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; box-sizing: border-box; height: 100%; }
       .ca-wrapper * { box-sizing: border-box; }
       .ca-wrapper a { color: inherit; }
@@ -52,11 +105,11 @@ export class CriticalArcDashboard {
       .ca-brand-sub { font-size: 11px; color: var(--muted); letter-spacing: 1px; margin-top: 2px; }
       .ca-side-label { font-size: 11px; letter-spacing: 1px; color: var(--muted); text-transform: uppercase; margin: 16px 0 6px; }
       
-      .ca-wrapper select, .ca-wrapper input[type="text"] { width: 100%; background: #23262B; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; }
-      .ca-connected-project { width: 100%; background: #23262B; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; font-weight: 600; }
+      .ca-wrapper select, .ca-wrapper input[type="text"] { width: 100%; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; }
+      .ca-connected-project { width: 100%; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; font-weight: 600; }
       .ca-wrapper select:focus, .ca-wrapper input[type="text"]:focus { outline: none; border-color: var(--muted); }
-      
-      .ca-checkgroup { display: flex; flex-direction: column; gap: 5px; max-height: 190px; overflow-y: auto; background: #23262B; border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+
+      .ca-checkgroup { display: flex; flex-direction: column; gap: 5px; max-height: 190px; overflow-y: auto; background: var(--input-bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
       .ca-checkgroup label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); cursor: pointer; }
       .ca-checkgroup label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .ca-checkgroup input[type="checkbox"] { accent-color: var(--green); width: 15px; height: 15px; flex: 0 0 auto; cursor: pointer; }
@@ -80,7 +133,7 @@ export class CriticalArcDashboard {
       .ca-main { flex: 1; padding: clamp(16px, 2vw, 28px) clamp(16px, 2.5vw, 36px); min-width: 0; background: var(--bg); overflow-y: auto; height: 100%; }
       .ca-page-title { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: clamp(28px, 4vw, 42px); font-weight: 700; letter-spacing: 1px; text-transform: uppercase; line-height: 1.1; color: var(--text); }
       .ca-page-sub { font-size: 14px; color: var(--muted); margin-top: 4px; letter-spacing: .5px; }
-      .ca-page-meta { font-size: 12px; color: #5A5F68; margin-top: 6px; letter-spacing: .5px; }
+      .ca-page-meta { font-size: 12px; color: var(--meta-text); margin-top: 6px; letter-spacing: .5px; }
       .ca-title-hr { border: none; border-top: 1px solid var(--border); margin: 16px 0 8px; }
 
       /* Tabs (Using Display: Block/None natively now, avoiding Plotly sizing bugs) */
@@ -112,8 +165,8 @@ export class CriticalArcDashboard {
       /* Tables */
       .ca-wrapper table.dt { width: 100%; border-collapse: collapse; font-size: 12.5px; margin: 6px 0; }
       .ca-wrapper table.dt th { text-align: left; color: var(--muted); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-weight: 600; letter-spacing: .5px; text-transform: uppercase; font-size: 11px; border-bottom: 1px solid var(--border); padding: 8px 10px; position: sticky; top: 0; background: var(--panel); }
-      .ca-wrapper table.dt td { padding: 7px 10px; border-bottom: 1px solid #2A2D32; color: #D8DCE1; }
-      .ca-wrapper table.dt tr:hover td { background: #282B30; }
+      .ca-wrapper table.dt td { padding: 7px 10px; border-bottom: 1px solid var(--td-border); color: var(--td-text); }
+      .ca-wrapper table.dt tr:hover td { background: var(--hover-row); }
       .ca-table-wrap { max-height: 460px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
       
       .ca-wrapper details { margin: 12px 0; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
@@ -771,7 +824,7 @@ export class CriticalArcDashboard {
     const heatUnits = this.uniq(tests.map(t => unitOf(t.asset_name)).filter(Boolean)).sort();
     if (atts.length && heatUnits.length) {
       const z = heatUnits.map(u => atts.map(a => tests.filter(t => unitOf(t.asset_name) === u && (+t.attempt_count || 0) === a).length));
-      this.plot('ca-ts-heat', [{ type: 'heatmap', x: atts.map(a => a + (a === 1 ? ' attempt' : ' attempts')), y: heatUnits, z, colorscale: [[0, this.C.panel], [0.01, '#3E4248'], [0.5, this.C.yellow], [1, this.C.red]], showscale: true, xgap: 2, ygap: 2, hovertemplate: 'Unit %{y} · %{x} · %{z} test(s)<extra></extra>' }],
+      this.plot('ca-ts-heat', [{ type: 'heatmap', x: atts.map(a => a + (a === 1 ? ' attempt' : ' attempts')), y: heatUnits, z, colorscale: [[0, this.C.panel], [0.01, this.C.border], [0.5, this.C.yellow], [1, this.C.red]], showscale: true, xgap: 2, ygap: 2, hovertemplate: 'Unit %{y} · %{x} · %{z} test(s)<extra></extra>' }],
         { xaxis: { tickfont: { color: this.C.muted } }, yaxis: { tickfont: { color: this.C.text, size: 10 }, automargin: true }, margin: { t: 10, b: 30, l: 10, r: 10 } });
     } else { this.q('ca-ts-heat').innerHTML = '<div class="ca-empty">No attempt data to chart.</div>'; }
 
