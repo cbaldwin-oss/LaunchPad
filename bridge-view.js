@@ -321,6 +321,14 @@ input,select,textarea{font-family:inherit;}
     padding:8px 12px; border:1px solid var(--grey-border); border-radius:6px; font-size:13px; width:220px;
 }
 
+/* ===== PENDING CHANGES BANNER ===== */
+.pending-sync-banner{
+    display:flex; align-items:center; justify-content:space-between; gap:14px;
+    padding:9px 24px; background:#fff8e1; border-bottom:1px solid #ffe082;
+    color:#8a6d00; font-size:13px; font-weight:600;
+}
+.pending-sync-banner .tool-btn{white-space:nowrap;}
+
 /* ===== LEGEND ===== */
 .legend{display:flex; align-items:center; gap:12px; padding:6px 24px; background:#fcfcfc; border-bottom:1px solid var(--grey-border2); flex-wrap:wrap;}
 .legend-item{display:flex; align-items:center; gap:5px; font-size:11.5px; color:var(--text-muted); font-weight:600;}
@@ -736,6 +744,14 @@ const MARKUP = `
             <div class="menu-item" onclick="this.getRootNode().host.closeAllMenus(); this.getRootNode().host.openCompletionPlanModal()">📅 Completion Plan</div>
         </div>
     </div>
+</div>
+
+<!-- ===== PENDING CHANGES BANNER =====
+     Hidden whenever pendingSyncIds/pendingDeleteLaunchPadIds are both
+     empty — see updatePendingSyncUI(). -->
+<div class="pending-sync-banner" id="pendingSyncBanner" style="display:none;">
+    <span>📝 <span id="pendingSyncCount">0 changes</span> not yet in Schedule</span>
+    <button class="tool-btn primary small" onclick="this.getRootNode().host.acceptPendingChanges()">✓ Accept &amp; Publish to Schedule</button>
 </div>
 
 <!-- ===== TYPE COLOR LEGEND ===== -->
@@ -1159,6 +1175,19 @@ export class BridgeView extends HTMLElement {
         // Always on now that the manual toggle button is gone — LaunchPad
         // push/pull is core functionality, not an opt-in.
         this.LAUNCHPAD_SYNC_ENABLED = true;
+        // Moving/editing an item in Bridge (including everything a
+        // dependency cascade drags along with it) used to push straight to
+        // LaunchPad the instant it happened — one drag could silently
+        // rewrite several days' worth of Schedule rows with no chance to
+        // review them first. These now just mark an item "pending" instead
+        // of pushing; acceptPendingChanges() (wired to the "Accept &
+        // Publish to Schedule" banner) is what actually pushes, all at
+        // once, only when the user explicitly says so. In-memory only —
+        // not persisted across reloads, so a page refresh before accepting
+        // just leaves those edits sitting in Bridge, unpushed, exactly as
+        // if they hadn't been accepted yet.
+        this.pendingSyncIds = new Set();
+        this.pendingDeleteLaunchPadIds = new Set();
         this.STATUS_CACHE = {}; // "asset|||activity" -> { result, url } | 'pending' | 'error'
         this.RESULT_CACHE = {}; // launchpad_id -> result string | null, cached so repeated lookups (e.g. across several predecessors) don't re-fetch
         this.statusRefreshInFlight = false;
@@ -1869,6 +1898,8 @@ export class BridgeView extends HTMLElement {
         await this._resolveProjectFlags();
         await this.reloadAllData();
         await this.fetchAssetLookupMaps();
+        this.loadPendingSyncState();
+        this.updatePendingSyncUI();
         this.initTimelineRangeInputs();
         this.buildTypePicker('itemTypePicker');
         this.buildTypePicker('bulkTypePicker');
@@ -3424,13 +3455,10 @@ export class BridgeView extends HTMLElement {
                 succ.start_ts = new Date(this.dayIndexToMs(predLastDay + 1)).toISOString();
                 await this.ItemsDB.update(succ.id, { start_ts: succ.start_ts });
                 // this successor's date just changed as a side effect of the
-                // cascade, not from being dragged directly — without this, its
-                // LaunchPad row would silently fall out of sync: it stays on
-                // its old day there while Pull Planner shows it on the new one.
-                // Awaited (not fire-and-forget) so this fully lands — including
-                // its own old-row cleanup — before anything downstream can
-                // start a second sync for the same item.
-                await this.maybeSyncToLaunchPad(succ);
+                // cascade, not from being dragged directly — still needs to
+                // be part of what gets published to Schedule once the user
+                // accepts, same as the item that was actually dragged.
+                this.markPendingSync(succ);
                 await this.enforceDependencies(succ.id, visited);
             }
         }
@@ -3632,12 +3660,7 @@ export class BridgeView extends HTMLElement {
                 await this.ItemsDB.update(item.id, { start_ts: item.start_ts });
             }
             for (const snap of this.dragCtx.groupSnapshot) await this.enforceDependencies(snap.id);
-            if (this.LAUNCHPAD_SYNC_ENABLED) {
-                // Sequential, not fire-and-forget — several of these all
-                // needing a fresh slot on the same day at once is exactly
-                // the scenario that used to race (see syncItemToLaunchPad()).
-                for (const snap of this.dragCtx.groupSnapshot) await this.maybeSyncToLaunchPad(this.DATA.items.find(i => i.id === snap.id));
-            }
+            for (const snap of this.dragCtx.groupSnapshot) this.markPendingSync(this.DATA.items.find(i => i.id === snap.id));
             this.setSaveIndicator('ready', 'Saved');
             this.renderGantt();
             this.dragCtx = null;
@@ -3685,7 +3708,7 @@ export class BridgeView extends HTMLElement {
         this.setSaveIndicator('dirty', 'Saving...');
         await this.ItemsDB.update(id, { start_ts: item.start_ts, duration_hours: item.duration_hours });
         await this.enforceDependencies(id);
-        this.maybeSyncToLaunchPad(item);
+        this.markPendingSync(item);
         this.setSaveIndicator('ready', 'Saved');
         this.renderGantt();
         this.dragCtx = null;
@@ -3789,11 +3812,14 @@ export class BridgeView extends HTMLElement {
         this.DATA.items = this.DATA.items.filter(i => i.id !== id);
         this.multiSelectedIds.delete(id);
         this.updateMultiSelectIndicator();
-        if (!this.UNIFIED_SCHEDULE && item && item.launchpad_id && this._supabase) {
+        this.pendingSyncIds.delete(id); // no point pushing a move for an item that's about to be deleted
+        this.savePendingSyncState();
+        if (!this.UNIFIED_SCHEDULE && item && item.launchpad_id) {
             // Unified mode: ItemsDB.remove() above already deleted this same
             // row (launchpad_id === id there) — nothing separate to clean up.
-            const { error } = await this._supabase.from(this.LAUNCHPAD_TABLE).delete().eq('id', item.launchpad_id);
-            if (error) console.error('LaunchPad row delete failed', error);
+            // Legacy mode: the LaunchPad row stays as-is in Schedule until
+            // this delete is accepted too, same as any other pending change.
+            this.markPendingDelete(item.launchpad_id);
         }
         // drop this item from any successor's predecessor list
         for (const it of this.DATA.items) {
@@ -3910,7 +3936,7 @@ export class BridgeView extends HTMLElement {
             this.DATA.items.push(saved ? { ...saved, duration_hours: payload.duration_hours } : { id: savedId, ...payload });
         }
         await this.enforceDependencies(savedId);
-        this.maybeSyncToLaunchPad(this.DATA.items.find(i => i.id === savedId));
+        this.markPendingSync(this.DATA.items.find(i => i.id === savedId));
         this.setSaveIndicator('ready', 'Saved');
         this.closeModal('itemModal');
         this.renderFilterBar();
@@ -4279,13 +4305,7 @@ export class BridgeView extends HTMLElement {
                 for (const pos of linkPositions) await this.enforceDependencies(insertedIds[pos]);
             }
         }
-        if (this.LAUNCHPAD_SYNC_ENABLED) {
-            // Sequential — a bulk add can easily put several new items on
-            // the same day, all needing a fresh slot at once (the race
-            // syncItemToLaunchPad()'s queue closes, but no need to rely on
-            // it here when a plain await avoids the race in the first place).
-            for (const id of insertedIds) await this.maybeSyncToLaunchPad(this.DATA.items.find(i => i.id === id));
-        }
+        for (const id of insertedIds) this.markPendingSync(this.DATA.items.find(i => i.id === id));
         this.setSaveIndicator('ready', 'Saved');
         this.toast(`${this.bulkPreviewRows.length} item(s) added${linkCount ? `, ${linkCount} linked as predecessor/successor` : ''}`);
         this.bulkPreviewRows = [];
@@ -4958,6 +4978,100 @@ export class BridgeView extends HTMLElement {
             }
         });
         this.openModal('dayDetailModal');
+    }
+
+    // The gate every Bridge mutation now goes through instead of pushing to
+    // LaunchPad directly (see maybeSyncToLaunchPad() below, which
+    // acceptPendingChanges() calls once the user actually accepts). Unified
+    // projects have nothing to gate — ItemsDB already wrote straight to
+    // BackEndData, there's no separate "propagate" step left to defer.
+    markPendingSync(item) {
+        if (this.UNIFIED_SCHEDULE || !item) return;
+        this.pendingSyncIds.add(item.id);
+        this.savePendingSyncState();
+        this.updatePendingSyncUI();
+    }
+
+    // deleteItemById() calls this for an item that WAS already pushed to
+    // LaunchPad (has a launchpad_id) — the Bridge item itself is gone
+    // immediately (that's local, not gated), but its LaunchPad row stays
+    // untouched in Schedule until the delete is accepted too, same as any
+    // other pending change.
+    markPendingDelete(launchpadId) {
+        if (this.UNIFIED_SCHEDULE || launchpadId == null) return;
+        this.pendingDeleteLaunchPadIds.add(launchpadId);
+        this.savePendingSyncState();
+        this.updatePendingSyncUI();
+    }
+
+    // Pending state is per-browser, not shared across users — it lives in
+    // this tab's memory, backed by localStorage only so an accidental
+    // reload doesn't silently lose track of what's still unpublished. It is
+    // NOT visible to anyone else with Bridge open: another user's tab keeps
+    // its own separate pending set (starting empty), so it can already see
+    // this browser's un-accepted moves in Bridge itself (that write already
+    // landed) with no indication they haven't reached Schedule yet. Fine
+    // for the "one person reviews their own batch of moves, then accepts"
+    // workflow this was built for; worth knowing if this ever needs to
+    // become a shared, cross-user review queue instead.
+    pendingSyncStorageKey() { return `bridge_pending_sync_${this.PROJECT_KEY}`; }
+    savePendingSyncState() {
+        try {
+            localStorage.setItem(this.pendingSyncStorageKey(), JSON.stringify({
+                syncIds: Array.from(this.pendingSyncIds),
+                deleteIds: Array.from(this.pendingDeleteLaunchPadIds)
+            }));
+        } catch (e) { /* storage unavailable/full — pending state just won't survive a reload */ }
+    }
+    loadPendingSyncState() {
+        try {
+            const raw = localStorage.getItem(this.pendingSyncStorageKey());
+            if (!raw) return;
+            const parsed = JSON.parse(raw);
+            (parsed.syncIds || []).forEach(id => this.pendingSyncIds.add(id));
+            (parsed.deleteIds || []).forEach(id => this.pendingDeleteLaunchPadIds.add(id));
+        } catch (e) { /* ignore corrupt/unreadable state */ }
+    }
+
+    updatePendingSyncUI() {
+        const count = this.pendingSyncIds.size + this.pendingDeleteLaunchPadIds.size;
+        const banner = this.$('pendingSyncBanner');
+        if (!banner) return;
+        banner.style.display = count ? 'flex' : 'none';
+        const countEl = this.$('pendingSyncCount');
+        if (countEl) countEl.textContent = count === 1 ? '1 change' : `${count} changes`;
+    }
+
+    // Pushes every pending move/edit/create (and any deferred deletes) to
+    // LaunchPad in one batch — this is the only place Bridge → Schedule
+    // pushes actually happen now. Sequential, not parallel: several pending
+    // items can easily need a fresh slot on the same day at once, which is
+    // exactly the race syncItemToLaunchPad()'s own per-item queue and
+    // move_schedule_row's atomicity exist to prevent, but only if these
+    // don't all fire at the same instant to begin with.
+    async acceptPendingChanges() {
+        if (!this._supabase) { this.toast('Connect to Supabase first.'); return; }
+        const total = this.pendingSyncIds.size + this.pendingDeleteLaunchPadIds.size;
+        if (!total) return;
+        this.setSaveIndicator('dirty', 'Publishing to Schedule...');
+        let ok = 0, fail = 0;
+
+        for (const id of Array.from(this.pendingSyncIds)) {
+            const item = this.DATA.items.find(it => it.id === id);
+            if (!item) { this.pendingSyncIds.delete(id); continue; } // deleted locally before being accepted
+            const success = await this.syncItemToLaunchPad(item);
+            if (success) { ok++; this.pendingSyncIds.delete(id); } else fail++;
+        }
+        for (const launchpadId of Array.from(this.pendingDeleteLaunchPadIds)) {
+            const { error } = await this._supabase.from(this.LAUNCHPAD_TABLE).delete().eq('id', launchpadId);
+            if (!error) { ok++; this.pendingDeleteLaunchPadIds.delete(launchpadId); }
+            else { fail++; console.error('Accept: pending LaunchPad delete failed', launchpadId, error); }
+        }
+
+        this.savePendingSyncState();
+        this.updatePendingSyncUI();
+        this.setSaveIndicator('ready', 'Ready');
+        this.toast(`Published ${ok} change${ok === 1 ? '' : 's'} to Schedule${fail ? ` — ${fail} failed, still pending, see console` : ''}.`, 6000);
     }
 
     // async and awaitable now (not just fire-and-forget) so a caller that
