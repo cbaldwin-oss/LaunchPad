@@ -767,7 +767,10 @@ const MARKUP = `
      empty — see updatePendingSyncUI(). -->
 <div class="pending-sync-banner" id="pendingSyncBanner" style="display:none;">
     <span>📝 <span id="pendingSyncCount">0 changes</span> not yet in Schedule</span>
-    <button class="tool-btn primary small" onclick="this.getRootNode().host.acceptPendingChanges()">✓ Accept &amp; Publish to Schedule</button>
+    <span style="display:flex; gap:8px;">
+        <button class="tool-btn small" onclick="this.getRootNode().host.discardPendingChanges()" title="Revert Bridge back to whatever Schedule currently shows">✕ Discard</button>
+        <button class="tool-btn primary small" onclick="this.getRootNode().host.acceptPendingChanges()">✓ Accept &amp; Publish to Schedule</button>
+    </span>
 </div>
 
 <!-- ===== TYPE COLOR LEGEND ===== -->
@@ -5162,10 +5165,91 @@ export class BridgeView extends HTMLElement {
             else { fail++; console.error('Accept: pending LaunchPad delete failed', launchpadId, error); }
         }
 
+        // "The scheduler should be resynced to match the bridge" — pushing
+        // the tracked deltas above is the common case, but this final sweep
+        // is the actual guarantee: anything still sitting in Schedule with
+        // no matching Bridge item gets cleared too, not just the ones this
+        // session happened to track through pendingDeleteLaunchPadIds.
+        // Silent — Accept itself was already the user's confirmation.
+        const extraCleared = await this.clearOrphanedScheduleRows({ silent: true });
+
         this.savePendingSyncState();
         this.updatePendingSyncUI();
         this.setSaveIndicator('ready', 'Ready');
-        this.toast(`Published ${ok} change${ok === 1 ? '' : 's'} to Schedule${fail ? ` — ${fail} failed, still pending, see console` : ''}.`, 6000);
+        this.toast(
+            `Published ${ok} change${ok === 1 ? '' : 's'} to Schedule` +
+            (extraCleared ? `, cleared ${extraCleared} stale row${extraCleared === 1 ? '' : 's'}` : '') +
+            ` — Schedule now matches Bridge${fail ? `. ${fail} failed, still pending, see console` : '.'}`,
+            7000
+        );
+    }
+
+    // Reverts every unaccepted local change back to whatever Schedule
+    // currently shows — the undo counterpart to acceptPendingChanges().
+    // Schedule (not Bridge's own history) is the source of truth to revert
+    // TO, since a pending change is by definition something Schedule
+    // doesn't know about yet.
+    async discardPendingChanges() {
+        const total = this.pendingSyncIds.size + this.pendingDeleteLaunchPadIds.size;
+        if (!total) return;
+        if (!this._supabase) { this.toast('Connect to Supabase first.'); return; }
+        if (!confirm(`Discard ${total} unaccepted change${total === 1 ? '' : 's'}? Bridge will revert back to whatever Schedule currently shows. This cannot be undone.`)) return;
+
+        this.setSaveIndicator('dirty', 'Discarding...');
+
+        for (const id of Array.from(this.pendingSyncIds)) {
+            const item = this.DATA.items.find(it => it.id === id);
+            if (!item) { this.pendingSyncIds.delete(id); continue; }
+            if (!item.launchpad_id) {
+                // Never accepted in the first place — there's nothing in
+                // Schedule to revert to, so discarding this one means
+                // undoing the creation itself.
+                await this.ItemsDB.remove(id);
+                this.DATA.items = this.DATA.items.filter(it => it.id !== id);
+            } else {
+                // Fetched by id directly, not by asset/activity matching —
+                // pullFromLaunchPad()'s own fuzzy matching can't reliably
+                // tell a genuine pending move apart from "nothing changed"
+                // here, since launchpad_day_label only gets updated once a
+                // move is actually accepted, not while it's still pending.
+                const { data, error } = await this._supabase.from(this.LAUNCHPAD_TABLE).select('*').eq('id', item.launchpad_id).maybeSingle();
+                if (!error && data) {
+                    item.start_ts = new Date(data.day_label + 'T07:00').toISOString();
+                    item.activity_name = data.activity || item.activity_name;
+                    item.asset_name = data.asset || item.asset_name;
+                    item.notes = data.notes || '';
+                    item.contractor_name = data.trade_partners || '';
+                    item.zone = data.place || item.zone;
+                    item.launchpad_day_label = data.day_label;
+                    await this.ItemsDB.update(id, {
+                        start_ts: item.start_ts, activity_name: item.activity_name, asset_name: item.asset_name,
+                        notes: item.notes, contractor_name: item.contractor_name, zone: item.zone,
+                        launchpad_day_label: item.launchpad_day_label
+                    });
+                }
+                // Row's gone entirely (shouldn't normally happen — its
+                // delete would itself be pending, not already applied) —
+                // nothing to revert to, so the local edit is left as-is.
+            }
+            this.pendingSyncIds.delete(id);
+        }
+
+        if (this.pendingDeleteLaunchPadIds.size) {
+            // The Bridge item is already gone locally, but its Schedule row
+            // was never actually removed (that delete was deferred too) —
+            // it's still there to restore from. Reuses pullFromLaunchPad()'s
+            // existing "no local match found → import as a new item"
+            // branch, which is exactly a restore in this situation.
+            this.pendingDeleteLaunchPadIds.clear();
+            await this.pullFromLaunchPad();
+        }
+
+        this.savePendingSyncState();
+        this.updatePendingSyncUI();
+        this.setSaveIndicator('ready', 'Ready');
+        this.renderFilterBar();
+        this.renderGantt();
+        this.toast('Discarded — Bridge now matches what Schedule currently shows.', 5000);
     }
 
     // async and awaitable now (not just fire-and-forget) so a caller that
@@ -5360,30 +5444,47 @@ export class BridgeView extends HTMLElement {
         if (this.UNIFIED_SCHEDULE) { this.toast('This project already reads/writes BackEndData directly — nothing to reconcile.'); return; }
         this.setSaveIndicator('dirty', 'Reconciling with Bridge...');
         await this.pullFromLaunchPad();
+        await this.clearOrphanedScheduleRows();
+        this.setSaveIndicator('ready', 'Ready');
+    }
+
+    // Deletes every Scheduler row that has no matching Bridge item — the
+    // other half of "tightening the pipeline": a Bridge delete should mean
+    // the row disappears from Schedule too, not just stop being linked.
+    // Called two ways: manually via the Manage Lists button above (with a
+    // confirm preview, since it's a standalone maintenance sweep someone
+    // might run at any time), and automatically at the end of
+    // acceptPendingChanges() (silent — the user already confirmed intent by
+    // clicking Accept, and by that point every legitimate deletion has
+    // already gone through pendingDeleteLaunchPadIds; this is the final
+    // consistency guarantee that nothing else got left behind).
+    async clearOrphanedScheduleRows(opts) {
+        const silent = opts && opts.silent;
+        if (!this._supabase || this.UNIFIED_SCHEDULE) return 0;
 
         const { data, error } = await this._supabase.from(this.LAUNCHPAD_TABLE).select('*');
         if (error) {
             console.error('Reconcile: LaunchPad fetch failed', error);
-            this.setSaveIndicator('error', 'Reconcile failed');
-            this.toast('Reconcile failed — see console.');
-            return;
+            if (!silent) this.toast('Reconcile failed — see console.');
+            return 0;
         }
 
         const linkedIds = new Set(this.DATA.items.filter(it => it.launchpad_id != null).map(it => String(it.launchpad_id)));
         const isOccupied = row => !!(row.activity || row.asset || row.notes || row.status || row.trade_partners || row.time || row.place || row.result || row.loto);
         const orphans = (data || []).filter(row => isOccupied(row) && !linkedIds.has(String(row.id)));
 
-        this.setSaveIndicator('ready', 'Ready');
         if (!orphans.length) {
-            this.toast('Reconcile: Scheduler already matches Bridge — nothing to clear.');
-            return;
+            if (!silent) this.toast('Reconcile: Scheduler already matches Bridge — nothing to clear.');
+            return 0;
         }
 
-        const preview = orphans.slice(0, 12)
-            .map(r => `${r.day_label}: ${r.asset || '(no asset)'} — ${r.activity || '(no activity)'}`)
-            .join('\n') + (orphans.length > 12 ? `\n...and ${orphans.length - 12} more` : '');
-        const ok = confirm(`Bridge has no matching activity for ${orphans.length} row(s) currently shown in the Scheduler:\n\n${preview}\n\nClear them from the Scheduler so it matches Bridge? This cannot be undone.`);
-        if (!ok) return;
+        if (!silent) {
+            const preview = orphans.slice(0, 12)
+                .map(r => `${r.day_label}: ${r.asset || '(no asset)'} — ${r.activity || '(no activity)'}`)
+                .join('\n') + (orphans.length > 12 ? `\n...and ${orphans.length - 12} more` : '');
+            const ok = confirm(`Bridge has no matching activity for ${orphans.length} row(s) currently shown in the Scheduler:\n\n${preview}\n\nClear them from the Scheduler so it matches Bridge? This cannot be undone.`);
+            if (!ok) return 0;
+        }
 
         let cleared = 0;
         for (const row of orphans) {
@@ -5391,7 +5492,8 @@ export class BridgeView extends HTMLElement {
             if (delErr) console.error('Reconcile: failed to clear orphaned row', row.id, delErr);
             else cleared++;
         }
-        this.toast(`Reconcile: cleared ${cleared} Scheduler row(s) with no matching Bridge activity${cleared < orphans.length ? ` (${orphans.length - cleared} failed — see console)` : ''}.`, 7000);
+        if (!silent) this.toast(`Reconcile: cleared ${cleared} Scheduler row(s) with no matching Bridge activity${cleared < orphans.length ? ` (${orphans.length - cleared} failed — see console)` : ''}.`, 7000);
+        return cleared;
     }
 
     /* =========================================================================
