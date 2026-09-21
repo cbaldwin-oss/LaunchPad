@@ -6363,7 +6363,7 @@ async function continueStartAppAfterProject(user) {
             applyViewFilter('view2');
             collapseEverything();
             loader.classList.add('hidden');
-            setTimeout(() => { loader.style.display = 'none'; autoCleanUI(); }, 800);
+            setTimeout(() => { loader.style.display = 'none'; autoCleanUI(); compactAllRenderedDays(); }, 800);
 
             // Quietly refresh everything in the background. These are the
             // exact same calls as the no-cache path below — each one already
@@ -6396,7 +6396,7 @@ async function continueStartAppAfterProject(user) {
         applyViewFilter('view2');
         collapseEverything();
         loader.classList.add('hidden');
-        setTimeout(() => { loader.style.display = 'none'; autoCleanUI(); }, 800);
+        setTimeout(() => { loader.style.display = 'none'; autoCleanUI(); compactAllRenderedDays(); }, 800);
         return;
     }
 
@@ -7499,6 +7499,12 @@ function saveCell(cell, value, colIndex, isImmediate = false) {
         if (!error && data && data[0]) {
             row.setAttribute('data-occupied', 'true');
             document.getElementById('saveIndicator').innerText = `Saved at: ${new Date().toLocaleTimeString()}`;
+            // This save may have just blanked the row (cleared its last
+            // field) or filled in a previously-blank one — either way this
+            // day's occupied/blank split may now have a gap in it. Debounced
+            // so a user actively filling out several cells in a row doesn't
+            // get its slot yanked out from under them mid-edit.
+            scheduleRowCompaction(dateId);
             
             // --- LOG TO EDIT HISTORY ---
             // Only log if this wasn't a redundant failsafe save
@@ -7532,6 +7538,122 @@ function saveCell(cell, value, colIndex, isImmediate = false) {
     if (window[timeoutKey]) clearTimeout(window[timeoutKey]);
     if (isImmediate) performSave();
     else window[timeoutKey] = setTimeout(performSave, 400);
+}
+
+// data-occupied can go stale — saveCell() sets it to "true" on every
+// successful save regardless of what was saved, so a row that's had every
+// field cleared one at a time still carries data-occupied="true" from
+// whenever it was last touched. Matches autoCleanUI()'s own definition of
+// "actually empty" (no Activity and no Asset) so both agree on what counts
+// as blank.
+function isRowReallyBlank(row) {
+    const col3 = row.querySelector('[data-col-index="3"]');
+    const col4 = row.querySelector('[data-col-index="4"]');
+    const val3 = (col3?.value || "").toLowerCase().trim();
+    const val4 = (col4?.value || "").toLowerCase().trim();
+    return (val3 === "" || val3.includes("select")) && (val4 === "" || val4.includes("select"));
+}
+
+const __rowCompactionTimers = {};
+// Debounced per day — saveCell() calls this after every successful save, so
+// a user filling out several cells in one row would otherwise trigger a
+// compaction pass between almost every keystroke. Waiting 1.5s after the
+// last save in a given day collapses that into one pass, and re-checking
+// for focus inside the container means it never yanks a row out from under
+// someone who's still actively working in that day.
+function scheduleRowCompaction(dayLabel) {
+    clearTimeout(__rowCompactionTimers[dayLabel]);
+    __rowCompactionTimers[dayLabel] = setTimeout(() => compactDayRows(dayLabel), 1500);
+}
+
+// Keeps every occupied row bubbled up to the top of its day with no gaps,
+// and every blank row pushed to the bottom — same "scrape content, rewrite
+// into slots, clear the rest" technique orderChronologically() already uses
+// for its own reordering (see below), just without re-sorting by time:
+// occupied rows keep their existing relative order, they just stop leaving
+// a gap behind whichever row got cleared.
+//
+// Row-wrapper DOM nodes are never moved — their id/data-row-index encodes a
+// fixed slot tied to that row's day-encoded database id (see
+// generateNumericId()) — so "moving" a row here always means copying its
+// CONTENT into an earlier slot and blanking the slot it came from, exactly
+// like every other reordering path in this file already does.
+function compactDayRows(dayLabel) {
+    const container = document.getElementById(`rows-${dayLabel}`);
+    if (!container) return;
+    // Don't compact out from under someone actively editing in this day —
+    // the next save in this container will just re-schedule this anyway.
+    if (container.contains(document.activeElement)) { scheduleRowCompaction(dayLabel); return; }
+
+    const allRows = Array.from(container.querySelectorAll('.cell-row'));
+    if (allRows.length < 2) return;
+
+    const occupiedRows = allRows.filter(r => !isRowReallyBlank(r));
+    const alreadyCompact = occupiedRows.every((r, i) => allRows[i] === r);
+    if (alreadyCompact) return;
+
+    const scraped = occupiedRows.map(row => {
+        const cols = {};
+        for (let col = 1; col <= 10; col++) {
+            const el = row.querySelector(`[data-col-index="${col}"]`);
+            if (!el) { cols[col] = { val: "", html: "" }; continue; }
+            if (col === 5) {
+                const txt = el.innerText || "";
+                cols[col] = { val: txt === "..." ? "" : txt, html: el.innerHTML || "" };
+            } else if (col === 6) {
+                cols[col] = { val: el.getAttribute('data-selected') || el.value || "", html: "" };
+            } else {
+                cols[col] = { val: el.value || "", html: "" };
+            }
+        }
+        return cols;
+    });
+
+    for (let i = 0; i < allRows.length; i++) {
+        const targetRow = allRows[i];
+        const sourceCols = i < scraped.length ? scraped[i] : null;
+
+        for (let col = 1; col <= 10; col++) {
+            const targetEl = targetRow.querySelector(`[data-col-index="${col}"]`);
+            if (!targetEl) continue;
+            const content = sourceCols ? sourceCols[col].val : "";
+
+            if (col === 5) {
+                if (sourceCols && sourceCols[col].html && sourceCols[col].html.includes('<a')) {
+                    targetEl.innerHTML = sourceCols[col].html;
+                } else {
+                    targetEl.innerText = content || "...";
+                }
+            } else if (col === 6) {
+                targetEl.setAttribute('data-selected', content);
+                if (targetEl.options && targetEl.options[0]) {
+                    targetEl.options[0].text = content ? `Selected: ${content}` : "+ Add Multi";
+                }
+            } else {
+                if (targetEl.tagName === 'SELECT' && content !== "") {
+                    const exists = Array.from(targetEl.options).some(opt => opt.value === content);
+                    if (!exists) targetEl.add(new Option(content, content));
+                }
+                targetEl.value = content;
+            }
+            applyCellColor(targetEl, content);
+            saveCell(targetEl, content, col, true);
+        }
+
+        if (sourceCols) targetRow.setAttribute('data-occupied', 'true');
+        else targetRow.removeAttribute('data-occupied');
+    }
+}
+
+// One-time pass over every currently-rendered day, run right after initial
+// load (see the loader.style.display = 'none' points below) to fix up any
+// gaps that already existed before this feature shipped. Ongoing gaps from
+// then on are handled incrementally by scheduleRowCompaction() above.
+function compactAllRenderedDays() {
+    document.querySelectorAll('.rows-container').forEach(container => {
+        const dayLabel = container.id.replace('rows-', '');
+        compactDayRows(dayLabel);
+    });
 }
 
 const contentArea = document.getElementById('main-content-area');
@@ -7692,6 +7814,7 @@ function renderLookAheadWeeks(viewId) {
     }
 
     if (__lastScheduleData) applyScheduleDataToDom(__lastScheduleData);
+    compactAllRenderedDays();
     applyViewFilter(viewId);
 }
 
@@ -7714,6 +7837,7 @@ function renderNextWeekBatch() {
     // populate immediately instead of staying blank until some other
     // refresh happens to run again.
     if (__lastScheduleData) applyScheduleDataToDom(__lastScheduleData);
+    compactAllRenderedDays();
 
     if (__scheduleWeeksRendered < WEEKS_TO_SHOW) {
         // Invisible marker at the bottom of what's rendered so far — an
