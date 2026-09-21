@@ -1481,91 +1481,117 @@ export class BridgeView extends HTMLElement {
         // Postgres-assigned uuid — this deliberately does NOT delegate to
         // the generic self.DB (which assumes both of those things), it's a
         // small bespoke implementation instead.
+        // Every write below stages into `draft` (or, for a brand-new item,
+        // stays local-only) instead of touching the live columns Scheduler
+        // reads — see sync/add_draft_columns.sql. Only
+        // _acceptPendingChangesUnified() ever commits a draft to the live
+        // columns; _discardPendingChangesUnified() clears one instead.
+        // predecessor_ids is the one exception (see the `update` branch
+        // below) since Scheduler never reads it — nothing to stage.
         this.ItemsDB = {
             fetchAll: async () => {
                 if (!this._supabase) return [];
                 const { data, error } = await this._supabase.from(this.LAUNCHPAD_TABLE).select('*').order('day_label', { ascending: true }).order('id', { ascending: true });
                 if (error) { console.error('ItemsDB.fetchAll failed', error); return []; }
-                // An empty Scheduler placeholder slot (no activity typed
-                // into it yet) isn't a real Bridge item.
-                return (data || []).filter(row => !!row.activity).map(row => this.backEndRowToItem(row));
+                // draft_deleted rows are hidden from Bridge entirely — that
+                // IS what "deleted" means here until Accept actually
+                // removes the row. Collected separately since the item
+                // itself is intentionally absent from the returned list,
+                // so reloadAllData() couldn't otherwise tell they're
+                // pending.
+                this._unifiedDraftDeletedIds = new Set();
+                const rows = (data || []).filter(row => {
+                    if (row.draft_deleted) { this._unifiedDraftDeletedIds.add(String(row.id)); return false; }
+                    // A live row is a real item once it has an activity; a
+                    // purely-draft row (staged content on an otherwise-
+                    // still-empty Scheduler placeholder slot) is also a
+                    // real Bridge item even though its live `activity`
+                    // column is blank.
+                    return !!row.activity || !!row.draft;
+                });
+                return rows.map(row => this.backEndRowToItem(row));
             },
             insert: async (item) => {
-                const dayLabel = new Date(item.start_ts).toISOString().slice(0, 10);
-                const idx = await this.findFreeLaunchPadIndex(dayLabel);
-                if (idx === null) { console.error(`ItemsDB.insert: no free row slot for ${dayLabel}`); return null; }
-                const numericId = this.launchPadNumericId(dayLabel, idx);
-                const row = this.itemToBackEndRow(item, numericId, dayLabel);
-                const { data, error } = await this._supabase.from(this.LAUNCHPAD_TABLE).insert([row]).select();
-                if (error) { console.error('ItemsDB.insert failed', error); return null; }
-                return this.backEndRowToItem(data[0]);
+                // Stays entirely local until Accept — inserting a real row
+                // now (even just to reserve its day-slot) would make
+                // Scheduler's applyScheduleDataToDom() mark that slot
+                // "occupied" the instant the row exists, live columns or
+                // not, showing an unexplained blank row before anything
+                // should actually be visible there. uid() (already used
+                // elsewhere in this file for the same "local placeholder
+                // before a real id exists" purpose) can't collide with a
+                // real numeric id.
+                return { ...item, id: uid(), launchpad_id: null, launchpad_day_label: null, _localOnly: true, _pendingDraft: false };
             },
             update: async (id, patch) => {
                 const current = this.DATA.items.find(it => it.id === id);
-                const dayLabel = patch.start_ts ? new Date(patch.start_ts).toISOString().slice(0, 10) : (current ? current.launchpad_day_label : null);
-                const dayChanged = current && dayLabel && dayLabel !== current.launchpad_day_label;
-                const merged = { ...current, ...patch };
-                if (dayChanged) {
-                    const idx = await this.findFreeLaunchPadIndex(dayLabel);
-                    if (idx === null) { console.error(`ItemsDB.update: no free row slot for ${dayLabel}`); return null; }
-                    const newId = this.launchPadNumericId(dayLabel, idx);
-                    // move_unified_schedule_row copies the OLD row's
-                    // Scheduler-owned fields (time/status/result/duration/
-                    // loto) forward itself, server-side — only Bridge's own
-                    // fields are passed here. That's deliberate: Bridge
-                    // doesn't know those values (they're Scheduler-only),
-                    // and the whole point of this RPC over the plain
-                    // move_schedule_row is to NOT lose them on a move.
-                    const { error } = await this._supabase.rpc('move_unified_schedule_row', {
-                        p_table: this.LAUNCHPAD_TABLE,
-                        p_old_id: Number(id),
-                        p_new_id: newId,
-                        p_day_label: dayLabel,
-                        p_activity: merged.activity_name || '',
-                        p_asset: merged.asset_name || '',
-                        p_notes: merged.notes || '',
-                        p_place: merged.zone || '',
-                        p_trade_partners: merged.contractor_name || '',
-                        p_duration_hours: merged.duration_hours || 24,
-                        p_bridge_type: merged.type || '',
-                        p_area: merged.area || '',
-                        p_asset_type: merged.asset_type || '',
-                        p_predecessor_ids: JSON.stringify((merged.predecessor_ids || []).map(Number))
-                    });
-                    if (error) { console.error('ItemsDB.update (day change) failed — has sync/unify_backend_schedule.sql been run for this project?', error); return null; }
-                    if (current) {
-                        const oldIdStr = current.id;
-                        current.id = String(newId);
-                        current.launchpad_id = String(newId);
-                        current.launchpad_day_label = dayLabel;
-                        // Unlike schedule_items' stable uuid id, a unified
-                        // item's id IS the day-encoded id — a day change
-                        // necessarily churns it. Any OTHER item whose
-                        // predecessor_ids pointed at the old id would
-                        // otherwise silently reference a row that's about
-                        // to be deleted. Remap those forward (same idea as
-                        // the dedup remap in pullFromLaunchPad's Step 0).
-                        for (const it of this.DATA.items) {
-                            if (it.id !== current.id && Array.isArray(it.predecessor_ids) && it.predecessor_ids.includes(oldIdStr)) {
-                                it.predecessor_ids = it.predecessor_ids.map(pid => pid === oldIdStr ? current.id : pid);
-                                await this.ItemsDB.update(it.id, { predecessor_ids: it.predecessor_ids });
-                            }
-                        }
-                    }
+                if (!current) return null;
+
+                if (current._localOnly) {
+                    // Never left this browser yet — there's nothing server-
+                    // side to stage a draft onto.
+                    Object.assign(current, patch);
                     return current;
                 }
-                const row = this.itemToBackEndRow(merged, Number(id), dayLabel);
-                delete row.id;
-                const { error } = await this._supabase.from(this.LAUNCHPAD_TABLE).update(row).eq('id', Number(id));
-                if (error) { console.error('ItemsDB.update failed', error); return null; }
+
+                const patchKeys = Object.keys(patch);
+                if (patchKeys.length === 1 && patchKeys[0] === 'predecessor_ids') {
+                    // predecessor_ids never reaches Scheduler at all (it has
+                    // no column for it) — nothing to review, and staging it
+                    // would wrongly flag an unrelated item as "pending"
+                    // whenever a move/delete elsewhere needs to fix up a
+                    // dangling reference to it (see the remap loops in
+                    // _acceptPendingChangesUnified()/deleteItemById()).
+                    // Always written live.
+                    const { error } = await this._supabase.from(this.LAUNCHPAD_TABLE)
+                        .update({ predecessor_ids: this.numericPredecessorIds(patch) })
+                        .eq('id', Number(id));
+                    if (error) { console.error('ItemsDB.update (predecessor_ids) failed', error); return null; }
+                    current.predecessor_ids = patch.predecessor_ids;
+                    return current;
+                }
+
+                // Everything else — including a day change — just stages
+                // into `draft` on this SAME row. No id churn, no
+                // move_unified_schedule_row call: that only happens once,
+                // at Accept, for whichever day the draft ends up with by
+                // then (see _acceptPendingChangesUnified()).
+                const merged = { ...current, ...patch };
+                const dayLabel = patch.start_ts ? new Date(patch.start_ts).toISOString().slice(0, 10) : current.launchpad_day_label;
+                const draft = this.itemToDraftPayload(merged, dayLabel);
+                const { error } = await this._supabase.from(this.LAUNCHPAD_TABLE).update({ draft }).eq('id', Number(id));
+                if (error) { console.error('ItemsDB.update (draft) failed — has sync/add_draft_columns.sql been run for this project?', error); return null; }
+                Object.assign(current, patch);
+                current.launchpad_day_label = dayLabel;
+                current._pendingDraft = true;
                 return current;
             },
             remove: async (id) => {
-                const { error } = await this._supabase.from(this.LAUNCHPAD_TABLE).delete().eq('id', Number(id));
-                if (error) { console.error('ItemsDB.remove failed', error); return false; }
+                const current = this.DATA.items.find(it => it.id === id);
+                if (current && current._localOnly) return true; // never existed server-side to begin with
+                const { error } = await this._supabase.from(this.LAUNCHPAD_TABLE).update({ draft_deleted: true }).eq('id', Number(id));
+                if (error) { console.error('ItemsDB.remove (draft_deleted) failed', error); return false; }
                 return true;
             }
         };
+    }
+
+    // Filters out any predecessor id that isn't a real, already-accepted
+    // row id (a locally-created, not-yet-accepted item's uid()-style
+    // temporary id, most commonly) — Number() on one of those is NaN,
+    // which would silently corrupt the predecessor_ids column on write.
+    numericPredecessorIds(item) {
+        return (item.predecessor_ids || []).map(pid => Number(pid)).filter(n => Number.isFinite(n));
+    }
+
+    // Bridge item -> the JSON payload staged into `draft` — exactly
+    // itemToBackEndRow()'s own row shape (same column names), minus `id`,
+    // so a draft can be read back through the same field names whether
+    // it's live or staged (see backEndRowToItem()'s `source` below).
+    itemToDraftPayload(item, dayLabel) {
+        const row = this.itemToBackEndRow(item, null, dayLabel);
+        delete row.id;
+        return row;
     }
 
     // BackEndData row -> Bridge's in-memory item shape. Mirrors the exact
@@ -1587,23 +1613,33 @@ export class BridgeView extends HTMLElement {
     // any other launchpad_id-gated logic working correctly without having
     // to special-case every one of those call sites for unified mode: a
     // unified item legitimately IS always "linked" to itself.
+    // `source` is the live row itself normally, or row.draft when present
+    // — draft is deliberately shaped exactly like a row (see
+    // itemToDraftPayload()), so the same field names work either way. This
+    // is what makes Bridge display a pending edit/move while Scheduler
+    // (which never looks at `draft`) keeps showing the live values
+    // underneath, untouched, until Accept.
     backEndRowToItem(row) {
+        const hasDraft = !!row.draft;
+        const source = hasDraft ? row.draft : row;
+        const dayLabel = hasDraft ? (row.draft.day_label || row.day_label) : row.day_label;
         return {
             id: String(row.id),
-            asset_name: row.asset || '',
-            activity_name: row.activity || '',
-            duration_hours: parseFloat(row.duration_hours) || 24,
-            start_ts: new Date(row.day_label + 'T07:00').toISOString(),
-            type: row.bridge_type || (this.DATA.types[0]?.name || 'Other'),
-            zone: row.place || '',
-            area: row.area || '',
-            asset_type: row.asset_type || '',
-            contractor_name: row.trade_partners || '',
-            notes: row.notes || '',
-            predecessor_ids: Array.isArray(row.predecessor_ids) ? row.predecessor_ids.map(String)
-                : (typeof row.predecessor_ids === 'string' ? (JSON.parse(row.predecessor_ids || '[]')).map(String) : []),
+            asset_name: source.asset || '',
+            activity_name: source.activity || '',
+            duration_hours: parseFloat(source.duration_hours) || 24,
+            start_ts: new Date(dayLabel + 'T07:00').toISOString(),
+            type: source.bridge_type || (this.DATA.types[0]?.name || 'Other'),
+            zone: source.place || '',
+            area: source.area || '',
+            asset_type: source.asset_type || '',
+            contractor_name: source.trade_partners || '',
+            notes: source.notes || '',
+            predecessor_ids: Array.isArray(source.predecessor_ids) ? source.predecessor_ids.map(String)
+                : (typeof source.predecessor_ids === 'string' ? (JSON.parse(source.predecessor_ids || '[]')).map(String) : []),
             launchpad_id: String(row.id),
-            launchpad_day_label: row.day_label
+            launchpad_day_label: dayLabel,
+            _pendingDraft: hasDraft
         };
     }
 
@@ -1612,7 +1648,9 @@ export class BridgeView extends HTMLElement {
     // trade_partners plus the 5 Bridge-only columns — never status/result/
     // loto, which belong to Scheduler alone. Leaving those keys out
     // entirely (not setting them to '') is what keeps Postgres's
-    // ON CONFLICT DO UPDATE SET / plain UPDATE from touching them.
+    // ON CONFLICT DO UPDATE SET / plain UPDATE from touching them. Used
+    // both for a real (accepted) row and, via itemToDraftPayload(), for
+    // the `draft` jsonb payload — same shape either way.
     itemToBackEndRow(item, numericId, dayLabel) {
         return {
             id: numericId,
@@ -1626,7 +1664,7 @@ export class BridgeView extends HTMLElement {
             bridge_type: item.type || '',
             area: item.area || '',
             asset_type: item.asset_type || '',
-            predecessor_ids: (item.predecessor_ids || []).map(Number)
+            predecessor_ids: this.numericPredecessorIds(item)
         };
     }
 
@@ -2093,9 +2131,28 @@ export class BridgeView extends HTMLElement {
             }
             if (!Array.isArray(it.predecessor_ids)) it.predecessor_ids = [];
         });
-        this.DATA.items = items; this.DATA.assets = assets; this.DATA.activities = activities;
+        // Local-only pending creations (unified mode, never yet accepted)
+        // live purely in this browser's memory — ItemsDB.fetchAll() can't
+        // see them (there's no row to fetch), so a fresh load would
+        // otherwise silently drop them.
+        const localOnlyItems = this.UNIFIED_SCHEDULE ? (this.DATA.items || []).filter(it => it._localOnly) : [];
+        this.DATA.items = items.concat(localOnlyItems); this.DATA.assets = assets; this.DATA.activities = activities;
         this.DATA.contractors = contractors; this.DATA.zones = zones; this.DATA.areas = areas;
         this.DATA.types = types.length ? types : DEFAULT_TYPE_COLORS;
+
+        if (this.UNIFIED_SCHEDULE) {
+            // Drafts are server-shared state now, not per-browser —
+            // rebuilding these from what was actually fetched (plus
+            // whatever locally-tracked new items survived above) is what
+            // makes another session's pending edits/deletes show up in
+            // THIS session's banner too, and keeps a realtime-triggered
+            // reload's banner state accurate.
+            const draftIds = items.filter(it => it._pendingDraft).map(it => it.id);
+            const localOnlyIds = localOnlyItems.map(it => it.id);
+            this.pendingSyncIds = new Set([...draftIds, ...localOnlyIds]);
+            this.pendingDeleteLaunchPadIds = new Set(this._unifiedDraftDeletedIds || []);
+            this.updatePendingSyncUI();
+        }
     }
 
     computeTimelineStart() {
@@ -3908,11 +3965,14 @@ export class BridgeView extends HTMLElement {
         this.updateMultiSelectIndicator();
         this.pendingSyncIds.delete(id); // no point pushing a move for an item that's about to be deleted
         this.savePendingSyncState();
-        if (!this.UNIFIED_SCHEDULE && item && item.launchpad_id) {
-            // Unified mode: ItemsDB.remove() above already deleted this same
-            // row (launchpad_id === id there) — nothing separate to clean up.
-            // Legacy mode: the LaunchPad row stays as-is in Schedule until
-            // this delete is accepted too, same as any other pending change.
+        if (item && item.launchpad_id && !item._localOnly) {
+            // ItemsDB.remove() above already staged this (draft_deleted in
+            // unified mode, or left the LaunchPad row untouched in legacy
+            // mode) rather than actually removing it from Schedule — the
+            // row stays exactly as-is there until this delete is accepted
+            // too, same as any other pending change. A _localOnly item
+            // never had a real row to begin with, so there's nothing to
+            // stage a delete for.
             this.markPendingDelete(item.launchpad_id);
         }
         // drop this item from any successor's predecessor list
@@ -5083,7 +5143,10 @@ export class BridgeView extends HTMLElement {
     // projects have nothing to gate — ItemsDB already wrote straight to
     // BackEndData, there's no separate "propagate" step left to defer.
     markPendingSync(item) {
-        if (this.UNIFIED_SCHEDULE || !item) return;
+        // Unified projects: ItemsDB.update()/insert() above already staged
+        // this as a draft (or kept it local-only) rather than writing live
+        // — this just tracks it for the banner, same as legacy mode.
+        if (!item) return;
         this.pendingSyncIds.add(item.id);
         this.savePendingSyncState();
         this.updatePendingSyncUI();
@@ -5095,7 +5158,7 @@ export class BridgeView extends HTMLElement {
     // untouched in Schedule until the delete is accepted too, same as any
     // other pending change.
     markPendingDelete(launchpadId) {
-        if (this.UNIFIED_SCHEDULE || launchpadId == null) return;
+        if (launchpadId == null) return;
         this.pendingDeleteLaunchPadIds.add(launchpadId);
         this.savePendingSyncState();
         this.updatePendingSyncUI();
@@ -5148,6 +5211,7 @@ export class BridgeView extends HTMLElement {
     // don't all fire at the same instant to begin with.
     async acceptPendingChanges() {
         if (!this._supabase) { this.toast('Connect to Supabase first.'); return; }
+        if (this.UNIFIED_SCHEDULE) return this._acceptPendingChangesUnified();
         const total = this.pendingSyncIds.size + this.pendingDeleteLaunchPadIds.size;
         if (!total) return;
         this.setSaveIndicator('dirty', 'Publishing to Schedule...');
@@ -5193,6 +5257,7 @@ export class BridgeView extends HTMLElement {
         const total = this.pendingSyncIds.size + this.pendingDeleteLaunchPadIds.size;
         if (!total) return;
         if (!this._supabase) { this.toast('Connect to Supabase first.'); return; }
+        if (this.UNIFIED_SCHEDULE) return this._discardPendingChangesUnified(total);
         if (!confirm(`Discard ${total} unaccepted change${total === 1 ? '' : 's'}? Bridge will revert back to whatever Schedule currently shows. This cannot be undone.`)) return;
 
         this.setSaveIndicator('dirty', 'Discarding...');
@@ -5242,6 +5307,168 @@ export class BridgeView extends HTMLElement {
             // branch, which is exactly a restore in this situation.
             this.pendingDeleteLaunchPadIds.clear();
             await this.pullFromLaunchPad();
+        }
+
+        this.savePendingSyncState();
+        this.updatePendingSyncUI();
+        this.setSaveIndicator('ready', 'Ready');
+        this.renderFilterBar();
+        this.renderGantt();
+        this.toast('Discarded — Bridge now matches what Schedule currently shows.', 5000);
+    }
+
+    // Unified-project counterpart to acceptPendingChanges() above — commits
+    // every pending draft/delete straight onto BackEndData's live columns
+    // (there's no separate LaunchPad table to push to). Fetches each
+    // pending row FRESH here rather than trusting the already draft-merged
+    // in-memory item — the day-changed check below needs the row's true
+    // LIVE day_label, which this.DATA.items no longer carries once a draft
+    // is showing (see backEndRowToItem()).
+    async _acceptPendingChangesUnified() {
+        const localOnlyIds = Array.from(this.pendingSyncIds).filter(id => {
+            const it = this.DATA.items.find(x => x.id === id);
+            return it && it._localOnly;
+        });
+        const draftIds = Array.from(this.pendingSyncIds).filter(id => !localOnlyIds.includes(id));
+        const deleteIds = Array.from(this.pendingDeleteLaunchPadIds);
+        if (!localOnlyIds.length && !draftIds.length && !deleteIds.length) return;
+
+        this.setSaveIndicator('dirty', 'Publishing to Schedule...');
+        let ok = 0, fail = 0;
+
+        // 1. Pending deletes — commit the real delete now.
+        for (const launchpadId of deleteIds) {
+            const { error } = await this._supabase.from(this.LAUNCHPAD_TABLE).delete().eq('id', Number(launchpadId));
+            if (!error) { ok++; this.pendingDeleteLaunchPadIds.delete(launchpadId); }
+            else { fail++; console.error('Accept: delete failed', launchpadId, error); }
+        }
+
+        // 2. Pending edits/moves on rows that already exist live.
+        for (const id of draftIds) {
+            const item = this.DATA.items.find(it => it.id === id);
+            if (!item) { this.pendingSyncIds.delete(id); continue; }
+            const { data: rows, error: fetchErr } = await this._supabase.from(this.LAUNCHPAD_TABLE).select('*').eq('id', Number(id)).limit(1);
+            const row = rows && rows[0];
+            if (fetchErr || !row) { fail++; console.error('Accept: could not fetch row to commit', id, fetchErr); continue; }
+            if (!row.draft) { this.pendingSyncIds.delete(id); continue; } // already committed/cleared elsewhere in the meantime
+
+            const draft = row.draft;
+            if (draft.day_label && draft.day_label !== row.day_label) {
+                // Day actually changed — this is the one place
+                // move_unified_schedule_row still runs, now that the
+                // change is being committed rather than just staged.
+                const idx = await this.findFreeLaunchPadIndex(draft.day_label);
+                if (idx === null) { fail++; console.error(`Accept: no free row slot for ${draft.day_label}`); continue; }
+                const newId = this.launchPadNumericId(draft.day_label, idx);
+                const { error } = await this._supabase.rpc('move_unified_schedule_row', {
+                    p_table: this.LAUNCHPAD_TABLE, p_old_id: Number(id), p_new_id: newId, p_day_label: draft.day_label,
+                    p_activity: draft.activity || '', p_asset: draft.asset || '', p_notes: draft.notes || '',
+                    p_place: draft.place || '', p_trade_partners: draft.trade_partners || '',
+                    p_duration_hours: draft.duration_hours || 24, p_bridge_type: draft.bridge_type || '',
+                    p_area: draft.area || '', p_asset_type: draft.asset_type || '',
+                    p_predecessor_ids: JSON.stringify(draft.predecessor_ids || [])
+                });
+                if (error) { fail++; console.error('Accept (move) failed', id, error); continue; }
+                const oldIdStr = String(id);
+                item.id = String(newId);
+                item.launchpad_id = String(newId);
+                item.launchpad_day_label = draft.day_label;
+                item._pendingDraft = false;
+                // Unlike a pending edit (same row, stable id throughout),
+                // committing a move DOES churn the id — any other item's
+                // predecessor_ids pointing at the old one needs to follow.
+                for (const it of this.DATA.items) {
+                    if (it.id !== item.id && Array.isArray(it.predecessor_ids) && it.predecessor_ids.includes(oldIdStr)) {
+                        it.predecessor_ids = it.predecessor_ids.map(pid => pid === oldIdStr ? item.id : pid);
+                        await this.ItemsDB.update(it.id, { predecessor_ids: it.predecessor_ids });
+                    }
+                }
+            } else {
+                const { error } = await this._supabase.from(this.LAUNCHPAD_TABLE).update({
+                    activity: draft.activity || '', asset: draft.asset || '', notes: draft.notes || '',
+                    place: draft.place || '', trade_partners: draft.trade_partners || '',
+                    duration_hours: draft.duration_hours || 24, bridge_type: draft.bridge_type || '',
+                    area: draft.area || '', asset_type: draft.asset_type || '',
+                    predecessor_ids: draft.predecessor_ids || [], draft: null
+                }).eq('id', Number(id));
+                if (error) { fail++; console.error('Accept (same-day) failed', id, error); continue; }
+                item._pendingDraft = false;
+            }
+            ok++;
+            this.pendingSyncIds.delete(id);
+        }
+
+        // 3. Brand-new local-only items — the real insert finally happens.
+        for (const id of localOnlyIds) {
+            const item = this.DATA.items.find(it => it.id === id);
+            if (!item) { this.pendingSyncIds.delete(id); continue; }
+            const oldTempId = item.id;
+            const dayLabel = new Date(item.start_ts).toISOString().slice(0, 10);
+            const idx = await this.findFreeLaunchPadIndex(dayLabel);
+            if (idx === null) { fail++; console.error(`Accept: no free row slot for ${dayLabel}`); continue; }
+            const numericId = this.launchPadNumericId(dayLabel, idx);
+            const row = this.itemToBackEndRow(item, numericId, dayLabel);
+            const { data, error } = await this._supabase.from(this.LAUNCHPAD_TABLE).insert([row]).select();
+            if (error) { fail++; console.error('Accept (new item) failed', id, error); continue; }
+            Object.assign(item, this.backEndRowToItem(data[0]));
+            item._localOnly = false;
+            // Symmetric to the move-remap above — if any OTHER item linked
+            // to this one as a predecessor while it was still local-only
+            // (referencing its temporary uid()), point it at the new real
+            // id now that one exists.
+            for (const it of this.DATA.items) {
+                if (it.id !== item.id && Array.isArray(it.predecessor_ids) && it.predecessor_ids.includes(oldTempId)) {
+                    it.predecessor_ids = it.predecessor_ids.map(pid => pid === oldTempId ? item.id : pid);
+                    await this.ItemsDB.update(it.id, { predecessor_ids: it.predecessor_ids });
+                }
+            }
+            ok++;
+            this.pendingSyncIds.delete(id);
+        }
+
+        this.savePendingSyncState();
+        this.updatePendingSyncUI();
+        this.setSaveIndicator('ready', 'Ready');
+        this.renderFilterBar();
+        this.renderGantt();
+        this.toast(`Published ${ok} change${ok === 1 ? '' : 's'} to Schedule${fail ? ` — ${fail} failed, still pending, see console` : '.'}`, 7000);
+    }
+
+    // Unified-project counterpart to discardPendingChanges() above.
+    async _discardPendingChangesUnified(total) {
+        if (!confirm(`Discard ${total} unaccepted change${total === 1 ? '' : 's'}? Bridge will revert back to whatever Schedule currently shows. This cannot be undone.`)) return;
+        this.setSaveIndicator('dirty', 'Discarding...');
+
+        for (const id of Array.from(this.pendingSyncIds)) {
+            const item = this.DATA.items.find(it => it.id === id);
+            if (!item) { this.pendingSyncIds.delete(id); continue; }
+            if (item._localOnly) {
+                // Never left this browser — discarding it just means not
+                // creating it.
+                this.DATA.items = this.DATA.items.filter(it => it.id !== id);
+            } else {
+                const { error } = await this._supabase.from(this.LAUNCHPAD_TABLE).update({ draft: null }).eq('id', Number(id));
+                if (!error) {
+                    const { data } = await this._supabase.from(this.LAUNCHPAD_TABLE).select('*').eq('id', Number(id)).maybeSingle();
+                    if (data) Object.assign(item, this.backEndRowToItem(data));
+                } else {
+                    console.error('Discard: failed to clear draft', id, error);
+                }
+            }
+            this.pendingSyncIds.delete(id);
+        }
+
+        for (const launchpadId of Array.from(this.pendingDeleteLaunchPadIds)) {
+            const { error } = await this._supabase.from(this.LAUNCHPAD_TABLE).update({ draft_deleted: false }).eq('id', Number(launchpadId));
+            if (!error) {
+                const { data } = await this._supabase.from(this.LAUNCHPAD_TABLE).select('*').eq('id', Number(launchpadId)).maybeSingle();
+                if (data && !this.DATA.items.some(it => it.id === String(launchpadId))) {
+                    this.DATA.items.push(this.backEndRowToItem(data));
+                }
+                this.pendingDeleteLaunchPadIds.delete(launchpadId);
+            } else {
+                console.error('Discard: failed to restore', launchpadId, error);
+            }
         }
 
         this.savePendingSyncState();
