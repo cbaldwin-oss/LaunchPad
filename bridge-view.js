@@ -694,9 +694,24 @@ input,select,textarea{font-family:inherit;}
    a class toggled on the host once the role is known — see
    _setupViewerRoleGating(). */
 :host(.viewer-role-lockdown) #add-menu-wrap{display:none !important;}
+:host(.viewer-role-lockdown) #editModeToggleBtn{display:none !important;} /* viewers are already permanently locked — nothing for this toggle to do */
 :host(.viewer-role-lockdown) .gantt-item{cursor:default !important;}
 :host(.viewer-role-lockdown) .resize-handle,
 :host(.viewer-role-lockdown) .link-handle{display:none !important;}
+
+/* ===== EDIT LOCK =====
+   Editors start locked on every fresh load too — see requireEditMode()/
+   toggleEditMode(). Items stay clickable (viewing is still allowed; the
+   actual drag/resize/connect entry points are gated in JS, not here), but
+   look and behave non-interactive: no grab cursor, no resize/connect
+   handles to grab in the first place. */
+:host(.edit-locked) .gantt-item{cursor:default !important;}
+:host(.edit-locked) .resize-handle,
+:host(.edit-locked) .link-handle{display:none !important;}
+#itemModal.readonly-locked .pred-chip-list button{display:none !important;}
+#itemModal.readonly-locked input:disabled,
+#itemModal.readonly-locked select:disabled,
+#itemModal.readonly-locked textarea:disabled{background:var(--grey-bg); color:#888; cursor:not-allowed;}
 </style>
 `;
 
@@ -727,12 +742,13 @@ const MARKUP = `
         <span class="count">0</span> selected — drag one to move them together
         <button class="preview-remove" onclick="this.getRootNode().host.clearMultiSelect()" title="Clear selection" style="color:var(--green-dark);">✕</button>
     </span>
+    <button class="tool-btn" id="editModeToggleBtn" onclick="this.getRootNode().host.toggleEditMode()" title="Bridge starts locked every time it loads — nothing can be dragged, resized, connected, added, or deleted until this is on.">🔒 Edit</button>
     <div class="menu-btn-wrap" id="add-menu-wrap">
-        <button class="tool-btn" onclick="this.getRootNode().host.toggleMenu('addMenu', event)">➕ Add ▾</button>
+        <button class="tool-btn" onclick="if(this.getRootNode().host.requireEditMode()) this.getRootNode().host.toggleMenu('addMenu', event)">➕ Add ▾</button>
         <div class="menu-dropdown right" id="addMenu">
             <div class="menu-item" id="newItemMenuBtn" onclick="this.getRootNode().host.closeAllMenus(); this.getRootNode().host.openModal('itemModal')">➕ New Item</div>
             <div class="menu-item" onclick="this.getRootNode().host.closeAllMenus(); this.getRootNode().host.openBulkAddModal()">📋 Bulk Add</div>
-            <div class="menu-item" onclick="this.getRootNode().host.closeAllMenus(); this.getRootNode().host.openModal('baselineModal')">📐 Import Baseline</div>
+            <div class="menu-item" onclick="this.getRootNode().host.closeAllMenus(); if(this.getRootNode().host.requireEditMode()) this.getRootNode().host.openModal('baselineModal')">📐 Import Baseline</div>
         </div>
     </div>
     <span id="saveIndicator">Ready</span>
@@ -839,7 +855,7 @@ const MARKUP = `
             <button class="tool-btn" id="itemDeleteBtn" style="border-color:var(--red); color:var(--red); display:none;" onclick="this.getRootNode().host.deleteCurrentItem()">Delete</button>
             <div style="flex:1;"></div>
             <button class="tool-btn" onclick="this.getRootNode().host.closeModal('itemModal')">Cancel</button>
-            <button class="tool-btn primary" onclick="this.getRootNode().host.saveItemModal()">Save Item</button>
+            <button class="tool-btn primary" id="itemSaveBtn" onclick="this.getRootNode().host.saveItemModal()">Save Item</button>
         </div>
     </div>
 </div>
@@ -1188,6 +1204,12 @@ export class BridgeView extends HTMLElement {
         // if they hadn't been accepted yet.
         this.pendingSyncIds = new Set();
         this.pendingDeleteLaunchPadIds = new Set();
+        // Locked by default on every fresh load (not persisted — a
+        // deliberate per-session unlock, not a lasting preference) so a
+        // stray click or drag can't move/resize/connect/create/delete
+        // anything until someone explicitly turns editing on via the
+        // toolbar's 🔒 Edit button. See requireEditMode()/toggleEditMode().
+        this.editModeActive = false;
         this.STATUS_CACHE = {}; // "asset|||activity" -> { result, url } | 'pending' | 'error'
         this.RESULT_CACHE = {}; // launchpad_id -> result string | null, cached so repeated lookups (e.g. across several predecessors) don't re-fetch
         this.statusRefreshInFlight = false;
@@ -1760,6 +1782,67 @@ export class BridgeView extends HTMLElement {
         }
     }
 
+    /* ---------- 1b. EDIT LOCK ----------
+       Separate from viewer-role gating above (that's a fixed, permanent
+       lockout for the "viewer" role; this is a per-session toggle for
+       editors — everyone starts locked on every fresh load, and has to
+       deliberately click 🔒 Edit before anything can be dragged, resized,
+       connected, added, or deleted). Rather than a parallel document-level
+       capture-phase interceptor, this guards the handful of actual mutation
+       entry points directly (startDrag(), the connect-drag pointerdown in
+       attachLinkHandlers(), saveItemModal(), deleteItemById(),
+       commitBulkAdd(), and the Add-menu open) — simpler to reason about
+       than trying to keep a separate selector list in sync with every
+       editable surface, and it composes cleanly with the existing viewer
+       lockdown (a viewer is already blocked upstream by that mechanism, so
+       requireEditMode() below defers to it rather than duplicating it). */
+    requireEditMode() {
+        if (this.isViewerRole) return false; // _setupViewerRoleGating() already intercepted this and showed its own upsell
+        if (!this.editModeActive) {
+            this.toast('Click 🔒 Edit to turn on editing before making changes.', 3000);
+            return false;
+        }
+        return true;
+    }
+    toggleEditMode() {
+        this.editModeActive = !this.editModeActive;
+        this.updateEditModeUI();
+        this.toast(this.editModeActive
+            ? 'Edit mode on — activities can now be dragged, resized, connected, added, and deleted.'
+            : 'Edit mode off — activities are locked from accidental changes.', 3200);
+    }
+    updateEditModeUI() {
+        const btn = this.$('editModeToggleBtn');
+        if (btn) {
+            btn.classList.toggle('primary', this.editModeActive);
+            btn.textContent = this.editModeActive ? '🔓 Editing' : '🔒 Edit';
+        }
+        this.classList.toggle('edit-locked', !this.isViewerRole && !this.editModeActive);
+        // Re-apply to whichever item modal is currently open (if any) so
+        // toggling mid-edit immediately enables/disables its fields —
+        // harmless no-op if the modal isn't open.
+        this.applyItemModalLockState();
+    }
+    // Called from editItem() every time the modal opens, and from
+    // updateEditModeUI() so flipping the toggle while it's already open
+    // takes effect immediately. Viewing an item's details while locked is
+    // still allowed (that's why editItem() itself isn't gated by
+    // requireEditMode() — only the actual mutation actions are); this is
+    // what makes that view read-only rather than silently no-op'ing on Save.
+    applyItemModalLockState() {
+        const modal = this.$('itemModal');
+        if (!modal) return;
+        const locked = !this.isViewerRole && !this.editModeActive;
+        modal.classList.toggle('readonly-locked', locked);
+        modal.querySelectorAll('.modal-body input, .modal-body select, .modal-body textarea').forEach(el => { el.disabled = locked; });
+        const saveBtn = this.$('itemSaveBtn');
+        if (saveBtn) saveBtn.disabled = locked;
+        if (locked) {
+            const delBtn = this.$('itemDeleteBtn');
+            if (delBtn) delBtn.style.display = 'none';
+        }
+    }
+
 
     /* ---------- 2. DATA LAYER ---------- */
     /* Every function below transparently uses Supabase when configured,
@@ -1900,6 +1983,7 @@ export class BridgeView extends HTMLElement {
         await this.fetchAssetLookupMaps();
         this.loadPendingSyncState();
         this.updatePendingSyncUI();
+        this.updateEditModeUI(); // sets the 🔒 Edit button's initial label and applies the locked cursor/handle CSS
         this.initTimelineRangeInputs();
         this.buildTypePicker('itemTypePicker');
         this.buildTypePicker('bulkTypePicker');
@@ -3026,6 +3110,7 @@ export class BridgeView extends HTMLElement {
         root.querySelectorAll('.link-handle').forEach(handle => {
             handle.addEventListener('pointerdown', (e) => {
                 e.preventDefault(); e.stopPropagation();
+                if (!this.requireEditMode()) return;
                 const sourceId = handle.dataset.id;
                 const svg = this.$('connectionsSvg');
                 const bodyEl = this.$('ganttBody');
@@ -3553,6 +3638,7 @@ export class BridgeView extends HTMLElement {
 
     startDrag(e, el, mode) {
         e.preventDefault();
+        if (!this.requireEditMode()) return;
         const id = el.dataset.id;
         const item = this.DATA.items.find(i => i.id === id);
         if (!item) return;
@@ -3798,6 +3884,10 @@ export class BridgeView extends HTMLElement {
         this.currentItemPredecessors = (it.predecessor_ids || []).slice();
         this.renderPredChips();
         this.openModal('itemModal');
+        // Viewing is always allowed, even locked — this is what makes that
+        // read-only instead: disables the fields/Save/Delete rather than
+        // blocking the click that got here in the first place.
+        this.applyItemModalLockState();
     }
 
     toLocalInputValue(d) {
@@ -3806,6 +3896,7 @@ export class BridgeView extends HTMLElement {
     }
 
     async deleteItemById(id) {
+        if (!this.requireEditMode()) return;
         if (!confirm('Delete this schedule item?')) return;
         const item = this.DATA.items.find(i => i.id === id);
         await this.ItemsDB.remove(id);
@@ -3882,6 +3973,7 @@ export class BridgeView extends HTMLElement {
     }
 
     async saveItemModal() {
+        if (!this.requireEditMode()) return;
         const id = this.$('itemId').value;
         const assetName = this.$('itemAsset').value.trim();
         const activityName = this.$('itemActivity').value.trim();
@@ -3993,6 +4085,7 @@ export class BridgeView extends HTMLElement {
        ========================================================================= */
 
     openBulkAddModal() {
+        if (!this.requireEditMode()) return;
         this.$('bulkStep1').style.display = 'block';
         this.$('bulkStep2').style.display = 'none';
         this.$('bulkCommitBtn').style.display = 'none';
@@ -4257,6 +4350,7 @@ export class BridgeView extends HTMLElement {
     }
 
     async commitBulkAdd() {
+        if (!this.requireEditMode()) return;
         this.setSaveIndicator('dirty', 'Saving...');
         const insertedIds = [];
         for (const r of this.bulkPreviewRows) {
