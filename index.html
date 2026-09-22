@@ -5401,6 +5401,27 @@ function stringToColor(str) {
     return "#" + "00000".substring(0, 6 - c.length) + c;
 }
 
+// Shared by the realtime DELETE handler and applyScheduleDataToDom()'s
+// reconciliation pass below — both need to reset a row back to its
+// empty/unoccupied look when the item it held is gone server-side.
+function clearRowElement(rowEl) {
+    rowEl.removeAttribute('data-occupied');
+    rowEl.querySelectorAll('input, select, textarea, .status-cell').forEach(el => {
+        if (el.classList.contains('status-cell')) {
+            el.innerText = "...";
+        } else {
+            el.value = "";
+            if (el.hasAttribute('data-selected')) {
+                el.setAttribute('data-selected', '');
+                if (el.options && el.options[0]) {
+                    el.options[0].text = "+ Add Multi";
+                }
+            }
+        }
+        applyCellColor(el, "");
+    });
+}
+
 function initRealtimeSync() {
     // 1. MASTER SCHEDULE SYNC
     _supabase
@@ -5417,24 +5438,7 @@ function initRealtimeSync() {
                 // Handle real-time deletion
                 const rowId = payload.old.id;
                 const rowEl = document.getElementById(`row-wrapper-${rowId}`);
-                if (rowEl) {
-                    rowEl.removeAttribute('data-occupied');
-                    rowEl.querySelectorAll('input, select, textarea, .status-cell').forEach(el => {
-                        if (el.classList.contains('status-cell')) {
-                            el.innerText = "...";
-                        } else {
-                            el.value = "";
-                            // NEW: Clear the multi-select attributes here too
-                            if (el.hasAttribute('data-selected')) {
-                                el.setAttribute('data-selected', '');
-                                if (el.options && el.options[0]) {
-                                    el.options[0].text = "+ Add Multi";
-                                }
-                            }
-                        }
-                        applyCellColor(el, "");
-                    });
-                }
+                if (rowEl) clearRowElement(rowEl);
             }
         })
         .subscribe();
@@ -9070,6 +9074,7 @@ let __lastScheduleData = null;
 
 function applyScheduleDataToDom(data) {
     if (!data) return;
+    const liveIds = new Set(data.map(row => String(row.id)));
     data.forEach(row => {
         if (deletingRows.has(row.id)) return;
 
@@ -9119,6 +9124,20 @@ function applyScheduleDataToDom(data) {
                 applyCellColor(el, content);
             }
         }
+    });
+
+    // Reconcile: data is always a full-table fetch (or a cached copy of
+    // one), so any row still marked occupied in the DOM that ISN'T in it
+    // anymore was moved/deleted server-side. The loop above only ever
+    // adds/updates rows present in `data` — nothing else in the app ever
+    // clears a row that fell out of it, so a missed/late realtime DELETE
+    // (backgrounded tab, brief reconnect, event ordering) used to require
+    // a full hard page reload to notice. This makes every call here
+    // self-healing instead.
+    document.querySelectorAll('.cell-row[data-occupied="true"]').forEach(rowEl => {
+        const idStr = rowEl.id.replace('row-wrapper-', '');
+        if (deletingRows.has(parseInt(idStr, 10))) return;
+        if (!liveIds.has(idStr)) clearRowElement(rowEl);
     });
 }
 
