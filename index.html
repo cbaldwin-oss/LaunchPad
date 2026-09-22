@@ -5495,6 +5495,12 @@ function updateRowInUI(row) {
         // below) — extend rendering just far enough to cover it, then retry
         // once, instead of silently dropping a real-time update on the floor.
         if (!ensureWeekRenderedForDayLabel(row.day_label)) return;
+        // The day's container might already exist but only have its
+        // default first 20 slots built — Bridge can assign a row to any
+        // slot up to index 98 (see findFreeLaunchPadIndex() in
+        // bridge-view.js), so a busy day can easily need slots Scheduler
+        // never auto-built. Extends just far enough to cover this one row.
+        ensureRowSlotExists(document.getElementById(`rows-${row.day_label}`), row.day_label, row.id);
         rowEl = document.getElementById(`row-wrapper-${row.id}`);
         if (!rowEl) return;
     }
@@ -6957,6 +6963,34 @@ function createAddRowsButton(rowsDiv, dayLabel) {
         }
     };
     return addBtn;
+}
+
+// A day's rows-container only ever auto-builds its first 20 slots
+// (addRowsToContainer's default count below) — the rest exist only once
+// someone clicks "+ Add 5 Rows" on that specific day. Bridge, though,
+// allocates slots up to index 98 per day (see findFreeLaunchPadIndex() in
+// bridge-view.js), so any day that already has 20+ activities on it can
+// easily get a new/moved item assigned a slot past what Scheduler has
+// ever built — silently invisible here, in BOTH the realtime path
+// (updateRowInUI) and the full-reload path (applyScheduleDataToDom),
+// since both just do `document.getElementById('row-wrapper-'+row.id)` and
+// give up if it's not there yet. This is what "accepted in Bridge, but
+// the move doesn't show in Scheduler, even after a reload" turned out to
+// be for a busy day. Extends the container just far enough to cover the
+// slot a specific row id needs, mirroring exactly what the "+ Add 5 Rows"
+// button already does by hand.
+function ensureRowSlotExists(rowsDiv, dayLabel, rowId) {
+    if (!rowsDiv || document.getElementById(`row-wrapper-${rowId}`)) return;
+    const dayNum = parseInt(String(dayLabel).replace(/-/g, ''), 10) * 100;
+    const neededIdx = rowId - dayNum;
+    if (!Number.isFinite(neededIdx) || neededIdx < 0 || neededIdx > 98) return; // not a real day-slot id — nothing sane to build
+    const currentCount = rowsDiv.querySelectorAll('.cell-row').length;
+    if (neededIdx < currentCount) return; // slot should already exist; nothing to do
+    addRowsToContainer(rowsDiv, dayLabel, null, currentCount, neededIdx - currentCount + 1);
+    // Keep "+ Add 5 Rows" at the bottom, below the slots just added —
+    // same fix-up createAddRowsButton()'s own click handler already does.
+    const addBtn = rowsDiv.querySelector('.add-rows-btn');
+    if (addBtn) rowsDiv.appendChild(addBtn);
 }
 
 function addRowsToContainer(container, dayLabel, anchorBtn = null, startIdx = 0, count = 20) {
@@ -9045,8 +9079,9 @@ function applyScheduleDataToDom(data) {
         }
         if (rowsDiv && rowsDiv.innerHTML === '') {
             const addBtn = createAddRowsButton(rowsDiv, row.day_label);
-            addRowsToContainer(rowsDiv, row.day_label, addBtn); 
+            addRowsToContainer(rowsDiv, row.day_label, addBtn);
         }
+        ensureRowSlotExists(rowsDiv, row.day_label, row.id);
 
         const wrapper = document.getElementById(`row-wrapper-${row.id}`);
         if (wrapper) {
