@@ -1742,19 +1742,25 @@ export class EquipmentTrackerView extends HTMLElement {
             showL4Gate: this.$('show-l4-gate').checked,
             showL2Supp: this.$('show-l2-supp').checked,
             showL3Supp: this.$('show-l3-supp').checked,
-            showL4Supp: this.$('show-l4-supp').checked
+            showL4Supp: this.$('show-l4-supp').checked,
+            // Phase Rules stay Google-Sheets-backed by request. They ride
+            // along in this SAME request (as payload.phaseRules, an array
+            // of objects) rather than a separate 'setPhaseRulesOnly' call —
+            // Apps Script's doPost has no action by that name; it only
+            // recognizes an untagged request and reads payload.phaseRules
+            // straight off it, alongside every other setting below.
+            phaseRules: newPhaseRules
         };
 
         try {
-            // Phase Rules stay Google-Sheets-backed by request, so they're
-            // saved through their own dedicated Apps Script action (only
-            // touches the "Phase Rules" sheet) instead of going into the
-            // Supabase config blob with everything else.
             const [sheetResp, supabaseResult] = await Promise.all([
                 fetch(this.API_URL, {
                     method: 'POST',
-                    body: JSON.stringify({ action: 'setPhaseRulesOnly', phaseRules: newPhaseRules })
+                    body: JSON.stringify(payload)
                 }),
+                // Supabase gets everything except phaseRules (that field is
+                // harmless if present, but fetchTrackerConfig() never reads
+                // it — the Sheet stays the source of truth for rules).
                 this._supabase.from('launchpad_equipment_tracker_config').upsert({
                     project_key: this.PROJECT_KEY,
                     config: payload,
@@ -1767,7 +1773,7 @@ export class EquipmentTrackerView extends HTMLElement {
             if (supabaseResult.error) throw supabaseResult.error;
             let sheetJson = null;
             try { sheetJson = await sheetResp.json(); } catch (e) { /* non-JSON/opaque response, ignore */ }
-            if (sheetJson && sheetJson.success === false) throw new Error(sheetJson.error || 'Phase Rules save failed');
+            if (sheetJson && sheetJson.success === false) throw new Error(sheetJson.error || 'Settings save failed');
             window.location.reload();
         } catch (e) {
             console.error("Save failed", e); alert("Failed to save settings.");
