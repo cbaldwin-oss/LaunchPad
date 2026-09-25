@@ -10,8 +10,41 @@ export class CriticalArcDashboard {
     this.EQ_FILTER = { bldg: 'All', floor: 'All' };
     this.EQ_SEARCH = { q: '', incompleteOnly: true };
     this.ISS_THRESH = 30;
-    this.COMPLETE_STATUSES = ['Finished'];
     this.REFRESH_ENDPOINT = null;
+
+    // ─── Data source ──────────────────────────────────────────────────────
+    // Reads the cx_* serving tables in the SAME Supabase project LaunchPad
+    // signs into. That is not a preference: RLS grants select to the
+    // `authenticated` role, and a user only holds that role on the project
+    // whose auth issued their JWT. Pointed at any other project this returns
+    // ZERO ROWS rather than an error -- which is why every failure path below
+    // renders an explicit message instead of an empty tab.
+    this.PAGE_SIZE = 1000;   // PostgREST's default max rows per request
+
+    // ─── Vocabulary ───────────────────────────────────────────────────────
+    // COMPLETE_STATUSES used to be ['Finished']. That string occurs in
+    // NEITHER SAN project -- their verified statuses are 'Verified',
+    // 'Checklist Complete' and 'Verified - Not Included in Sampling', so the
+    // comparison returned false for every row and the tab read 0%.
+    // `is_verified` is resolved per project in dbt against a seeded
+    // vocabulary, so it is correct for every client without a list here.
+    // Do not reintroduce a hardcoded status list.
+    this.isComplete = (c) => c.is_verified === true;
+
+    // Tests are the ONE vocabulary still unresolved (GOLD-DESIGN Q5): whether
+    // 'Partially Passed (Test to be Repeated)' counts as a pass, and whether
+    // 'Voided' / 'Deferred to 1B' leave the denominator, is the commissioning
+    // engineer's call and not the pipeline's. Until it is answered these stay
+    // as observed: 'Passed' is real and correct for 18604; 'Failed' occurs in
+    // no SAN project at all. SAN-NT1B (49639) will legitimately read zero
+    // passed, because it has zero passes.
+    this.TEST_PASS_STATUSES = ['Passed'];
+    this.TEST_FAIL_STATUSES = ['Failed'];
+
+    // Issue statuses ARE the one list that already matched the data -- kept
+    // only to ORDER the filter, which falls back to whatever the data holds.
+    this.ISSUE_STATUS_ORDER = ['Open', 'In Progress', 'Pending Review', 'Closed'];
+    this.ISSUE_OPEN_STATUSES = ['Open', 'In Progress'];
     
     // Theme Constants
     this.FONT = 'Barlow, sans-serif';
@@ -345,57 +378,226 @@ export class CriticalArcDashboard {
     
     this.buildCheckGroup('ca-fDiscipline', disciplines);
     this.buildCheckGroup('ca-fContractor', contractors);
-    this.buildCheckGroup('ca-fStatus', ['Open','In Progress','Pending Review','Closed']);
+    this.buildCheckGroup('ca-fStatus', this.orderVals(d.issues.map(i => i.status), this.ISSUE_STATUS_ORDER));
     this.buildCheckGroup('ca-fPhase', phases);
+  }
+
+  // Distinct values from the data, with any known ones first in a sensible
+  // order and anything unrecognised appended alphabetically. Every list on
+  // this page is built this way now: a hardcoded vocabulary that misses shows
+  // an empty chart rather than an error, and every hardcoded list in this
+  // file except the issue statuses turned out to be wrong for SAN.
+  orderVals(values, preferred) {
+    const present = this.uniq(values).filter(v => !this.isBad(v));
+    const known = (preferred || []).filter(v => present.includes(v));
+    const rest = present.filter(v => !known.includes(v)).sort();
+    return [...known, ...rest];
+  }
+
+  // Deterministic colour for a value the theme has no opinion about, so a
+  // level or status keeps the same colour between renders.
+  autoColor(key, i) {
+    const palette = ['#7F77DD','#1D9E75','#5DCAA5','#85B7EB','#E0894A','#C77DBB','#4A90D9','#9AA43C'];
+    if (typeof i === 'number') return palette[i % palette.length];
+    let h = 0;
+    for (const ch of String(key)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    return palette[h % palette.length];
+  }
+
+  // ─── 1b. DATA ACCESS ────────────────────────────────────────────────────
+
+  // Says WHY there is nothing to draw. An empty dashboard and a
+  // misconfigured one look identical otherwise -- an unauthorised PostgREST
+  // read returns zero rows, not an error -- so every path that ends without
+  // data comes through here and names its own cause.
+  status(html) {
+    const el = this.q('ca-loading');
+    el.style.display = 'block';
+    el.innerHTML = html;
+    this.q('ca-dash').style.display = 'none';
+  }
+
+  // Prefers the client the page already built, so there is one session and
+  // one token-refresh loop. index.html creates `_supabase` as a script-scoped
+  // const, which a module cannot see, so adding
+  //     window._supabase = _supabase;
+  // beside that line is the tidy fix. Without it we build a second client:
+  // supabase-js reads the stored session from localStorage under the same
+  // key, so it is authenticated too, but autoRefreshToken is off to avoid two
+  // clients racing to refresh the same token.
+  client() {
+    if (this._sb) return this._sb;
+    if (window._supabase) { this._sb = window._supabase; return this._sb; }
+
+    const lib = window.supabase;
+    if (!lib || !lib.createClient) {
+      throw new Error('supabase-js is not loaded on this page.');
+    }
+    const url = window.SUPABASE_URL || this.SUPABASE_URL;
+    const key = window.SUPABASE_KEY || this.SUPABASE_ANON_KEY;
+    if (!url || !key) {
+      throw new Error(
+        'No Supabase client available. Add `window._supabase = _supabase;` ' +
+        'beside the createClient call in index.html.');
+    }
+    console.warn('[dashboard] Building a second Supabase client. Set ' +
+                 'window._supabase in index.html to avoid this.');
+    this._sb = lib.createClient(url, key, {
+      auth: { persistSession: true, autoRefreshToken: false },
+    });
+    return this._sb;
+  }
+
+  // PostgREST caps a response at 1000 rows and says nothing when it truncates.
+  // SAN-NT1B has 1,304 checklists and Phase 1A has 8,194, so an unpaged read
+  // would silently drop most of them and every percentage on the page would be
+  // computed off a partial set -- wrong, and wrong quietly. Always page.
+  async fetchAll(table, columns, tenant, projectId) {
+    const sb = this.client();
+    const out = [];
+    for (let from = 0; ; from += this.PAGE_SIZE) {
+      const { data, error } = await sb
+        .from(table)
+        .select(columns)
+        .eq('tenant', tenant)
+        .eq('project_id', projectId)
+        .range(from, from + this.PAGE_SIZE - 1);
+      if (error) throw new Error(`${table}: ${error.message}`);
+      out.push(...data);
+      if (data.length < this.PAGE_SIZE) return out;
+    }
   }
 
   async init() {
     try {
-      const resp = await fetch('shared-dashboard/html-dashboard/data/projects.json');
-      const projects = await resp.json();
+      // The dropdown is gone. Which project this shows is decided by
+      // LaunchPad, not by the dashboard -- LP_CONFIG.projectKey is whatever
+      // the user picked at the project picker.
       const sel = this.q('ca-projectSelect');
-      sel.innerHTML = projects.map(p => `<option value="${p.project_id}">${p.name}</option>`).join('');
-      sel.onchange = () => { this.STATE.project = sel.value; this.loadProject(sel.value); };
-
-      // Every project export we've seen so far (see projects.json) contains
-      // exactly one entry — project_id here is CxAlloy's own numeric ID
-      // (e.g. "50506"), unrelated to LaunchPad's project_key (e.g. "PHXA7"),
-      // so we can't match them directly. When there's only one project to
-      // choose from anyway, just pick it and hide the now-redundant
-      // dropdown. Safely falls back to the original behavior if a
-      // deployment ever legitimately has more than one.
-      if (projects.length === 1) {
-        this.STATE.project = projects[0].project_id;
-        sel.value = projects[0].project_id;
+      if (sel) {
         const wrapper = sel.closest('div') || sel.parentElement;
         if (wrapper) wrapper.style.display = 'none';
-      } else {
-        this.STATE.project = projects[0].project_id;
       }
 
-      await this.loadProject(this.STATE.project);
+      const projectKey = window.LP_CONFIG && window.LP_CONFIG.projectKey;
+      if (!projectKey) {
+        this.status('Waiting for a project to be selected…');
+        return;
+      }
+
+      const sb = this.client();
+
+      // Zero rows is the failure mode this whole block exists to prevent, so
+      // check the session explicitly before blaming the data.
+      const { data: { session } } = await sb.auth.getSession();
+      if (!session) {
+        this.status('Not signed in. Reload the page and sign in to view this dashboard.');
+        return;
+      }
+
+      // project_key -> (tenant, CxAlloy project id). Hand-maintained on
+      // purpose: nothing derives a CxAlloy id from a LaunchPad key, and
+      // guessing it wrong shows one phase's data under another phase's name,
+      // confidently. SANNT1B is Phase 1B (49639), not Phase 1A (18604).
+      const { data: map, error: mapErr } = await sb
+        .from('cx_project_map')
+        .select('tenant, cxalloy_project_id, project_name, enabled')
+        .eq('project_key', projectKey)
+        .maybeSingle();
+
+      if (mapErr) throw new Error(`cx_project_map: ${mapErr.message}`);
+      if (!map) {
+        this.status(`No CxAlloy data is configured for project <b>${projectKey}</b>.` +
+                    `<div style="margin-top:8px;font-size:13px;">` +
+                    `Add a row to <code>cx_project_map</code> to connect it.</div>`);
+        return;
+      }
+      if (map.enabled === false) {
+        this.status(`CxAlloy data for <b>${projectKey}</b> is disabled in ` +
+                    `<code>cx_project_map</code>.`);
+        return;
+      }
+
+      this.STATE.mapping = map;
+      this.STATE.project = map.cxalloy_project_id;
+      await this.loadProject(map.cxalloy_project_id);
     } catch (e) {
-      this.q('ca-loading').textContent = 'Error: ' + e.message; 
+      this.status('Error: ' + e.message);
       console.error(e);
     }
   }
 
   async loadProject(pid) {
-    this.q('ca-loading').style.display = 'block';
-    this.q('ca-dash').style.display = 'none';
-    
-    const resp = await fetch(`shared-dashboard/html-dashboard/data/project_${pid}.json`);
-    this.STATE.data = await resp.json();
-    this.STATE.eqPhase = new Map(this.STATE.data.equipment.map(e => [String(e.equipment_id), e.building_phase]));
-    this.STATE.filters = { discipline: [], contractor: [], status: [], phase: [] };
-    this.EQ_FILTER = { bldg: 'All', floor: 'All' };
-    
-    this.rebuildFilterOptions();
-    this.renderAll();
-    
-    this.q('ca-loading').style.display = 'none';
-    this.q('ca-dash').style.display = 'block';
-    window.dispatchEvent(new Event('resize'));
+    const map = this.STATE.mapping;
+    if (!map) return this.init();
+
+    this.status('Loading data…');
+    const tenant = map.tenant;
+
+    try {
+      const [equipment, checklists, issuesRaw, tests, companies, watermarks] =
+        await Promise.all([
+          this.fetchAll('cx_equipment',
+            'equipment_id,name,type,discipline,status,space,building_phase,floor_parsed',
+            tenant, pid),
+          this.fetchAll('cx_checklists',
+            'asset_key,assigned_company,assigned_type,discipline,level,status,type_name,is_verified',
+            tenant, pid),
+          this.fetchAll('cx_issues',
+            'name,description,status,priority,discipline,assigned_company,assigned_name,' +
+            'aging_category,days_open,date_created,in_progress_at,date_closed,asset_key',
+            tenant, pid),
+          this.fetchAll('cx_tests',
+            'name,status,assigned_company,assigned_name,discipline,attempt_count,' +
+            'asset_key,asset_name',
+            tenant, pid),
+          this.fetchAll('cx_companies', 'name', tenant, pid),
+          this.fetchAll('cx_sync_watermark', 'table_name,synced_at,row_count', tenant, pid),
+        ]);
+
+      // The serving table calls this in_progress_at; the renderer has always
+      // called it in_progress_date. Renamed here rather than in either, so
+      // neither side has to know about the other.
+      const issues = issuesRaw.map(i => ({ ...i, in_progress_date: i.in_progress_at }));
+
+      // "Data as of" comes from the sync watermark and NEVER the browser
+      // clock: a page opened now against a copy last written on Tuesday has
+      // to read Tuesday. Oldest table wins -- that is the real freshness.
+      const syncedAt = watermarks.length
+        ? watermarks.map(w => w.synced_at).sort()[0]
+        : null;
+
+      this.STATE.data = {
+        project_id: pid,
+        project_name: map.project_name,
+        data_synced_at: syncedAt,
+        equipment, checklists, issues, tests, companies,
+      };
+
+      // A mapping that resolves to nothing published is not the same as a
+      // project with no data, and must not render as an empty page.
+      const totalRows = equipment.length + checklists.length + issues.length + tests.length;
+      if (!totalRows) {
+        this.status(`<b>${map.project_name}</b> is mapped but nothing has been published yet.` +
+                    `<div style="margin-top:8px;font-size:13px;">` +
+                    `The sync job may not have run for this project.</div>`);
+        return;
+      }
+
+      this.STATE.eqPhase = new Map(equipment.map(e => [String(e.equipment_id), e.building_phase]));
+      this.STATE.filters = { discipline: [], contractor: [], status: [], phase: [] };
+      this.EQ_FILTER = { bldg: 'All', floor: 'All' };
+
+      this.rebuildFilterOptions();
+      this.renderAll();
+
+      this.q('ca-loading').style.display = 'none';
+      this.q('ca-dash').style.display = 'block';
+      window.dispatchEvent(new Event('resize'));
+    } catch (e) {
+      this.status('Error loading data: ' + e.message);
+      console.error(e);
+    }
   }
 
   renderAll() {
@@ -581,9 +783,13 @@ export class CriticalArcDashboard {
     const root = this.q('ca-tab-checklists');
     if (!cl.length) { root.innerHTML = `<div class="ca-empty">No checklist data available.</div>`; return; }
 
-    const levelsOrdered = ['L2','L3','L4','FAT'];
-    const levelVals = new Set(cl.map(c => c.level));
-    const active = levelsOrdered.filter(lv => levelVals.has(lv));
+    // Levels come from the data. The old hardcoded ['L2','L3','L4','FAT']
+    // matches NOTHING in either SAN project -- theirs read Pre-Functional,
+    // Closeout, Documentation Review and Other -- so `active` came back empty
+    // and this whole tab rendered as four missing donuts. Known names are
+    // ordered first purely for display; anything else is appended.
+    const active = this.orderVals(cl.map(c => c.level),
+      ['L2','L3','L4','FAT','Pre-Functional','Functional','Documentation Review','Closeout']);
 
     let html = this.section('Checklist Status by Level') +
       `<div class="ca-kpi-row" style="grid-template-columns:repeat(${active.length},minmax(0,1fr))">` +
@@ -595,15 +801,24 @@ export class CriticalArcDashboard {
     html += '<div id="ca-cl-pending"></div>';
     root.innerHTML = html;
 
+    // Both maps were keyed on vocabularies that do not occur in SAN, so every
+    // slice fell through to the border grey. The donut now colours by whether
+    // a status is VERIFIED rather than by its spelling -- green for verified
+    // whatever it is called, a stable colour otherwise -- which is the only
+    // version that works for a client whose statuses nobody has seen yet.
+    const verifiedStatuses = new Set(cl.filter(c => this.isComplete(c)).map(c => c.status));
     const dcStatusColors = { 'Not Started':'#8A8F98','In Progress':'#F5A623','GC to Verify':'#4A90D9','Finished':'#39B54A' };
+    const statusColor = (s) => dcStatusColors[s] || (verifiedStatuses.has(s) ? this.C.green : this.autoColor(s));
+
     const levelColors = { L2:'#7F77DD', L3:'#1D9E75', L4:'#5DCAA5', FAT:'#85B7EB' };
+    active.forEach((lv, i) => { if (!levelColors[lv]) levelColors[lv] = this.autoColor(lv, i); });
 
     active.forEach((lv, i) => {
       const sub = cl.filter(c => c.level === lv);
       const sc = this.groupSize(sub, 'status');
       this.plot(`ca-cl-donut-${i}`, [{
         type: 'pie', hole: 0.65, labels: sc.map(d => d.key), values: sc.map(d => d.count),
-        marker: { colors: sc.map(d => dcStatusColors[d.key] || this.C.border) },
+        marker: { colors: sc.map(d => statusColor(d.key)) },
         textinfo: 'percent', textfont: { size: 10, color: '#23262B', family: this.FONT }, hovertemplate: '%{label}: %{value}<extra></extra>',
       }], {
         title: { text: lv, font: { size: 16, color: levelColors[lv] || this.C.text, family: this.COND }, x: 0.5, xanchor: 'center' },
@@ -615,7 +830,7 @@ export class CriticalArcDashboard {
     const discs = this.uniq(cl.map(c => c.discipline)).filter(d => !this.isBad(d));
     const dc = discs.map(d => {
       const rows = cl.filter(c => c.discipline === d);
-      const done = rows.filter(c => this.COMPLETE_STATUSES.includes(c.status)).length;
+      const done = rows.filter(c => this.isComplete(c)).length;
       return { discipline: d, total: rows.length, done, remaining: rows.length - done, pct: rows.length ? +(done / rows.length * 100).toFixed(1) : 0 };
     }).sort((a, b) => a.total - b.total);
     
@@ -632,7 +847,7 @@ export class CriticalArcDashboard {
     });
     this.plot('ca-cl-leveldisc', ldTraces, { barmode: 'stack', yaxis: { categoryorder: 'array', categoryarray: [...active].reverse(), tickfont: { color: this.C.text, size: 13 }, automargin: true }, legend: { orientation: 'v', y: -0.2, yanchor: 'top', x: 0, xanchor: 'left' }, margin: { t: 40, b: 120, l: 10, r: 20 } });
 
-    const openCl = cl.filter(c => !this.COMPLETE_STATUSES.includes(c.status) && active.includes(c.level));
+    const openCl = cl.filter(c => !this.isComplete(c) && active.includes(c.level));
     const coTotals = this.groupSize(openCl, 'assigned_company').sort((a, b) => b.count - a.count).slice(0, 10);
     const topCos = coTotals.map(d => d.key);
     const coTraces = active.map(lv => ({
@@ -650,7 +865,7 @@ export class CriticalArcDashboard {
     const contractorCl = cl.filter(c => classify(c) === 'contractor');
     const coSummary = this.uniq(contractorCl.map(c => c.assigned_company)).map(co => {
       const rows = contractorCl.filter(c => c.assigned_company === co);
-      const done = rows.filter(c => this.COMPLETE_STATUSES.includes(c.status)).length;
+      const done = rows.filter(c => this.isComplete(c)).length;
       return { Contractor: co, Total: rows.length, Completed: done, 'Completion %': rows.length ? +(done / rows.length * 100).toFixed(1) : 0 };
     }).sort((a, b) => b.Total - a.Total);
     this.q('ca-cl-contractor-table').innerHTML = this.table(['Contractor','Total','Completed','Completion %'].map(k => ({ k, label: k })), coSummary);
@@ -670,14 +885,19 @@ export class CriticalArcDashboard {
     issues = issues || [];
 
     const total = tests.length;
-    const passed = tests.filter(t => t.status === 'Passed').length;
-    const failed = tests.filter(t => t.status === 'Failed').length;
-    const notStarted = tests.filter(t => t.status === 'Not Started').length;
+    const passed = tests.filter(t => this.TEST_PASS_STATUSES.includes(t.status)).length;
+    const failed = tests.filter(t => this.TEST_FAIL_STATUSES.includes(t.status)).length;
+    // Was a count of status === 'Not Started', which occurs in no SAN project
+    // and so read a permanent 0 while hundreds of tests sat in 'Script In
+    // Development' and 'Assigned'. Everything that is neither a pass nor a
+    // fail is counted instead, so the three KPIs always sum to the total
+    // whatever a client calls its statuses.
+    const outstanding = total - passed - failed;
     const passRate = total ? (passed / total * 100) : 0;
 
     let html = this.section('Functional Test Summary') + '<div class="ca-kpi-row">' +
       this.kpi('Total Tests', total, 'kpi-white') + this.kpi('Passed', passed, 'kpi-green') +
-      this.kpi('Failed', failed, 'kpi-red') + this.kpi('Not Started', notStarted, 'kpi-white') + '</div>';
+      this.kpi('Failed', failed, 'kpi-red') + this.kpi('Outstanding', outstanding, 'kpi-white') + '</div>';
     html += `<div class="ca-grid2" style="margin-top:16px">
       <div>${this.section('Tests by Status')}${this.chartBox('ca-ts-status', 400)}</div>
       <div>${this.section('Pass Rate')}${this.chartBox('ca-ts-gauge', 360)}</div></div>`;
@@ -700,16 +920,19 @@ export class CriticalArcDashboard {
 
     const unitOf = (a) => { const m = String(a || '').match(/^([A-Za-z]+\d+)/); return m ? m[1] : null; };
     const units = this.uniq(tests.map(t => unitOf(t.asset_name)).filter(Boolean)).sort();
+    // One trace per status ACTUALLY present, rather than three fixed traces
+    // for statuses SAN does not use -- which drew three empty bars per unit.
     const byUnit = (st) => units.map(u => tests.filter(t => unitOf(t.asset_name) === u && t.status === st).length);
-    this.plot('ca-ts-unit', [
-      { type: 'bar', name: 'Passed', x: units, y: byUnit('Passed'), marker: { color: this.C.green } },
-      { type: 'bar', name: 'Failed', x: units, y: byUnit('Failed'), marker: { color: this.C.red } },
-      { type: 'bar', name: 'Not Started', x: units, y: byUnit('Not Started'), marker: { color: this.C.border } },
-    ], { barmode: 'stack', legend: { orientation: 'v', y: -0.2, yanchor: 'top', x: 0, xanchor: 'left' }, margin: { t: 40, b: 120, l: 10, r: 10 } });
+    const unitStatuses = this.orderVals(tests.map(t => t.status),
+      [...this.TEST_PASS_STATUSES, ...this.TEST_FAIL_STATUSES]);
+    this.plot('ca-ts-unit', unitStatuses.map((st, i) => ({
+      type: 'bar', name: st, x: units, y: byUnit(st),
+      marker: { color: tsColors[st] || this.autoColor(st, i) },
+    })), { barmode: 'stack', legend: { orientation: 'v', y: -0.2, yanchor: 'top', x: 0, xanchor: 'left' }, margin: { t: 40, b: 120, l: 10, r: 10 } });
 
     const cos = this.uniq(tests.map(t => t.assigned_company)).map(co => {
       const rows = tests.filter(t => t.assigned_company === co);
-      const p = rows.filter(t => t.status === 'Passed').length, f = rows.filter(t => t.status === 'Failed').length;
+      const p = rows.filter(t => this.TEST_PASS_STATUSES.includes(t.status)).length, f = rows.filter(t => this.TEST_FAIL_STATUSES.includes(t.status)).length;
       return { co, total: rows.length, passed: p, failed: f, other: rows.length - p - f };
     }).sort((a, b) => a.total - b.total);
     this.plot('ca-ts-contractor', [
@@ -745,9 +968,9 @@ export class CriticalArcDashboard {
     if (!equipment.length) { root.innerHTML = `<div class="ca-empty">No equipment data available.</div>`; return; }
 
     const clAgg = new Map(), tsAgg = new Map(), issAgg = new Map();
-    for (const c of checklists) { const k = String(c.asset_key); const a = clAgg.get(k) || { total: 0, done: 0 }; a.total++; if (this.COMPLETE_STATUSES.concat(['GC to Verify']).includes(c.status)) a.done++; clAgg.set(k, a); }
-    for (const t of tests) { const k = String(t.asset_key); const a = tsAgg.get(k) || { total: 0, passed: 0, failed: 0 }; a.total++; if (t.status === 'Passed') a.passed++; if (t.status === 'Failed') a.failed++; tsAgg.set(k, a); }
-    for (const i of issues) { const k = String(i.asset_key); const a = issAgg.get(k) || { total: 0, open: 0 }; a.total++; if (['Open','In Progress'].includes(i.status)) a.open++; issAgg.set(k, a); }
+    for (const c of checklists) { const k = String(c.asset_key); const a = clAgg.get(k) || { total: 0, done: 0 }; a.total++; if (this.isComplete(c)) a.done++; clAgg.set(k, a); }
+    for (const t of tests) { const k = String(t.asset_key); const a = tsAgg.get(k) || { total: 0, passed: 0, failed: 0 }; a.total++; if (this.TEST_PASS_STATUSES.includes(t.status)) a.passed++; if (this.TEST_FAIL_STATUSES.includes(t.status)) a.failed++; tsAgg.set(k, a); }
+    for (const i of issues) { const k = String(i.asset_key); const a = issAgg.get(k) || { total: 0, open: 0 }; a.total++; if (this.ISSUE_OPEN_STATUSES.includes(i.status)) a.open++; issAgg.set(k, a); }
 
     const eq = equipment.map(e => {
       const k = String(e.equipment_id);

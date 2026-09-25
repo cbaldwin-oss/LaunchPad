@@ -3886,6 +3886,13 @@ async function triggerFullStatusRefresh() {
         const { createClient } = supabase;
         const _supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+        // A top-level `const` in a classic <script> is script-scoped, not a
+        // property of window, so ES modules on this page (dashboard.js is
+        // imported as one) cannot see it. Publishing it here lets them share
+        // this one client -- and therefore one session and one token-refresh
+        // loop -- instead of constructing a second one.
+        window._supabase = _supabase;
+
         // ===== MULTI-PROJECT CONFIG =====
         // Populated by selectProject() once we know which LaunchPad project
         // the logged-in user is working in (see launchpad_registry_setup.sql
