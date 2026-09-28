@@ -35,7 +35,7 @@ export class CriticalArcDashboard {
     // Issue statuses ARE the one list that already matched the data -- kept
     // only to ORDER the filter, which falls back to whatever the data holds.
     this.ISSUE_STATUS_ORDER = ['Open', 'In Progress', 'Pending Review', 'Closed'];
-    this.ISSUE_OPEN_STATUSES = ['Open', 'In Progress'];
+    this.ISSUE_OPEN_STATUSES = ['Open', 'In Progress', 'Pending Review'];
     
     // Theme Constants
     this.FONT = 'Barlow, sans-serif';
