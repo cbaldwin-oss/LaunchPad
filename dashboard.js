@@ -12,15 +12,6 @@ export class CriticalArcDashboard {
     this.ISS_THRESH = 30;
     this.REFRESH_ENDPOINT = null;
 
-    // ─── Data source ──────────────────────────────────────────────────────
-    // Reads the cx_* serving tables in the SAME Supabase project LaunchPad
-    // signs into. That is not a preference: RLS grants select to the
-    // `authenticated` role, and a user only holds that role on the project
-    // whose auth issued their JWT. Pointed at any other project this returns
-    // ZERO ROWS rather than an error -- which is why every failure path below
-    // renders an explicit message instead of an empty tab.
-    this.PAGE_SIZE = 1000;   // PostgREST's default max rows per request
-
     // ─── Vocabulary ───────────────────────────────────────────────────────
     // COMPLETE_STATUSES used to be ['Finished']. That string occurs in
     // NEITHER SAN project -- their verified statuses are 'Verified',
@@ -49,15 +40,68 @@ export class CriticalArcDashboard {
     // Theme Constants
     this.FONT = 'Barlow, sans-serif';
     this.COND = 'Barlow Condensed, sans-serif';
+    // green/red/yellow/blue are semantic status colors (Open/Closed,
+    // Passed/Failed, discipline coding, etc.) — deliberately the SAME in
+    // both themes, matching how index.html/bridge-view.js/tamperseal-view.js
+    // all treat their own status colors. text/muted/border/panel are
+    // structural chrome instead, and get overwritten by applyTheme() below
+    // whenever the theme changes — every chart already reads gridline/tick
+    // colors from this.C.border/this.C.muted (see baseLayout()), so
+    // updating these two values is what re-themes every chart's axes too.
     this.C = { text:'#F0F0F0', muted:'#8A8F98', border:'#3E4248', panel:'#2D3035', green:'#39B54A', red:'#E04040', yellow:'#F4B942', blue:'#4A90D9' };
+    // This dashboard was built dark-only (no light theme existed at all)
+    // until this. Shares the exact same localStorage key every other
+    // module's dark-mode toggle already reads/writes.
+    this.darkMode = localStorage.getItem('launchpad_dark_mode') === 'enabled';
+    this.THEMES = {
+      dark:  { bg:'#23262B', panel:'#2D3035', border:'#3E4248', line:'#34383E', text:'#F0F0F0', muted:'#8A8F98', inputBg:'#23262B', metaText:'#5A5F68', tdText:'#D8DCE1', tdBorder:'#2A2D32', hoverRow:'#282B30' },
+      light: { bg:'#F4F5F7', panel:'#FFFFFF', border:'#DADDE1', line:'#EBEDF0', text:'#1A1D21', muted:'#5F6672', inputBg:'#FFFFFF', metaText:'#7A8088', tdText:'#2B2F33', tdBorder:'#E4E6E9', hoverRow:'#EFF1F3' }
+    };
     this.CFG = { displayModeBar: false, responsive: true };
   }
 
   async mount() {
     this.injectCSS();
     this.injectHTML();
+    this.applyTheme();
     this.bindEvents();
     await this.init();
+  }
+
+  // Called on mount (using whatever localStorage already said) and again
+  // whenever index.html's toggleDarkMode() calls setDarkMode() below.
+  // Updates this.C's structural colors (so any chart re-rendered after this
+  // point picks up the new gridline/tick colors) and the CSS custom
+  // properties on .ca-wrapper (so every var(--bg)/var(--panel)/etc. rule in
+  // injectCSS()'s stylesheet repaints immediately, with no need to
+  // duplicate or regenerate that stylesheet per theme).
+  applyTheme() {
+    const t = this.darkMode ? this.THEMES.dark : this.THEMES.light;
+    Object.assign(this.C, { text: t.text, muted: t.muted, border: t.border, panel: t.panel });
+    const wrapper = this.container.querySelector('.ca-wrapper');
+    if (!wrapper) return;
+    wrapper.style.setProperty('--bg', t.bg);
+    wrapper.style.setProperty('--panel', t.panel);
+    wrapper.style.setProperty('--border', t.border);
+    wrapper.style.setProperty('--line', t.line);
+    wrapper.style.setProperty('--text', t.text);
+    wrapper.style.setProperty('--muted', t.muted);
+    wrapper.style.setProperty('--input-bg', t.inputBg);
+    wrapper.style.setProperty('--meta-text', t.metaText);
+    wrapper.style.setProperty('--td-text', t.tdText);
+    wrapper.style.setProperty('--td-border', t.tdBorder);
+    wrapper.style.setProperty('--hover-row', t.hoverRow);
+  }
+
+  // index.html's toggleDarkMode() calls this directly, same pattern as the
+  // other three views' own setDarkMode() methods. Charts bake their axis
+  // colors into the layout object at render time (Plotly doesn't re-read
+  // JS variables live), so re-running renderAll() is what actually
+  // repaints already-drawn charts instead of just the surrounding chrome.
+  setDarkMode(isDark) {
+    this.darkMode = !!isDark;
+    this.applyTheme();
+    if (this.STATE.data) this.renderAll();
   }
 
   // DOM Query Helper to restrict lookups to this specific dashboard container
@@ -71,10 +115,9 @@ export class CriticalArcDashboard {
     const style = document.createElement('style');
     style.id = 'ca-dashboard-styles';
     style.innerHTML = `
-      @import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&family=DM+Mono:wght@400;500&display=swap');
       
-      .ca-wrapper { --bg: #23262B; --panel: #2D3035; --border: #3E4248; --line: #34383E; --text: #F0F0F0; --muted: #8A8F98; --green: #39B54A; --red: #E04040; --yellow: #F4B942; --blue: #4A90D9; }
-      .ca-wrapper { background: var(--bg); color: var(--text); font-family: 'Barlow', sans-serif; box-sizing: border-box; height: 100%; }
+      .ca-wrapper { --bg: #23262B; --panel: #2D3035; --border: #3E4248; --line: #34383E; --text: #F0F0F0; --muted: #8A8F98; --green: #39B54A; --red: #E04040; --yellow: #F4B942; --blue: #4A90D9; --input-bg: #23262B; --meta-text: #5A5F68; --td-text: #D8DCE1; --td-border: #2A2D32; --hover-row: #282B30; }
+      .ca-wrapper { background: var(--bg); color: var(--text); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; box-sizing: border-box; height: 100%; }
       .ca-wrapper * { box-sizing: border-box; }
       .ca-wrapper a { color: inherit; }
 
@@ -82,14 +125,15 @@ export class CriticalArcDashboard {
 
       /* Sidebar */
       .ca-sidebar { width: clamp(220px, 20vw, 300px); flex: 0 0 clamp(220px, 20vw, 300px); background: var(--panel); border-right: 1px solid var(--border); padding: 20px; overflow-y: auto; height: 100%; }
-      .ca-brand { font-family: 'Barlow Condensed', sans-serif; font-size: 20px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; border-bottom: 2px solid var(--green); padding-bottom: 12px; margin-bottom: 20px; }
+      .ca-brand { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 20px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; border-bottom: 2px solid var(--green); padding-bottom: 12px; margin-bottom: 20px; }
       .ca-brand-sub { font-size: 11px; color: var(--muted); letter-spacing: 1px; margin-top: 2px; }
       .ca-side-label { font-size: 11px; letter-spacing: 1px; color: var(--muted); text-transform: uppercase; margin: 16px 0 6px; }
       
-      .ca-wrapper select, .ca-wrapper input[type="text"] { width: 100%; background: #23262B; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-family: 'Barlow', sans-serif; font-size: 13px; }
+      .ca-wrapper select, .ca-wrapper input[type="text"] { width: 100%; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; }
+      .ca-connected-project { width: 100%; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; font-weight: 600; }
       .ca-wrapper select:focus, .ca-wrapper input[type="text"]:focus { outline: none; border-color: var(--muted); }
-      
-      .ca-checkgroup { display: flex; flex-direction: column; gap: 5px; max-height: 190px; overflow-y: auto; background: #23262B; border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+
+      .ca-checkgroup { display: flex; flex-direction: column; gap: 5px; max-height: 190px; overflow-y: auto; background: var(--input-bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
       .ca-checkgroup label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); cursor: pointer; }
       .ca-checkgroup label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .ca-checkgroup input[type="checkbox"] { accent-color: var(--green); width: 15px; height: 15px; flex: 0 0 auto; cursor: pointer; }
@@ -105,32 +149,32 @@ export class CriticalArcDashboard {
       .ca-eq-search-wrap input[type="checkbox"] { accent-color: var(--green); width: 15px; height: 15px; cursor: pointer; }
       
       .ca-refreshed { font-size: 11px; color: var(--muted); margin-top: 4px; }
-      .ca-btn-refresh { margin-top: 12px; width: 100%; font-family: 'Barlow Condensed', sans-serif; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; background: transparent; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 9px; cursor: pointer; transition: background .15s, border-color .15s; }
+      .ca-btn-refresh { margin-top: 12px; width: 100%; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; background: transparent; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 9px; cursor: pointer; transition: background .15s, border-color .15s; }
       .ca-btn-refresh:hover { background: var(--line); border-color: var(--muted); }
       .ca-btn-refresh:disabled { opacity: .5; cursor: default; }
 
       /* Main Content */
       .ca-main { flex: 1; padding: clamp(16px, 2vw, 28px) clamp(16px, 2.5vw, 36px); min-width: 0; background: var(--bg); overflow-y: auto; height: 100%; }
-      .ca-page-title { font-family: 'Barlow Condensed', sans-serif; font-size: clamp(28px, 4vw, 42px); font-weight: 700; letter-spacing: 1px; text-transform: uppercase; line-height: 1.1; color: var(--text); }
+      .ca-page-title { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: clamp(28px, 4vw, 42px); font-weight: 700; letter-spacing: 1px; text-transform: uppercase; line-height: 1.1; color: var(--text); }
       .ca-page-sub { font-size: 14px; color: var(--muted); margin-top: 4px; letter-spacing: .5px; }
-      .ca-page-meta { font-size: 12px; color: #5A5F68; margin-top: 6px; letter-spacing: .5px; }
+      .ca-page-meta { font-size: 12px; color: var(--meta-text); margin-top: 6px; letter-spacing: .5px; }
       .ca-title-hr { border: none; border-top: 1px solid var(--border); margin: 16px 0 8px; }
 
       /* Tabs (Using Display: Block/None natively now, avoiding Plotly sizing bugs) */
       .ca-tabs { display: flex; gap: 4px; background: var(--panel); padding: 4px; border-radius: 10px; border: 1px solid var(--border); margin: 16px 0 20px; width: fit-content; }
-      .ca-tab { background: transparent; border: none; border-radius: 6px; color: var(--muted); font-family: 'Barlow Condensed', sans-serif; font-weight: 600; font-size: 13px; letter-spacing: .5px; padding: 8px 16px; cursor: pointer; }
+      .ca-tab { background: transparent; border: none; border-radius: 6px; color: var(--muted); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-weight: 600; font-size: 13px; letter-spacing: .5px; padding: 8px 16px; cursor: pointer; }
       .ca-tab.active { background: var(--line); color: var(--green); }
       .ca-tabpage { display: none; } 
       .ca-tabpage.active { display: block; }
 
-      .ca-section-header { font-family: 'Barlow Condensed', sans-serif; font-size: 12px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--green); margin: 24px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+      .ca-section-header { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 12px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--green); margin: 24px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
 
       /* KPI cards */
       .ca-kpi-row { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
       .ca-kpi-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 20px 24px; text-align: center; transition: border-color .2s; }
       .ca-kpi-card:hover { border-color: var(--muted); }
-      .ca-kpi-label { font-family: 'Barlow Condensed', sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
-      .ca-kpi-value { font-family: 'DM Mono', monospace; font-size: 32px; font-weight: 500; line-height: 1; margin-bottom: 4px; }
+      .ca-kpi-label { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+      .ca-kpi-value { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 32px; font-weight: 500; line-height: 1; margin-bottom: 4px; }
       .ca-kpi-sub { font-size: 12px; color: var(--muted); }
       .kpi-red { color: var(--red); } .kpi-yellow { color: var(--yellow); } .kpi-green { color: var(--green); } .kpi-blue { color: var(--blue); } .kpi-white { color: var(--text); }
 
@@ -144,13 +188,13 @@ export class CriticalArcDashboard {
 
       /* Tables */
       .ca-wrapper table.dt { width: 100%; border-collapse: collapse; font-size: 12.5px; margin: 6px 0; }
-      .ca-wrapper table.dt th { text-align: left; color: var(--muted); font-family: 'Barlow Condensed', sans-serif; font-weight: 600; letter-spacing: .5px; text-transform: uppercase; font-size: 11px; border-bottom: 1px solid var(--border); padding: 8px 10px; position: sticky; top: 0; background: var(--panel); }
-      .ca-wrapper table.dt td { padding: 7px 10px; border-bottom: 1px solid #2A2D32; color: #D8DCE1; }
-      .ca-wrapper table.dt tr:hover td { background: #282B30; }
+      .ca-wrapper table.dt th { text-align: left; color: var(--muted); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-weight: 600; letter-spacing: .5px; text-transform: uppercase; font-size: 11px; border-bottom: 1px solid var(--border); padding: 8px 10px; position: sticky; top: 0; background: var(--panel); }
+      .ca-wrapper table.dt td { padding: 7px 10px; border-bottom: 1px solid var(--td-border); color: var(--td-text); }
+      .ca-wrapper table.dt tr:hover td { background: var(--hover-row); }
       .ca-table-wrap { max-height: 460px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
       
       .ca-wrapper details { margin: 12px 0; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
-      .ca-wrapper details > summary { cursor: pointer; padding: 12px 16px; font-family: 'Barlow Condensed', sans-serif; font-weight: 600; letter-spacing: .5px; color: var(--muted); }
+      .ca-wrapper details > summary { cursor: pointer; padding: 12px 16px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-weight: 600; letter-spacing: .5px; color: var(--muted); }
       .ca-wrapper details[open] > summary { border-bottom: 1px solid var(--border); color: var(--text); }
       .ca-wrapper details .ca-table-wrap { border: none; border-radius: 0; }
       
@@ -177,8 +221,8 @@ export class CriticalArcDashboard {
         <div class="ca-app">
           <aside class="ca-sidebar">
             <div class="ca-brand">CriticalArc<div class="ca-brand-sub">Project Dashboard Platform</div></div>
-            <div class="ca-side-label">Select Project</div>
-            <select id="ca-projectSelect"></select>
+            <div class="ca-side-label">Connected Project</div>
+            <div class="ca-connected-project" id="ca-connectedProject">—</div>
             <hr class="ca-hr" />
             <div style="font-weight:600; letter-spacing:.5px;">Filters</div>
             <div class="ca-filter-hint">Check any to filter — none checked = all.</div>
@@ -354,7 +398,7 @@ export class CriticalArcDashboard {
       btn.disabled = true; btn.textContent = '⏳ Refreshing…';
       try {
         if (this.REFRESH_ENDPOINT) { await fetch(this.REFRESH_ENDPOINT, { method: 'POST' }); }
-        await this.loadProject(this.STATE.project);
+        await this.loadProject();
       } finally { btn.disabled = false; btn.textContent = '🔄 Refresh Data'; }
     };
   }
@@ -417,174 +461,83 @@ export class CriticalArcDashboard {
     this.q('ca-dash').style.display = 'none';
   }
 
-  // Prefers the client the page already built, so there is one session and
-  // one token-refresh loop. index.html creates `_supabase` as a script-scoped
-  // const, which a module cannot see, so adding
-  //     window._supabase = _supabase;
-  // beside that line is the tidy fix. Without it we build a second client:
-  // supabase-js reads the stored session from localStorage under the same
-  // key, so it is authenticated too, but autoRefreshToken is off to avoid two
-  // clients racing to refresh the same token.
-  client() {
-    if (this._sb) return this._sb;
-    if (window._supabase) { this._sb = window._supabase; return this._sb; }
-
-    const lib = window.supabase;
-    if (!lib || !lib.createClient) {
-      throw new Error('supabase-js is not loaded on this page.');
+  // Waits briefly for window.LP_CONFIG to be populated (it's loaded by the
+  // host app's project-selection flow, which should already have finished
+  // by the time someone opens this tab, but this guards against any race).
+  async waitForProjectConfig_(timeoutMs = 5000) {
+    const start = Date.now();
+    while (!(window.LP_CONFIG && window.LP_CONFIG.projectKey)) {
+      if (Date.now() - start > timeoutMs) return null;
+      await new Promise(r => setTimeout(r, 150));
     }
-    const url = window.SUPABASE_URL || this.SUPABASE_URL;
-    const key = window.SUPABASE_KEY || this.SUPABASE_ANON_KEY;
-    if (!url || !key) {
-      throw new Error(
-        'No Supabase client available. Add `window._supabase = _supabase;` ' +
-        'beside the createClient call in index.html.');
-    }
-    console.warn('[dashboard] Building a second Supabase client. Set ' +
-                 'window._supabase in index.html to avoid this.');
-    this._sb = lib.createClient(url, key, {
-      auth: { persistSession: true, autoRefreshToken: false },
-    });
-    return this._sb;
-  }
-
-  // PostgREST caps a response at 1000 rows and says nothing when it truncates.
-  // SAN-NT1B has 1,304 checklists and Phase 1A has 8,194, so an unpaged read
-  // would silently drop most of them and every percentage on the page would be
-  // computed off a partial set -- wrong, and wrong quietly. Always page.
-  async fetchAll(table, columns, tenant, projectId) {
-    const sb = this.client();
-    const out = [];
-    for (let from = 0; ; from += this.PAGE_SIZE) {
-      const { data, error } = await sb
-        .from(table)
-        .select(columns)
-        .eq('tenant', tenant)
-        .eq('project_id', projectId)
-        .range(from, from + this.PAGE_SIZE - 1);
-      if (error) throw new Error(`${table}: ${error.message}`);
-      out.push(...data);
-      if (data.length < this.PAGE_SIZE) return out;
-    }
+    return window.LP_CONFIG;
   }
 
   async init() {
     try {
-      // The dropdown is gone. Which project this shows is decided by
-      // LaunchPad, not by the dashboard -- LP_CONFIG.projectKey is whatever
-      // the user picked at the project picker.
-      const sel = this.q('ca-projectSelect');
-      if (sel) {
-        const wrapper = sel.closest('div') || sel.parentElement;
-        if (wrapper) wrapper.style.display = 'none';
-      }
-
-      const projectKey = window.LP_CONFIG && window.LP_CONFIG.projectKey;
-      if (!projectKey) {
-        this.status('Waiting for a project to be selected…');
-        return;
-      }
-
-      const sb = this.client();
-
-      // Zero rows is the failure mode this whole block exists to prevent, so
-      // check the session explicitly before blaming the data.
-      const { data: { session } } = await sb.auth.getSession();
-      if (!session) {
-        this.status('Not signed in. Reload the page and sign in to view this dashboard.');
-        return;
-      }
-
-      // project_key -> (tenant, CxAlloy project id). Hand-maintained on
-      // purpose: nothing derives a CxAlloy id from a LaunchPad key, and
-      // guessing it wrong shows one phase's data under another phase's name,
-      // confidently. SANNT1B is Phase 1B (49639), not Phase 1A (18604).
-      const { data: map, error: mapErr } = await sb
-        .from('cx_project_map')
-        .select('tenant, cxalloy_project_id, project_name, enabled')
-        .eq('project_key', projectKey)
-        .maybeSingle();
-
-      if (mapErr) throw new Error(`cx_project_map: ${mapErr.message}`);
-      if (!map) {
-        this.status(`No CxAlloy data is configured for project <b>${projectKey}</b>.` +
-                    `<div style="margin-top:8px;font-size:13px;">` +
-                    `Add a row to <code>cx_project_map</code> to connect it.</div>`);
-        return;
-      }
-      if (map.enabled === false) {
-        this.status(`CxAlloy data for <b>${projectKey}</b> is disabled in ` +
-                    `<code>cx_project_map</code>.`);
-        return;
-      }
-
-      this.STATE.mapping = map;
-      this.STATE.project = map.cxalloy_project_id;
-      await this.loadProject(map.cxalloy_project_id);
+      const cfg = await this.waitForProjectConfig_();
+      if (!cfg) throw new Error('No project is loaded yet (window.LP_CONFIG.projectKey is missing).');
+      const label = this.q('ca-connectedProject');
+      if (label) label.textContent = cfg.clientName || cfg.projectKey || 'Connected project';
+      await this.loadProject();
     } catch (e) {
       this.status('Error: ' + e.message);
       console.error(e);
     }
   }
 
-  async loadProject(pid) {
-    const map = this.STATE.mapping;
-    if (!map) return this.init();
-
-    this.status('Loading data…');
-    const tenant = map.tenant;
+  async loadProject() {
+    this.q('ca-loading').style.display = 'block';
+    this.q('ca-loading').textContent = 'Loading…';
+    this.q('ca-dash').style.display = 'none';
 
     try {
-      const [equipment, checklists, issuesRaw, tests, companies, watermarks] =
-        await Promise.all([
-          this.fetchAll('cx_equipment',
-            'equipment_id,name,type,discipline,status,space,building_phase,floor_parsed',
-            tenant, pid),
-          this.fetchAll('cx_checklists',
-            'asset_key,assigned_company,assigned_type,discipline,level,status,type_name,is_verified',
-            tenant, pid),
-          this.fetchAll('cx_issues',
-            'name,description,status,priority,discipline,assigned_company,assigned_name,' +
-            'aging_category,days_open,date_created,in_progress_at,date_closed,asset_key',
-            tenant, pid),
-          this.fetchAll('cx_tests',
-            'name,status,assigned_company,assigned_name,discipline,attempt_count,' +
-            'asset_key,asset_name',
-            tenant, pid),
-          this.fetchAll('cx_companies', 'name', tenant, pid),
-          this.fetchAll('cx_sync_watermark', 'table_name,synced_at,row_count', tenant, pid),
-        ]);
+      const cfg = window.LP_CONFIG;
+      const projectKey = cfg && cfg.projectKey;
+      if (!projectKey) {
+        throw new Error('No project is loaded yet (window.LP_CONFIG.projectKey is missing).');
+      }
+      // Reads a periodically-synced snapshot from Supabase instead of
+      // calling the Google Apps Script endpoint live on every load — the
+      // Sheets-backed dashboard data is pushed into launchpad_dashboard_data
+      // on a timer (see .github/workflows/sync-equipment-tracker-data.yml
+      // and sync/sync-equipment-data.mjs), so this read is as fast as
+      // everything else in the app instead of waiting on Apps Script's
+      // cold-start + Sheets-read latency on every visit.
+      const supa = window.launchpadSupabaseClient;
+      if (!supa) throw new Error('No Supabase client available yet.');
+      const { data: row, error } = await supa.from('launchpad_dashboard_data')
+        .select('data, synced_at')
+        .eq('project_key', projectKey)
+        .maybeSingle();
+      if (error) throw error;
+      const data = (row && row.data) || {};
+      if (data && data.error) throw new Error(data.error);
 
-      // The serving table calls this in_progress_at; the renderer has always
-      // called it in_progress_date. Renamed here rather than in either, so
-      // neither side has to know about the other.
-      const issues = issuesRaw.map(i => ({ ...i, in_progress_date: i.in_progress_at }));
-
-      // "Data as of" comes from the sync watermark and NEVER the browser
-      // clock: a page opened now against a copy last written on Tuesday has
-      // to read Tuesday. Oldest table wins -- that is the real freshness.
-      const syncedAt = watermarks.length
-        ? watermarks.map(w => w.synced_at).sort()[0]
-        : null;
-
-      this.STATE.data = {
-        project_id: pid,
-        project_name: map.project_name,
-        data_synced_at: syncedAt,
-        equipment, checklists, issues, tests, companies,
-      };
-
-      // A mapping that resolves to nothing published is not the same as a
-      // project with no data, and must not render as an empty page.
-      const totalRows = equipment.length + checklists.length + issues.length + tests.length;
-      if (!totalRows) {
-        this.status(`<b>${map.project_name}</b> is mapped but nothing has been published yet.` +
-                    `<div style="margin-top:8px;font-size:13px;">` +
-                    `The sync job may not have run for this project.</div>`);
-        return;
+      // Defensive: the Apps Script endpoint (buildDashboardJson_) always
+      // returns these five as arrays, even when empty — but if the
+      // getDashboardData action isn't wired into doGet yet (or the
+      // deployment wasn't redeployed as a new version after adding it), a
+      // request here can silently fall through to a DIFFERENT action's
+      // response shape instead of failing outright, missing one or more of
+      // these keys entirely. Normalizing them here means a wiring problem
+      // shows up as an empty dashboard instead of a hard crash on the first
+      // .map() call — see the console warning below for which key(s) were
+      // actually missing, which is the real thing to go fix.
+      const missingKeys = ['equipment', 'companies', 'issues', 'checklists', 'tests']
+        .filter(key => !Array.isArray(data[key]));
+      if (missingKeys.length) {
+        console.warn(
+          `Dashboard response is missing expected array field(s): ${missingKeys.join(', ')}. ` +
+          `This usually means the getDashboardData action isn't reaching buildDashboardJson_ yet — ` +
+          `double-check it's wired into doGet and that the Apps Script was redeployed as a NEW ` +
+          `version (not just saved) after adding it. Actual response keys: ${Object.keys(data || {}).join(', ') || '(none)'}`
+        );
+        missingKeys.forEach(key => { data[key] = []; });
       }
 
-      this.STATE.eqPhase = new Map(equipment.map(e => [String(e.equipment_id), e.building_phase]));
+      this.STATE.data = data;
+      this.STATE.eqPhase = new Map(this.STATE.data.equipment.map(e => [String(e.equipment_id), e.building_phase]));
       this.STATE.filters = { discipline: [], contractor: [], status: [], phase: [] };
       this.EQ_FILTER = { bldg: 'All', floor: 'All' };
 
@@ -612,7 +565,11 @@ export class CriticalArcDashboard {
     this.renderTests(tests, issues);
     this.renderEquipment(equipment, checklists, tests, issues);
     
-    this.q('ca-pageTitle').textContent = d.project_name || 'Project Dashboard';
+    // An admin can override the synced project_name with a cleaner display
+    // name via Dashboard Settings (saved to launchpad_projects.dashboard_
+    // display_name) — prefer that when set.
+    const titleOverride = window.LP_CONFIG && window.LP_CONFIG.dashboardDisplayName;
+    this.q('ca-pageTitle').textContent = titleOverride || d.project_name || 'Project Dashboard';
     const synced = d.data_synced_at ? new Date(d.data_synced_at) : null;
     const isData = !!(synced && !isNaN(synced));
     const stamp = isData ? synced : new Date();
@@ -945,7 +902,7 @@ export class CriticalArcDashboard {
     const heatUnits = this.uniq(tests.map(t => unitOf(t.asset_name)).filter(Boolean)).sort();
     if (atts.length && heatUnits.length) {
       const z = heatUnits.map(u => atts.map(a => tests.filter(t => unitOf(t.asset_name) === u && (+t.attempt_count || 0) === a).length));
-      this.plot('ca-ts-heat', [{ type: 'heatmap', x: atts.map(a => a + (a === 1 ? ' attempt' : ' attempts')), y: heatUnits, z, colorscale: [[0, this.C.panel], [0.01, '#3E4248'], [0.5, this.C.yellow], [1, this.C.red]], showscale: true, xgap: 2, ygap: 2, hovertemplate: 'Unit %{y} · %{x} · %{z} test(s)<extra></extra>' }],
+      this.plot('ca-ts-heat', [{ type: 'heatmap', x: atts.map(a => a + (a === 1 ? ' attempt' : ' attempts')), y: heatUnits, z, colorscale: [[0, this.C.panel], [0.01, this.C.border], [0.5, this.C.yellow], [1, this.C.red]], showscale: true, xgap: 2, ygap: 2, hovertemplate: 'Unit %{y} · %{x} · %{z} test(s)<extra></extra>' }],
         { xaxis: { tickfont: { color: this.C.muted } }, yaxis: { tickfont: { color: this.C.text, size: 10 }, automargin: true }, margin: { t: 10, b: 30, l: 10, r: 10 } });
     } else { this.q('ca-ts-heat').innerHTML = '<div class="ca-empty">No attempt data to chart.</div>'; }
 

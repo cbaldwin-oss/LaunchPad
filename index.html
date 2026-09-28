@@ -1,8 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <script src="https://unpkg.com/html5-qrcode"></script>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LaunchPad</title>
@@ -460,6 +458,16 @@
 }
 
 /* The Large Circle */
+.iframe-loading-overlay {
+    position: absolute; inset: 0; background: white; z-index: 5;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+}
+.iframe-loading-overlay p { color: #666; font-size: 14px; margin: 0; }
+.iframe-spinner {
+    width: 36px; height: 36px; border: 4px solid #e0e0e0; border-top-color: #2e7d32;
+    border-radius: 50%; animation: iframe-spin 0.8s linear infinite;
+}
+@keyframes iframe-spin { to { transform: rotate(360deg); } }
 .ship-circle {
     width: 180px;
     height: 180px;
@@ -1301,7 +1309,119 @@ body.dark-mode .phase-row {
     background: linear-gradient(90deg, #1e1e1e, #2c2c2c) !important;
     border-left: 4px solid #4caf50 !important;
 }
-    
+
+/* ===== HELP MODAL "DOCK TO SIDE" MODE =====
+   Toggled by toggleHelpDock() (see script below) on any of the four help
+   modals (sign-in/schedule/equipment/dashboard). The outer overlay covers
+   the full viewport either way (so the panel can still anchor to its right
+   edge), but in docked mode it turns transparent and click-through
+   (pointer-events: none) everywhere except the panel itself
+   (pointer-events: auto, re-enabled on .help-modal-panel), so the rest of
+   LaunchPad stays fully usable underneath while a guide is open.
+
+   --help-dock-inset is the total width that eats into the right edge of
+   the screen while docked (panel width + its right-side gutter) — the
+   body-squeeze rules below use the SAME value so the real app content
+   (header, main content area, and Schedule's right-hand filter sidebar)
+   shrinks/shifts to stay fully visible next to the panel instead of
+   sliding underneath it. */
+:root {
+    --help-dock-panel-width: 460px;
+    --help-dock-inset: 480px; /* panel width + 16px gutter on each side, plus a small buffer */
+}
+.help-modal-docked {
+    background: transparent !important;
+    justify-content: flex-end !important;
+    align-items: stretch !important;
+    pointer-events: none !important;
+    padding: 16px !important;
+}
+.help-modal-docked .help-modal-panel {
+    pointer-events: auto !important;
+    position: relative !important; /* anchors .help-dock-resize-handle below */
+    width: var(--help-dock-panel-width) !important;
+    max-width: 92vw !important;
+    height: 100% !important;
+    max-height: none !important;
+    border-radius: 10px !important;
+    box-shadow: -6px 6px 28px rgba(0,0,0,0.35) !important;
+}
+
+/* Drag handle on the panel's left edge — resizes the dock width live (see
+   startHelpDockResize()/onHelpDockResizeMove() below), with the guide
+   iframe rescaled to match on every move so its content grows/shrinks
+   with the panel instead of staying a fixed size. Hidden outside docked
+   mode since the panel isn't resizable there. */
+.help-dock-resize-handle {
+    display: none;
+}
+.help-modal-docked .help-dock-resize-handle {
+    display: block;
+    position: absolute;
+    top: 0;
+    left: -4px;
+    width: 8px;
+    height: 100%;
+    cursor: ew-resize;
+    z-index: 1;
+}
+.help-dock-resize-handle:hover,
+.help-dock-resize-handle.dragging {
+    background: rgba(0,0,0,0.15);
+}
+
+/* Squeezes the real app (or the sign-in card) down so none of it ends up
+   hidden behind the docked panel — body's own content width shrinks,
+   which the header and #app-body (normal-flow children with % based
+   widths) automatically follow; the right-hand filter sidebar is
+   fixed-positioned so it needs its own "right" offset to move with it. */
+body.help-docked {
+    margin-right: var(--help-dock-inset);
+    transition: margin-right 0.25s ease;
+}
+body.help-docked #filter-sidebar {
+    right: var(--help-dock-inset) !important;
+}
+body.help-docked .header,
+body.help-docked #app-body {
+    transition: margin-right 0.25s ease, width 0.25s ease;
+}
+/* Sign-in/project-picker screen (#loading-overlay) is position:fixed with
+   an explicit width:100%, so — unlike .header/#app-body above — a
+   margin-right wouldn't shrink it, just push it off-screen. It needs its
+   own width cut instead; since it's still display:flex/justify-content:
+   center, the sign-in card re-centers itself in the narrower space
+   automatically. */
+body.help-docked #loading-overlay {
+    width: calc(100% - var(--help-dock-inset));
+    transition: width 0.25s ease;
+}
+
+/* ===== HELP GUIDE IFRAME FIT =====
+   Scribe's embed still enforces its own internal minimum layout width
+   even with size=flexible — 480px (our first guess at that minimum) still
+   wasn't enough and left a horizontal scrollbar/clipped title. Rather than
+   keep guessing at Scribe's actual minimum, applyHelpDockWidth() (in the
+   script below) renders the iframe at 900px — the SAME width the
+   full/expanded modal already uses, which is confirmed to fit every guide
+   cleanly with no scrollbar — and scales that whole 900px-wide render
+   down to the docked panel's CURRENT width (recalculated live as the
+   panel is resized, via the drag handle) with a CSS transform. That
+   guarantees a fit no matter how wide any given guide's internal layout
+   is or how the user resizes the panel, at the cost of smaller (but fully
+   visible) text at narrower widths. */
+.help-guide-frame-wrap {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+}
+.help-guide-frame-wrap iframe {
+    border: none;
+    width: 100%;
+    height: 100%;
+    display: block;
+    transform-origin: top left;
+}
 </style>
 </head>
 <body>
@@ -1347,6 +1467,11 @@ body.dark-mode .phase-row {
         <div class="nav-item" onclick="switchMainView('tamperseals', this)">
         <span class="nav-icon">🩹</span>
         <span class="nav-text">Tamper Seals</span>
+    </div>
+
+        <div id="nav-sealform" class="nav-item" style="display: none;" onclick="switchMainView('sealform', this)">
+        <span class="nav-icon">📋</span>
+        <span class="nav-text">Seal Form</span>
     </div>
 
     <div class="nav-item" onclick="switchMainView('attributes', this)">
@@ -1452,6 +1577,7 @@ body.dark-mode .phase-row {
                 <label style="display:flex; align-items:center; cursor:pointer;"><input type="checkbox" id="cfg-nav-dashboard" style="margin-right:8px; transform:scale(1.2);"> Dashboard</label>
                 <label style="display:flex; align-items:center; cursor:pointer;"><input type="checkbox" id="cfg-nav-bridge" style="margin-right:8px; transform:scale(1.2);"> The Bridge</label>
                 <label style="display:flex; align-items:center; cursor:pointer;"><input type="checkbox" id="cfg-nav-tamperseals" style="margin-right:8px; transform:scale(1.2);"> Tamper Seals</label>
+                <label style="display:flex; align-items:center; cursor:pointer;"><input type="checkbox" id="cfg-nav-sealform" style="margin-right:8px; transform:scale(1.2);"> Seal Form</label>
             </div>
         </div>
 
@@ -1533,44 +1659,62 @@ body.dark-mode .phase-row {
 
 <div id="launchpad-dashboard-container" style="height: 100%;"></div>
 
-<!-- 2. Import Plotly natively so the script can access it -->
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
-
-<!-- 3. Mount the Module -->
-<script type="module">
-  // Import the class we just created
-  import { CriticalArcDashboard } from './dashboard.js'; 
-  
-// Store the instance globally, but DO NOT mount it on load
-  window.caDashboardInstance = new CriticalArcDashboard('launchpad-dashboard-container');
-  window.caDashboardMounted = false;
-</script>
+<!-- Plotly (~3.5MB) and the dashboard module are lazy-loaded on first visit
+     to this tab by ensureDashboardMounted() in the main script below, so
+     they never cost anything on initial page load. -->
 </div>
-<div id="equipment-tracker-view" style="display: none; height: 100%; width: 100%;">
-    <iframe 
-        id="equipment-tracker-iframe"
-        data-src-base="equipment-tracker.html"
-        style="width: 100%; height: 100%; border: none; margin: 0; padding: 0; display: block;"
-        title="Equipment Status Tracker">
-    </iframe>
+<div id="equipment-tracker-view" style="display: none; height: 100%; width: 100%; position: relative;">
+    <div class="iframe-loading-overlay" id="equipment-tracker-iframe-loading">
+        <div class="iframe-spinner"></div>
+        <p>Loading Equipment Status Tracker...</p>
+    </div>
+    <div id="equipment-tracker-view-container" style="width: 100%; height: 100%;"></div>
 </div>
 
-<div id="bridge-view" style="display: none; height: 100%; width: 100%;">
-    <iframe 
-        id="bridge-iframe"
-        data-src-base="bridge.html"
-        style="width: 100%; height: 100%; border: none; margin: 0; padding: 0; display: block;"
-        title="The Bridge">
-    </iframe>
+<div id="bridge-view" style="display: none; height: 100%; width: 100%; position: relative;">
+    <div class="iframe-loading-overlay" id="bridge-iframe-loading">
+        <div class="iframe-spinner"></div>
+        <p>Loading The Bridge...</p>
+    </div>
+    <div id="bridge-view-container" style="width: 100%; height: 100%;"></div>
 </div>
 
-<div id="tamperseals-view" style="display: none; height: 100%; width: 100%;">
-    <iframe 
-        id="tamperseal-iframe"
-        data-src-base="tamperseal.html"
-        style="width: 100%; height: 100%; border: none; margin: 0; padding: 0; display: block;"
-        title="Tamper Seals">
-    </iframe>
+<div id="tamperseals-view" style="display: none; height: 100%; width: 100%; position: relative;">
+    <div class="iframe-loading-overlay" id="tamperseal-iframe-loading">
+        <div class="iframe-spinner"></div>
+        <p>Loading Tamper Seals...</p>
+    </div>
+    <div id="tamperseal-view-container" style="width: 100%; height: 100%;"></div>
+</div>
+
+<div id="sealform-view" style="display: none; height: 100%; width: 100%; flex-direction: column; position: relative;">
+    <div style="padding: 12px 20px; background: #f1f3f4; border-bottom: 1px solid #dcdcdc; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+        <strong style="color: #2e7d32; font-size: 13px;">Seal Form Preview</strong>
+        <span style="color: #888; font-size: 12px;">This is exactly what someone scanning this project's QR code would see — no LaunchPad login involved.</span>
+        <button class="tool-btn" style="margin-left: auto; border-color: #1565c0; color: #1565c0;" onclick="openSealFormQrModal()">🔗 QR Code</button>
+    </div>
+    <div style="flex: 1; display: flex; justify-content: center; background: #e8eaed; overflow: auto; position: relative;">
+        <div class="iframe-loading-overlay" id="sealform-iframe-loading">
+            <div class="iframe-spinner"></div>
+            <p>Loading Seal Form...</p>
+        </div>
+        <div
+            id="sealform-view-container"
+            style="width: 480px; max-width: 100%; height: 100%; background: white; box-shadow: 0 0 20px rgba(0,0,0,0.1); overflow: auto;">
+        </div>
+    </div>
+</div>
+
+<div id="sealFormQrModal" class="modal-overlay" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 3000; align-items: center; justify-content: center;">
+    <div style="background: white; border-radius: 10px; padding: 25px; text-align: center; box-shadow: 0 4px 15px rgba(0,0,0,0.2); width: 340px; max-height: 90vh; overflow-y: auto; box-sizing: border-box;">
+        <h3 style="margin-top: 0; color: #333;">Tamper Seal Log QR Code</h3>
+        <label style="display:block; text-align:left; font-size:12px; font-weight:700; text-transform:uppercase; color:#999; margin-bottom:4px;">Form Base URL</label>
+        <input type="text" id="sealform-qr-base-url" oninput="renderSealFormQrCode()" style="width:100%; padding:10px; border:1px solid #ddd; border-radius:6px; font-size:13px; margin-bottom:16px; box-sizing:border-box;">
+        <div id="sealform-qr-code-display"></div>
+        <div style="display: flex; gap: 10px; justify-content: center; margin-top: 20px;">
+            <button class="tool-btn" style="border-color:#757575; color:#757575;" onclick="document.getElementById('sealFormQrModal').style.display='none'">Close</button>
+        </div>
+    </div>
 </div>
 
 <div id="attributes-view" style="display: none; height: 100%; width: 100%; background: #f8f9fa;">
@@ -1603,8 +1747,8 @@ body.dark-mode .phase-row {
 
         <div class="subheader">
             <div class="subheader-item">
-                <button class="tool-btn" onclick="expandAllWeeks()">Expand Weeks</button>
-                <button class="tool-btn" onclick="expandAllDays()">Expand Days</button>
+                <button class="tool-btn" id="btn-expand-weeks" onclick="expandAllWeeks()">Expand Weeks</button>
+                <button class="tool-btn" id="btn-expand-days" onclick="expandAllDays()">Expand Days</button>
                 <button class="tool-btn" id="btn-reset" onclick="collapseEverything()">Collapse All</button>
                 <button id="ready-activities-btn" class="tool-btn" onclick="toggleReadyActivities()" style="background: #ffffff; color: #0c44fa; border-color: #0c44fa; display: inline-flex; align-items: center; gap: 8px;">
                     Ready Activities
@@ -1662,9 +1806,18 @@ body.dark-mode .phase-row {
     <p id="grant-status" style="margin-top: 15px; font-size: 14px; display: none;"></p>
 </div>
 
-<div id="project-picker" style="display: none; flex-direction: column; text-align: center; background: white; padding: 0; border-radius: 14px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); color: #333; max-width: 600px; margin: 0 20px; width: 100%; overflow: hidden;">
+<div id="project-picker" style="display: none; flex-direction: column; text-align: center; background: white; padding: 0; border-radius: 14px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); color: #333; max-width: 600px; max-height: 88vh; margin: 0 20px; width: 100%; overflow: hidden;">
     <div style="position: relative; background: linear-gradient(135deg, #1b5e20, #2e7d32); padding: 34px 28px 28px; display: flex; align-items: center; justify-content: space-between; gap: 12px; overflow: hidden;">
         <img src="https://lh3.googleusercontent.com/u/0/d/1Wy_ftXtce-UG5jV-5vwS80lV1yt7QTbG" alt="" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); height: 260%; width: auto; opacity: 0.14; filter: brightness(0) invert(1); pointer-events: none;">
+        <!-- Always visible regardless of how many projects are in the
+             scrollable list below — someone who doesn't want any of the
+             listed projects (wrong account, needs to sign in as someone
+             else, etc.) previously had no way out of this screen at all. -->
+        <button onclick="logout()" style="position: absolute; top: 12px; right: 14px; background: rgba(0,0,0,0.18); color: rgba(255,255,255,0.9); border: 1px solid rgba(255,255,255,0.35); border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 5px;"
+            onmouseover="this.style.background='rgba(0,0,0,0.32)'; this.style.color='white';"
+            onmouseout="this.style.background='rgba(0,0,0,0.18)'; this.style.color='rgba(255,255,255,0.9)';">
+            <span>🚪</span> Log Out
+        </button>
         <span style="position: relative; font-size: 46px; flex-shrink: 0;" title="LaunchPad">📡</span>
         <div style="position: relative; flex: 1; min-width: 0;">
             <h2 style="margin: 0; color: white; font-size: 27px; letter-spacing: -0.3px;">Select a Project</h2>
@@ -1672,7 +1825,18 @@ body.dark-mode .phase-row {
         </div>
         <span style="position: relative; font-size: 46px; flex-shrink: 0; display: inline-block; transform: rotate(-45deg);" title="LaunchPad">🚀</span>
     </div>
-    <div id="project-picker-list" style="padding: 28px 30px 20px; max-height: 65vh; overflow-y: auto; background: linear-gradient(rgba(255,255,255,0.85), rgba(255,255,255,0.85)), url('https://lh3.googleusercontent.com/u/0/d/1Wy_ftXtce-UG5jV-5vwS80lV1yt7QTbG') center/70% no-repeat;"></div>
+    <div id="project-picker-list" style="padding: 28px 30px 20px; flex: 1; min-height: 80px; overflow-y: auto; background: linear-gradient(rgba(255,255,255,0.85), rgba(255,255,255,0.85)), url('https://lh3.googleusercontent.com/u/0/d/1Wy_ftXtce-UG5jV-5vwS80lV1yt7QTbG') center/70% no-repeat;"></div>
+    <!-- Sticky footer, outside the scrollable list above — "Request access
+         to another project" used to be the last thing in that scrollable
+         area, so it was easy to miss below a long project list. Rendered
+         here instead (see renderProjectPicker()) so it's always visible
+         regardless of scroll position. flex-shrink:0 keeps it pinned at
+         its natural size while #project-picker-list (flex:1 above) is the
+         one that gives up space to it; its own max-height/overflow is a
+         safety net for when the request-access form is expanded (it's
+         fairly tall) so it scrolls internally instead of getting clipped
+         by #project-picker's overflow:hidden or pushed past max-height. -->
+    <div id="project-picker-footer" style="padding: 16px 30px; border-top: 1px solid #eee; background: white; flex-shrink: 0; max-height: 50vh; overflow-y: auto; text-align: left;"></div>
 </div>
 
 <div id="auth-prompt" style="display: none; text-align: center; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); color: #333; max-width: 400px; margin: 0 20px;">
@@ -1703,6 +1867,283 @@ body.dark-mode .phase-row {
     <p id="auth-success" style="color: #2e7d32; margin-top: 20px; font-size: 14px; display: none; font-weight: bold;"></p>
 </div>
 </div>
+
+<!-- Help button: only shown while the sign-in form itself is up (not the
+     loading spinner or project picker, which share the same full-screen
+     overlay) — visibility is kept in sync by a MutationObserver on
+     #auth-prompt further down, since that's set to display:block from
+     several different places in this file. -->
+<div id="launchpad-help-widget" style="display: none; position: fixed; bottom: 24px; right: 24px; z-index: 10001; align-items: center;">
+    <div id="launchpad-help-tooltip" style="position: absolute; bottom: 62px; right: 0; background: #222; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity 0.15s;">Help</div>
+    <button id="launchpad-help-btn" onclick="openHelpModal()"
+        onmouseover="document.getElementById('launchpad-help-tooltip').style.opacity='1'; this.style.transform='scale(1.08)';"
+        onmouseout="document.getElementById('launchpad-help-tooltip').style.opacity='0'; this.style.transform='scale(1)';"
+        style="width: 50px; height: 50px; border-radius: 50%; background: #1565c0; color: white; border: none; font-size: 24px; font-weight: bold; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,0.3); transition: transform 0.15s; display: flex; align-items: center; justify-content: center;"
+        aria-label="Help" title="Help">?</button>
+</div>
+
+<div id="help-modal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 10002; align-items: center; justify-content: center;">
+    <div class="help-modal-panel" style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); width: 900px; max-width: 95vw; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
+        <div class="help-dock-resize-handle" onmousedown="startHelpDockResize(event, 'help-modal')" title="Drag to resize"></div>
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #eee; background: #1565c0; color: white; flex-shrink: 0;">
+            <h3 style="margin: 0; font-size: 18px;">Requesting Access to a LaunchPad Project</h3>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <button id="launchpad-help-dock-btn" onclick="toggleHelpDock('help-modal', 'launchpad-help-dock-btn')" title="Dock to the side so you can use LaunchPad while following along" style="background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.4); color: white; border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;">⇥ Dock</button>
+                <button onclick="closeHelpModal()" style="background: none; border: none; cursor: pointer; font-size: 26px; color: white; line-height: 1; padding: 0;">&times;</button>
+            </div>
+        </div>
+        <div class="help-guide-frame-wrap">
+            <iframe id="help-modal-iframe" src="about:blank" allow="fullscreen"></iframe>
+        </div>
+    </div>
+</div>
+
+<!-- Schedule help button: only shown while viewing the Schedule tab
+     (toggled directly in switchMainView(), same place schedControls/
+     filterSidebar are shown/hidden for that view) — same bottom-right
+     "?" pattern as the sign-in screen's help button/modal above, so they
+     never need to coexist (one's pre-login, the other's post-login). -->
+<div id="schedule-help-widget" style="display: none; position: fixed; bottom: 24px; right: 24px; z-index: 10001; align-items: center;">
+    <div id="schedule-help-tooltip" style="position: absolute; bottom: 62px; right: 0; background: #222; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity 0.15s;">Help</div>
+    <button id="schedule-help-btn" onclick="openScheduleHelpModal()"
+        onmouseover="document.getElementById('schedule-help-tooltip').style.opacity='1'; this.style.transform='scale(1.08)';"
+        onmouseout="document.getElementById('schedule-help-tooltip').style.opacity='0'; this.style.transform='scale(1)';"
+        style="width: 50px; height: 50px; border-radius: 50%; background: #2e7d32; color: white; border: none; font-size: 24px; font-weight: bold; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,0.3); transition: transform 0.15s; display: flex; align-items: center; justify-content: center;"
+        aria-label="Help" title="Help">?</button>
+</div>
+
+<div id="schedule-help-modal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 10002; align-items: center; justify-content: center;">
+    <div class="help-modal-panel" style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); width: 900px; max-width: 95vw; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
+        <div class="help-dock-resize-handle" onmousedown="startHelpDockResize(event, 'schedule-help-modal')" title="Drag to resize"></div>
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #eee; background: #2e7d32; color: white; flex-shrink: 0;">
+            <h3 id="schedule-help-title" style="margin: 0; font-size: 18px;">Schedule Help &amp; Training</h3>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <button id="schedule-help-dock-btn" onclick="toggleHelpDock('schedule-help-modal', 'schedule-help-dock-btn')" title="Dock to the side so you can use LaunchPad while following along" style="background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.4); color: white; border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;">⇥ Dock</button>
+                <button onclick="closeScheduleHelpModal()" style="background: none; border: none; cursor: pointer; font-size: 26px; color: white; line-height: 1; padding: 0;">&times;</button>
+            </div>
+        </div>
+
+        <div id="schedule-help-menu" style="flex: 1; overflow-y: auto; padding: 0;">
+            <div style="padding: 26px 28px; background: linear-gradient(135deg, #1b5e20 0%, #2e7d32 55%, #43a047 100%); color: white;">
+                <p style="margin: 0 0 16px; font-size: 19px; font-weight: 700; line-height: 1.35; letter-spacing: 0.2px;">The centralized source of truth for quality control and commissioning (QCx) activities.</p>
+                <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                    <span style="background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.35); color: white; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;">📝 Individual or Bulk Add</span>
+                    <span style="background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.35); color: white; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;">✅ Result Tracking</span>
+                    <span style="background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.35); color: white; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;">🔄 Live Readiness Status</span>
+                </div>
+            </div>
+
+            <div style="padding: 24px 28px;">
+                <p style="margin: 0 0 16px; color: #333; font-size: 14px; line-height: 1.6;">Users can document activities for specific assets, including details such as time, area, trade partners, and all associated information. To optimize efficiency, activities can be added either individually or via bulk upload. These entries are subsequently updated with the results of the activity and other pertinent details.</p>
+
+                <div style="margin: 0 0 6px; color: #999; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Tracked Per Activity</div>
+                <div style="display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 20px;">
+                    <span style="background: #e8f5e9; border: 1px solid #c8e6c9; color: #1b5e20; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;">Time</span>
+                    <span style="background: #e8f5e9; border: 1px solid #c8e6c9; color: #1b5e20; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;">Area</span>
+                    <span style="background: #e8f5e9; border: 1px solid #c8e6c9; color: #1b5e20; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;">Trade Partners</span>
+                    <span style="background: #e8f5e9; border: 1px solid #c8e6c9; color: #1b5e20; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;">Associated Info</span>
+                </div>
+
+                <p style="margin: 0; padding: 14px 16px; background: #f1f8f4; border-left: 3px solid #2e7d32; border-radius: 4px; color: #1b5e20; font-size: 13.5px; font-style: italic; line-height: 1.6;">The platform evaluates and displays the readiness status of QCx activities by utilizing data derived from the commissioning software in accordance with site specifications.</p>
+            </div>
+
+            <div style="padding: 0 28px 24px;">
+                <h4 style="margin: 0 0 10px; color: #2e7d32; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">Trainings</h4>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <button class="schedule-help-guide-btn" onclick="openScheduleHelpGuide('https://scribehow.com/embed-preview/Managing_Critical_Arc_Launchpad_Schedule_Views__D7BwZdnwRUGOUQpxiErMQw?as=slides&size=flexible', 'How to Navigate Schedule')" onmouseover="this.style.background='#c8e6c9'" onmouseout="this.style.background='#f1f8f4'" style="text-align: left; padding: 14px 16px; background: #f1f8f4; border: 1px solid #c8e6c9; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; color: #1b5e20; display: flex; justify-content: space-between; align-items: center; transition: background 0.15s;">
+                        How to navigate schedule <span style="opacity:0.6;">▸</span>
+                    </button>
+                    <button class="schedule-help-guide-btn" onclick="openScheduleHelpGuide('https://scribehow.com/embed-preview/Managing_Daily_Schedule_Activities_and_Asset_Assignments__pTzsOTWJTsm2jCAdlAU4HA?as=slides&size=flexible', 'How to Add Activities')" onmouseover="this.style.background='#c8e6c9'" onmouseout="this.style.background='#f1f8f4'" style="text-align: left; padding: 14px 16px; background: #f1f8f4; border: 1px solid #c8e6c9; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; color: #1b5e20; display: flex; justify-content: space-between; align-items: center; transition: background 0.15s;">
+                        How to add activities <span style="opacity:0.6;">▸</span>
+                    </button>
+                    <button class="schedule-help-guide-btn" onclick="openScheduleHelpGuide('https://scribehow.com/embed-preview/How_to_Export_Launchpad_Activity_Reports__lP7sBefDSAe8Zkgx7eU6iA?as=slides&size=flexible', 'How to Access Filters/Reports')" onmouseover="this.style.background='#c8e6c9'" onmouseout="this.style.background='#f1f8f4'" style="text-align: left; padding: 14px 16px; background: #f1f8f4; border: 1px solid #c8e6c9; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; color: #1b5e20; display: flex; justify-content: space-between; align-items: center; transition: background 0.15s;">
+                        How to access filters/reports <span style="opacity:0.6;">▸</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div id="schedule-help-guide-view" style="display: none; flex: 1; flex-direction: column; overflow: hidden;">
+            <div style="padding: 10px 20px; border-bottom: 1px solid #eee; flex-shrink: 0;">
+                <button onclick="backToScheduleHelpMenu()" style="background: none; border: none; cursor: pointer; font-size: 13px; font-weight: 600; color: #2e7d32; padding: 4px 0;">← Back to overview</button>
+            </div>
+            <div class="help-guide-frame-wrap">
+                <iframe id="schedule-help-guide-iframe" src="about:blank" allow="fullscreen"></iframe>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Equipment Status Tracker help button: only shown while viewing that
+     tab (toggled directly in switchMainView(), same pattern as
+     schedule-help-widget above). -->
+<div id="equipment-help-widget" style="display: none; position: fixed; bottom: 24px; right: 24px; z-index: 10001; align-items: center;">
+    <div id="equipment-help-tooltip" style="position: absolute; bottom: 62px; right: 0; background: #222; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity 0.15s;">Help</div>
+    <button id="equipment-help-btn" onclick="openEquipmentHelpModal()"
+        onmouseover="document.getElementById('equipment-help-tooltip').style.opacity='1'; this.style.transform='scale(1.08)';"
+        onmouseout="document.getElementById('equipment-help-tooltip').style.opacity='0'; this.style.transform='scale(1)';"
+        style="width: 50px; height: 50px; border-radius: 50%; background: #1565c0; color: white; border: none; font-size: 24px; font-weight: bold; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,0.3); transition: transform 0.15s; display: flex; align-items: center; justify-content: center;"
+        aria-label="Help" title="Help">?</button>
+</div>
+
+<div id="equipment-help-modal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 10002; align-items: center; justify-content: center;">
+    <div class="help-modal-panel" style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); width: 900px; max-width: 95vw; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
+        <div class="help-dock-resize-handle" onmousedown="startHelpDockResize(event, 'equipment-help-modal')" title="Drag to resize"></div>
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #eee; background: #1565c0; color: white; flex-shrink: 0;">
+            <h3 id="equipment-help-title" style="margin: 0; font-size: 18px;">Equipment Status Tracker Help &amp; Training</h3>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <button id="equipment-help-dock-btn" onclick="toggleHelpDock('equipment-help-modal', 'equipment-help-dock-btn')" title="Dock to the side so you can use LaunchPad while following along" style="background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.4); color: white; border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;">⇥ Dock</button>
+                <button onclick="closeEquipmentHelpModal()" style="background: none; border: none; cursor: pointer; font-size: 26px; color: white; line-height: 1; padding: 0;">&times;</button>
+            </div>
+        </div>
+
+        <div id="equipment-help-menu" style="flex: 1; overflow-y: auto; padding: 0;">
+            <div style="padding: 26px 28px; background: linear-gradient(135deg, #0d47a1 0%, #1565c0 55%, #1976d2 100%); color: white;">
+                <p style="margin: 0 0 16px; font-size: 19px; font-weight: 700; line-height: 1.35; letter-spacing: 0.2px;">An integrated, linear overview of checklists, tests, and issues — organized by commissioning level.</p>
+                <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                    <span style="background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.35); color: white; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;">🔗 Linked to Source Data</span>
+                    <span style="background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.35); color: white; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;">📤 Custom Exports</span>
+                    <span style="background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.35); color: white; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;">⚙️ Dynamically Configurable</span>
+                </div>
+            </div>
+
+            <div style="padding: 24px 28px;">
+                <p style="margin: 0 0 16px; color: #333; font-size: 14px; line-height: 1.6;">Utilizing site specifications and commissioning software, the application generates automated status updates that illustrate the progression of each asset through the Quality Commissioning (QCx) workflow. The interface supports customizable data exports based on user-defined criteria.</p>
+
+                <div style="margin: 0 0 6px; color: #999; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Tracked Per Asset</div>
+                <div style="display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 20px;">
+                    <span style="background: #e3f2fd; border: 1px solid #bbdefb; color: #0d47a1; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;">Checklists</span>
+                    <span style="background: #e3f2fd; border: 1px solid #bbdefb; color: #0d47a1; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;">Tests</span>
+                    <span style="background: #e3f2fd; border: 1px solid #bbdefb; color: #0d47a1; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;">Issues</span>
+                </div>
+
+                <p style="margin: 0; padding: 14px 16px; background: #e3f2fd; border-left: 3px solid #1565c0; border-radius: 4px; color: #0d47a1; font-size: 13.5px; font-style: italic; line-height: 1.6;">All data presented within the interface and the generated reports features hyperlinks that direct users back to the primary commissioning software. Owing to its dynamic configuration capabilities, the application can be seamlessly adapted to accommodate evolving project requirements.</p>
+            </div>
+
+            <div style="padding: 0 28px 24px;">
+                <h4 style="margin: 0 0 10px; color: #1565c0; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">Trainings</h4>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <button class="equipment-help-guide-btn" onclick="openEquipmentHelpGuide('https://scribehow.com/embed-preview/How_to_Navigate_Equipment_Status_Tracker__Qv2TsgaERlG3B550sMuAVg?as=slides&size=flexible', 'How to Navigate')" onmouseover="this.style.background='#bbdefb'" onmouseout="this.style.background='#e3f2fd'" style="text-align: left; padding: 14px 16px; background: #e3f2fd; border: 1px solid #bbdefb; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; color: #0d47a1; display: flex; justify-content: space-between; align-items: center; transition: background 0.15s;">
+                        How to navigate <span style="opacity:0.6;">▸</span>
+                    </button>
+                    <button class="equipment-help-guide-btn" onclick="openEquipmentHelpGuide('https://scribehow.com/embed-preview/How_To_Filter_Assets_And_Export_Reports_To_PDF__VxLiZFDQSUWgyVAmV2OgaA?as=slides&size=flexible', 'How to Access Filters/Reports')" onmouseover="this.style.background='#bbdefb'" onmouseout="this.style.background='#e3f2fd'" style="text-align: left; padding: 14px 16px; background: #e3f2fd; border: 1px solid #bbdefb; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; color: #0d47a1; display: flex; justify-content: space-between; align-items: center; transition: background 0.15s;">
+                        How to access filters/reports <span style="opacity:0.6;">▸</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div id="equipment-help-guide-view" style="display: none; flex: 1; flex-direction: column; overflow: hidden;">
+            <div style="padding: 10px 20px; border-bottom: 1px solid #eee; flex-shrink: 0;">
+                <button onclick="backToEquipmentHelpMenu()" style="background: none; border: none; cursor: pointer; font-size: 13px; font-weight: 600; color: #1565c0; padding: 4px 0;">← Back to overview</button>
+            </div>
+            <div class="help-guide-frame-wrap">
+                <iframe id="equipment-help-guide-iframe" src="about:blank" allow="fullscreen"></iframe>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Dashboard help button: only shown while viewing that tab (toggled
+     directly in switchMainView(), same pattern as the other help widgets
+     above). The overview panel gets a bolder gradient/chip treatment
+     ("eyepopping") instead of a single grey paragraph like the other two,
+     per request — the copy itself is unchanged, just presented in a more
+     visually distinct way (pulled-out lead line + data-source/filter
+     chips lifted from that same copy). -->
+<div id="dashboard-help-widget" style="display: none; position: fixed; bottom: 24px; right: 24px; z-index: 10001; align-items: center;">
+    <div id="dashboard-help-tooltip" style="position: absolute; bottom: 62px; right: 0; background: #222; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity 0.15s;">Help</div>
+    <button id="dashboard-help-btn" onclick="openDashboardHelpModal()"
+        onmouseover="document.getElementById('dashboard-help-tooltip').style.opacity='1'; this.style.transform='scale(1.08)';"
+        onmouseout="document.getElementById('dashboard-help-tooltip').style.opacity='0'; this.style.transform='scale(1)';"
+        style="width: 50px; height: 50px; border-radius: 50%; background: linear-gradient(135deg, #6a1b9a, #4527a0); color: white; border: none; font-size: 24px; font-weight: bold; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,0.3); transition: transform 0.15s; display: flex; align-items: center; justify-content: center;"
+        aria-label="Help" title="Help">?</button>
+</div>
+
+<div id="dashboard-help-modal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 10002; align-items: center; justify-content: center;">
+    <div class="help-modal-panel" style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); width: 900px; max-width: 95vw; height: 85vh; display: flex; flex-direction: column; overflow: hidden;">
+        <div class="help-dock-resize-handle" onmousedown="startHelpDockResize(event, 'dashboard-help-modal')" title="Drag to resize"></div>
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #eee; background: linear-gradient(135deg, #6a1b9a, #4527a0); color: white; flex-shrink: 0;">
+            <h3 id="dashboard-help-title" style="margin: 0; font-size: 18px;">Dashboard Help &amp; Training</h3>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <button id="dashboard-help-dock-btn" onclick="toggleHelpDock('dashboard-help-modal', 'dashboard-help-dock-btn')" title="Dock to the side so you can use LaunchPad while following along" style="background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.4); color: white; border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;">⇥ Dock</button>
+                <button onclick="closeDashboardHelpModal()" style="background: none; border: none; cursor: pointer; font-size: 26px; color: white; line-height: 1; padding: 0;">&times;</button>
+            </div>
+        </div>
+
+        <div id="dashboard-help-menu" style="flex: 1; overflow-y: auto; padding: 0;">
+            <div style="padding: 26px 28px; background: linear-gradient(135deg, #4527a0 0%, #6a1b9a 55%, #8e24aa 100%); color: white;">
+                <p style="margin: 0 0 16px; font-size: 19px; font-weight: 700; line-height: 1.35; letter-spacing: 0.2px;">Turns commissioning data into an executive-readable progress picture.</p>
+                <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                    <span style="background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.35); color: white; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;">📊 CxAlloy (verified)</span>
+                    <span style="background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.35); color: white; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;">🗓️ LaunchPad (planned)</span>
+                    <span style="background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.35); color: white; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;">📈 Planned vs. Actual</span>
+                </div>
+            </div>
+
+            <div style="padding: 24px 28px;">
+                <p style="margin: 0 0 16px; color: #333; font-size: 14px; line-height: 1.6;">It reads directly from the commissioning software of record (CxAlloy) – issues, checklists, functional tests, equipment, people and companies – and pairs it with planned QCx activity data from LaunchPad, so the planned and the verified side of the job sit in one view.</p>
+
+                <p style="margin: 0 0 16px; color: #333; font-size: 14px; line-height: 1.6;">Because both sides are present, the dashboard reports progress against schedule rather than in isolation: completion by trade and by contractor, aging and escalation, test pass rates, and equipment-level readiness. Every metric filters by discipline, trade partner, status and building phase, so the same dashboard serves a project executive looking at the whole job and a foreman looking only at their own scope.</p>
+
+                <div style="display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 20px;">
+                    <span style="background: #f3e5f5; border: 1px solid #e1bee7; color: #4a148c; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;">Discipline</span>
+                    <span style="background: #f3e5f5; border: 1px solid #e1bee7; color: #4a148c; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;">Trade Partner</span>
+                    <span style="background: #f3e5f5; border: 1px solid #e1bee7; color: #4a148c; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;">Status</span>
+                    <span style="background: #f3e5f5; border: 1px solid #e1bee7; color: #4a148c; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;">Building Phase</span>
+                </div>
+
+                <p style="margin: 0 0 16px; padding: 14px 16px; background: #f8f5fb; border-left: 3px solid #6a1b9a; border-radius: 4px; color: #4a148c; font-size: 13.5px; font-style: italic; line-height: 1.6;">The intent is not another reporting screen. It takes data the team already trusts, presents it in an interface built to drive action rather than to be read, and uses planned-versus-actual to make the picture predictive instead of reactive.</p>
+
+                <p style="margin: 0; color: #666; font-size: 12.5px; line-height: 1.6;">The client-facing build ships as a self-contained static bundle that drops into an existing web app behind the customer's own login.</p>
+            </div>
+
+            <div style="padding: 0 28px 24px;">
+                <h4 style="margin: 0 0 10px; color: #6a1b9a; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">Trainings</h4>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <button class="dashboard-help-guide-btn" onclick="openDashboardHelpGuide('https://scribehow.com/embed-preview/How_To_Navigate_The_KPI_Dashboard__o9CHagCtTWyRNvEXyggKgA?as=slides&size=flexible', 'How to Navigate KPI Dashboard')" onmouseover="this.style.background='#e1bee7'" onmouseout="this.style.background='#f3e5f5'" style="text-align: left; padding: 14px 16px; background: #f3e5f5; border: 1px solid #e1bee7; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; color: #4a148c; display: flex; justify-content: space-between; align-items: center; transition: background 0.15s;">
+                        How to navigate KPI dashboard <span style="opacity:0.6;">▸</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div id="dashboard-help-guide-view" style="display: none; flex: 1; flex-direction: column; overflow: hidden;">
+            <div style="padding: 10px 20px; border-bottom: 1px solid #eee; flex-shrink: 0;">
+                <button onclick="backToDashboardHelpMenu()" style="background: none; border: none; cursor: pointer; font-size: 13px; font-weight: 600; color: #6a1b9a; padding: 4px 0;">← Back to overview</button>
+            </div>
+            <div class="help-guide-frame-wrap">
+                <iframe id="dashboard-help-guide-iframe" src="about:blank" allow="fullscreen"></iframe>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Dashboard settings: currently just the display title override (the
+     title otherwise comes straight from the synced project_name in the
+     Apps Script/Sheets data — see dashboard.js renderAll()). Reached via
+     the same gear icon as Schedule/Equipment Tracker settings
+     (openSettingsForCurrentView() branches on window.__currentView), so
+     it's already admin-gated the same way those are (nav-settings itself
+     is hidden for non-admins). -->
+<div id="dashboard-settings-modal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 2000; align-items: center; justify-content: center;">
+    <div style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.25); width: 440px; max-width: 90vw; display: flex; flex-direction: column; overflow: hidden;">
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 18px 20px; border-bottom: 1px solid #eee;">
+            <h3 style="margin: 0; color: #6a1b9a;">Dashboard Settings</h3>
+            <button onclick="closeDashboardSettingsModal()" style="background: none; border: none; cursor: pointer; font-size: 22px; color: #999;">&times;</button>
+        </div>
+        <div style="padding: 20px; display: flex; flex-direction: column; gap: 8px;">
+            <label for="dashboard-title-input" style="font-size: 13px; font-weight: 600; color: #444;">Dashboard Title</label>
+            <input id="dashboard-title-input" type="text" placeholder="e.g. SAN Airline Tenant Improvements (BOH)" style="padding: 10px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+            <p id="dashboard-title-hint" style="margin: 2px 0 0; font-size: 12px; color: #888; line-height: 1.5;"></p>
+        </div>
+        <div style="display: flex; justify-content: flex-end; gap: 10px; padding: 16px 20px; border-top: 1px solid #eee; background: #fafafa;">
+            <button onclick="closeDashboardSettingsModal()" style="padding: 9px 16px; background: none; border: 1px solid #ddd; border-radius: 6px; cursor: pointer; font-size: 13px; color: #555;">Cancel</button>
+            <button onclick="saveDashboardSettings()" style="padding: 9px 16px; background: #6a1b9a; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; color: white;">Save</button>
+        </div>
+    </div>
+</div>
+
 <div id="admin-panel" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 2000; align-items: center; justify-content: center;">
     <div style="background: white; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.25); width: 480px; max-width: 90vw; max-height: 80vh; display: flex; flex-direction: column; overflow: hidden;">
         <div style="display: flex; justify-content: space-between; align-items: center; padding: 18px 20px; border-bottom: 1px solid #eee;">
@@ -1740,7 +2181,7 @@ body.dark-mode .phase-row {
         </button>
     </div>
 </div>
-<div id="history-menu" style="display:none; position:fixed; background:white; border:1px solid #ccc; box-shadow:0 4px 15px rgba(0,0,0,0.2); z-index:9999; width:280px; padding:0; border-radius:8px; overflow:hidden; font-family: sans-serif;">
+<div id="history-menu" style="display:none; position:fixed; background:white; border:1px solid #ccc; box-shadow:0 4px 15px rgba(0,0,0,0.2); z-index:9999; width:280px; padding:0; border-radius:8px; overflow:hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
     <div style="background:#2e7d32; color:white; padding:10px; font-size:14px; font-weight:bold; display:flex; justify-content:space-between;">
         <span>Cell Edit History</span>
         <span onclick="document.getElementById('history-menu').style.display='none'" style="cursor:pointer;">×</span>
@@ -1767,10 +2208,14 @@ const defaultScheduleConfig = [
 
 async function loadScheduleConfig() {
     try {
-        const response = await fetch(`${GOOGLE_SCRIPT_URL}?action=getScheduleConfig&t=${new Date().getTime()}`);
-        const data = await response.json();
-        if (data.status === 'success' && data.data) {
-            scheduleColConfig = typeof data.data === 'string' ? JSON.parse(data.data) : data.data;
+        const { data: row, error } = await _supabase
+            .from('launchpad_schedule_config')
+            .select('column_config')
+            .eq('project_key', window.LP_CONFIG.projectKey)
+            .maybeSingle();
+        if (error) throw error;
+        if (row && row.column_config && row.column_config.length) {
+            scheduleColConfig = row.column_config;
             
             if (!scheduleColConfig.find(c => c.id === 9)) {
                 scheduleColConfig.push({ id: 9, name: 'Duration', visible: true, width: 5 });
@@ -1793,9 +2238,11 @@ async function loadScheduleConfig() {
             if (totalWidth > 105) {
                 scheduleColConfig.forEach(col => { col.width = ((col.width / totalWidth) * 100); });
             }
+
+            LP_CACHE.set('scheduleColConfig', scheduleColConfig);
         }
     } catch (e) {
-        console.error("Failed to load Schedule Config from cloud. Using defaults.", e);
+        console.error("Failed to load Schedule Config from Supabase. Using defaults.", e);
     }
     renderDynamicHeaders();
 }
@@ -1811,13 +2258,28 @@ function toggleDarkMode() {
     // Save preference to local storage
     localStorage.setItem('launchpad_dark_mode', isDark ? 'enabled' : 'disabled');
     
-    // Broadcast to ALL iframes on the page (Equipment Tracker, Attributes, etc.)
+    // Broadcast to ALL iframes on the page (Bridge, Tamper Seals, etc.)
     const iframes = document.querySelectorAll('iframe');
     iframes.forEach(iframe => {
         if (iframe && iframe.contentWindow) {
             iframe.contentWindow.postMessage({ type: 'TOGGLE_DARK_MODE', isDark: isDark }, '*');
         }
     });
+
+    // equipment-tracker-view, bridge-view, and tamperseal-view are custom
+    // elements now, not iframes — call their dark-mode method directly
+    // instead of posting a message (the iframe broadcast above can't reach
+    // them at all; this is what made Bridge and Tamper Seals never
+    // respond to the toggle even though Equipment Tracker did).
+    const equipmentTrackerEl = document.querySelector('equipment-tracker-view');
+    if (equipmentTrackerEl) equipmentTrackerEl.setDarkMode(isDark);
+    const bridgeEl = document.querySelector('bridge-view');
+    if (bridgeEl) bridgeEl.setDarkMode(isDark);
+    const tamperSealEl = document.querySelector('tamperseal-view');
+    if (tamperSealEl) tamperSealEl.setDarkMode(isDark);
+    // Dashboard is a plain JS class instance (dashboard.js), not a custom
+    // element — ensureDashboardMounted() stores it here once it's loaded.
+    if (window.caDashboardInstance) window.caDashboardInstance.setDarkMode(isDark);
 
     // Re-run the color logic on every colored cell so already-rendered rows
     // immediately pick up the correct light/dark colors instead of waiting
@@ -1850,7 +2312,7 @@ function saveScheduleConfig() {
 }
 
 let appConfig = {
-    sidebar: { schedule: true, equipment: true, attributes: true, dashboard: true, bridge: true, tamperSeals: true }
+    sidebar: { schedule: true, equipment: true, attributes: true, dashboard: true, bridge: true, tamperSeals: true, sealForm: false }
 };
 
 function applySidebarConfig() {
@@ -1860,6 +2322,7 @@ function applySidebarConfig() {
     const navDashboard = document.querySelector('.nav-item[onclick*="dashboard"]');
     const navBridge = document.querySelector('.nav-item[onclick*="bridge"]');
     const navTamperSeals = document.querySelector('.nav-item[onclick*="tamperseals"]');
+    const navSealForm = document.getElementById('nav-sealform');
 
     if (navSchedule) navSchedule.style.display = appConfig.sidebar.schedule ? 'flex' : 'none';
     if (navEquipment) navEquipment.style.display = appConfig.sidebar.equipment ? 'flex' : 'none';
@@ -1867,6 +2330,7 @@ function applySidebarConfig() {
     if (navDashboard) navDashboard.style.display = appConfig.sidebar.dashboard ? 'flex' : 'none';
     if (navBridge) navBridge.style.display = appConfig.sidebar.bridge ? 'flex' : 'none';
     if (navTamperSeals) navTamperSeals.style.display = appConfig.sidebar.tamperSeals ? 'flex' : 'none';
+    if (navSealForm) navSealForm.style.display = appConfig.sidebar.sealForm ? 'flex' : 'none';
     
     // If the default Schedule view is hidden by the admin, auto-route the user to the first available module
     if (!appConfig.sidebar.schedule) {
@@ -1902,7 +2366,6 @@ const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
     <table id="grid"></table>
 
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="settings.js"></script>
 
 <script>
@@ -2255,7 +2718,227 @@ document.addEventListener('click', (e) => {
     }
 });
 
+// ===== SEAL FORM PREVIEW (Settings/testing view — not for field use) =====
+// Lets an admin see exactly what someone scanning a real QR code would see,
+// without needing to physically print/scan anything. Loads the SAME
+// standalone seal-form.html field workers use, just embedded in an iframe
+// here with the project/asset/section wired up from the dropdowns above it.
+async function loadSealFormPreview() {
+    window.sealFormAssetsLoaded = true;
+    const container = document.getElementById('sealform-view-container');
+    if (!container || !window.LP_CONFIG) return;
+
+    const overlay = document.getElementById('sealform-iframe-loading');
+    if (overlay) overlay.style.display = 'flex';
+
+    if (!cachedSealFormProjectUuid) {
+        try {
+            const { data } = await _supabase
+                .from('launchpad_projects')
+                .select('public_uuid')
+                .eq('project_key', window.LP_CONFIG.projectKey)
+                .maybeSingle();
+            cachedSealFormProjectUuid = data ? data.public_uuid : null;
+        } catch (e) {
+            console.error('Could not load project identifier for Seal Form preview:', e);
+        }
+    }
+
+    if (!cachedSealFormProjectUuid) {
+        if (overlay) overlay.style.display = 'none';
+        container.innerHTML = '';
+        return;
+    }
+
+    await import('./seal-form-view.js');
+    container.innerHTML = '';
+    const el = document.createElement('seal-form-view');
+    el.setAttribute('project-uuid', cachedSealFormProjectUuid);
+    el.setAttribute('embedded', ''); // suppress document.title changes
+    el.supabaseClient = window.launchpadSupabaseClient; // reuse the shell's authenticated client
+    el.addEventListener('view-ready', () => { if (overlay) overlay.style.display = 'none'; }, { once: true });
+    container.appendChild(el);
+}
+
+// ===== QR CODE GENERATION =====
+// One QR code per project — the field-facing form itself now handles
+// picking an action and searching for seals, so there's no need for
+// separate per-asset or per-section codes. The base URL is editable and
+// remembered per-browser, since where seal-form.html actually ends up
+// hosted isn't something this app can know on its own.
+let cachedSealFormProjectUuid = null;
+
+async function openSealFormQrModal() {
+    if (!window.LP_CONFIG) return;
+    const savedBase = localStorage.getItem('sealFormBaseUrl') || (window.location.origin + '/seal-form.html');
+    document.getElementById('sealform-qr-base-url').value = savedBase;
+
+    // The QR code links using an opaque per-project identifier, not the
+    // readable project key — that key is short and guessable, and this
+    // form requires no login at all, so a predictable identifier in a
+    // public link would make other projects' forms easy to enumerate.
+    if (!cachedSealFormProjectUuid) {
+        try {
+            const { data } = await _supabase
+                .from('launchpad_projects')
+                .select('public_uuid')
+                .eq('project_key', window.LP_CONFIG.projectKey)
+                .maybeSingle();
+            cachedSealFormProjectUuid = data ? data.public_uuid : null;
+        } catch (e) {
+            console.error('Could not load project identifier for QR code:', e);
+        }
+    }
+
+    renderSealFormQrCode();
+    document.getElementById('sealFormQrModal').style.display = 'flex';
+}
+
+function renderSealFormQrCode() {
+    const baseUrl = document.getElementById('sealform-qr-base-url').value.trim();
+    localStorage.setItem('sealFormBaseUrl', baseUrl);
+
+    if (!cachedSealFormProjectUuid) {
+        document.getElementById('sealform-qr-code-display').innerHTML = `
+            <div style="color:#d32f2f; font-size:13px;">Could not generate a QR code — this project is missing its identifier. Contact support.</div>
+        `;
+        return;
+    }
+
+    const projectKey = window.LP_CONFIG.projectKey;
+    const url = `${baseUrl}?id=${encodeURIComponent(cachedSealFormProjectUuid)}`;
+    const qrImgSrc = `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(url)}`;
+
+    document.getElementById('sealform-qr-code-display').innerHTML = `
+        <img src="${qrImgSrc}" alt="QR code for this project's Tamper Seal Log" style="width:200px; height:200px;">
+        <div style="margin-top:10px; font-size:12px; color:#888; word-break:break-all;">${url}</div>
+        <div style="margin-top:12px; display:flex; gap:8px; justify-content:center;">
+            <a href="${qrImgSrc}" download="${projectKey}-tamper-seal-form.png" class="tool-btn" style="text-decoration:none; padding:6px 12px; font-size:12px;">Download</a>
+            <button class="tool-btn" style="padding:6px 12px; font-size:12px;" onclick="navigator.clipboard.writeText('${url.replace(/'/g, "\\'")}'); this.innerText='Copied!'; setTimeout(() => this.innerText='Copy Link', 1500);">Copy Link</button>
+        </div>
+    `;
+}
+
+// All four previously-iframed tabs (equipment, bridge, tamperseals,
+// sealform) are now custom elements mounted directly into the DOM instead
+// of iframes — see CUSTOM_ELEMENT_VIEWS/ensureViewMounted() below and
+// loadSealFormPreview() (sealform predates this map and has its own async
+// project-uuid lookup, so it's wired by hand rather than through here).
+// IFRAME_VIEW_MAP/loadIframeIfNeeded() are kept only in case a future tab
+// still needs the iframe path.
+const IFRAME_VIEW_MAP = {};
+
+// Views that are mounted as custom elements (Shadow DOM components) rather
+// than iframes — see ensureViewMounted() below, which mirrors the same
+// lazy-on-first-click pattern loadIframeIfNeeded() uses for the rest.
+const CUSTOM_ELEMENT_VIEWS = {
+    equipment: { tag: 'equipment-tracker-view', module: './equipment-tracker-view.js', container: 'equipment-tracker-view-container' },
+    tamperseals: { tag: 'tamperseal-view', module: './tamperseal-view.js', container: 'tamperseal-view-container' },
+    bridge: { tag: 'bridge-view', module: './bridge-view.js', container: 'bridge-view-container' }
+};
+const _viewMountPromises = {};
+function ensureViewMounted(viewType) {
+    const cfg = CUSTOM_ELEMENT_VIEWS[viewType];
+    if (!cfg) return Promise.resolve();
+    if (!_viewMountPromises[viewType]) {
+        _viewMountPromises[viewType] = import(cfg.module).then(() => {
+            const container = document.getElementById(cfg.container);
+            if (!container || container.querySelector(cfg.tag)) return; // already mounted
+            const el = document.createElement(cfg.tag);
+            el.setAttribute('project', window.LP_CONFIG.projectKey);
+            if (window.LP_CONFIG.googleScriptUrl) el.setAttribute('script-url', window.LP_CONFIG.googleScriptUrl);
+            if (window.userRole) el.setAttribute('role', window.userRole);
+            if (window.__currentUserEmail) el.setAttribute('email', window.__currentUserEmail);
+            el.supabaseClient = window.launchpadSupabaseClient; // reuse the shell's authenticated client
+            container.appendChild(el);
+        }).catch(err => {
+            _viewMountPromises[viewType] = null; // allow retry on next tab switch
+            console.error(`${viewType} view failed to load:`, err);
+        });
+    }
+    return _viewMountPromises[viewType];
+}
+function teardownCustomElementView(viewType) {
+    const cfg = CUSTOM_ELEMENT_VIEWS[viewType];
+    if (!cfg) return;
+    const container = document.getElementById(cfg.container);
+    if (container) container.innerHTML = ''; // removing the element runs its disconnectedCallback
+    _viewMountPromises[viewType] = null;
+}
+
+// Lazy-load helper: fetches a <script src> only once, caching the promise
+// so repeated calls (e.g. switching tabs back and forth) reuse the same
+// load instead of re-requesting it. Used to keep heavy, feature-specific
+// libraries (Plotly, html5-qrcode) off the critical path on startup.
+function loadScriptOnce(src) {
+    window.__loadedScripts = window.__loadedScripts || {};
+    if (!window.__loadedScripts[src]) {
+        window.__loadedScripts[src] = new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = src;
+            s.onload = () => resolve();
+            s.onerror = () => reject(new Error('Failed to load ' + src));
+            document.head.appendChild(s);
+        });
+    }
+    return window.__loadedScripts[src];
+}
+
+let _dashboardMountPromise = null;
+function ensureDashboardMounted() {
+    if (!_dashboardMountPromise) {
+        _dashboardMountPromise = loadScriptOnce('https://cdn.plot.ly/plotly-2.35.2.min.js')
+            .then(() => import('./dashboard.js'))
+            .then(({ CriticalArcDashboard }) => {
+                window.caDashboardInstance = new CriticalArcDashboard('launchpad-dashboard-container');
+                return window.caDashboardInstance.mount();
+            })
+            .catch(err => {
+                _dashboardMountPromise = null; // allow retry on next tab switch
+                console.error("Dashboard error:", err);
+            });
+    }
+    return _dashboardMountPromise;
+}
+
 function switchMainView(viewType, btn) {
+    // Tear down whichever iframe-based tab is being LEFT (not the one being
+    // entered) — resetting its src to '' fully destroys that iframe's JS
+    // context, closing its own Supabase client, any polling intervals, and
+    // realtime subscriptions, rather than letting it keep running invisibly
+    // in the background for the rest of the session. loadIframeIfNeeded()
+    // already re-checks iframe.src truthiness, so an emptied src correctly
+    // triggers a full rebuild next time that tab is opened.
+    if (window.__currentView && window.__currentView !== viewType) {
+        const oldIframeId = IFRAME_VIEW_MAP[window.__currentView];
+        if (oldIframeId) {
+            const oldIframe = document.getElementById(oldIframeId);
+            if (oldIframe && oldIframe.src) {
+                // removeAttribute, not src='' — setting .src directly gets
+                // normalized by the browser to a resolved (truthy) URL like
+                // "about:blank", which made loadIframeIfNeeded()'s "already
+                // loaded" check think the iframe still had real content and
+                // skip rebuilding it — that's what caused the blank screen
+                // on returning to a tab.
+                oldIframe.removeAttribute('src');
+            }
+        }
+        // Custom-element views (equipment tracker, etc.) are real element
+        // instances, not iframes — tearing one down means removing it from
+        // the DOM outright (its disconnectedCallback detaches its own
+        // document-level listeners), same "fully destroy, rebuild next
+        // time" behavior the iframes get above.
+        teardownCustomElementView(window.__currentView);
+        // seal-form-view predates CUSTOM_ELEMENT_VIEWS and isn't routed
+        // through ensureViewMounted() (it has its own async project-uuid
+        // lookup in loadSealFormPreview()), so it's torn down the same way
+        // but by hand here.
+        if (window.__currentView === 'sealform') {
+            const sealformContainer = document.getElementById('sealform-view-container');
+            if (sealformContainer) sealformContainer.innerHTML = '';
+            window.sealFormAssetsLoaded = false;
+        }
+    }
     window.__currentView = viewType;
 
     // 1. Target the main view containers
@@ -2264,6 +2947,7 @@ function switchMainView(viewType, btn) {
     const equipmentView = document.getElementById('equipment-tracker-view'); 
     const bridgeView = document.getElementById('bridge-view');
     const tamperSealsView = document.getElementById('tamperseals-view');
+    const sealFormView = document.getElementById('sealform-view');
     const sett = document.getElementById('settings-view'); 
     const attrView = document.getElementById('attributes-view'); // <-- ADDED THIS
     
@@ -2271,6 +2955,9 @@ function switchMainView(viewType, btn) {
     const schedControls = document.getElementById('schedule-header-controls');
     const altImage = document.getElementById('alternate-header-img');
     const filterSidebar = document.getElementById('filter-sidebar');
+    const scheduleHelpWidget = document.getElementById('schedule-help-widget');
+    const equipmentHelpWidget = document.getElementById('equipment-help-widget');
+    const dashboardHelpWidget = document.getElementById('dashboard-help-widget');
     
     // 3. Target schedule layout wrappers & app body
     const mainContent = document.getElementById('main-content-area');
@@ -2289,40 +2976,69 @@ function switchMainView(viewType, btn) {
     if (equipmentView) equipmentView.style.display = 'none';
     if (bridgeView) bridgeView.style.display = 'none';
     if (tamperSealsView) tamperSealsView.style.display = 'none';
+    if (sealFormView) sealFormView.style.display = 'none';
     if (attrView) attrView.style.display = 'none'; // <-- ADDED THIS
     
     // By default, hide schedule-specific tools and show the alternate image
     if (schedControls) schedControls.style.display = 'none';
     if (altImage) altImage.style.display = 'block';
     if (filterSidebar) filterSidebar.style.display = 'none';
+    if (scheduleHelpWidget) scheduleHelpWidget.style.display = 'none';
+    if (equipmentHelpWidget) equipmentHelpWidget.style.display = 'none';
+    if (dashboardHelpWidget) dashboardHelpWidget.style.display = 'none';
 
     // Route view choice
     if (viewType === 'dashboard') {
         if (dash) dash.style.display = 'block';
-        if (appBody) appBody.style.width = 'calc(100% - 36px)'; 
-        // NEW: Lazy load the dashboard only when clicked
-        if (window.caDashboardInstance && !window.caDashboardMounted) {
-            window.caDashboardMounted = true;
-            window.caDashboardInstance.mount().catch(err => console.error("Dashboard error:", err));
+        if (dashboardHelpWidget) dashboardHelpWidget.style.display = 'flex';
+        if (appBody) appBody.style.width = 'calc(100% - 36px)';
+        // Lazy load Plotly + the dashboard module only when this tab is opened
+        ensureDashboardMounted();
+    } else if (viewType === 'equipment') {
+        if (equipmentView) equipmentView.style.display = 'block';
+        if (equipmentHelpWidget) equipmentHelpWidget.style.display = 'flex';
+        if (appBody) appBody.style.width = 'calc(100% - 36px)';
+        // The overlay only covers "module loaded + element mounted" —
+        // equipment-tracker-view has its own internal loading overlay for
+        // the actual data fetch, same layering the old iframe had (this
+        // outer spinner used to hide on the iframe's 'load' event, which
+        // fired once its HTML/JS parsed, well before its data finished
+        // fetching).
+        const equipOverlay = document.getElementById('equipment-tracker-iframe-loading');
+        if (equipOverlay && !document.querySelector('#equipment-tracker-view-container equipment-tracker-view')) {
+            equipOverlay.style.display = 'flex';
         }
-    } else if (viewType === 'equipment') { 
-        if (equipmentView) equipmentView.style.display = 'block'; 
-        if (appBody) appBody.style.width = 'calc(100% - 36px)'; 
-    } else if (viewType === 'bridge') { 
-        if (bridgeView) bridgeView.style.display = 'block'; 
-        if (appBody) appBody.style.width = 'calc(100% - 36px)'; 
-        // PERF/BUGFIX: the iframe renders its initial layout while still
+        ensureViewMounted('equipment').then(() => { if (equipOverlay) equipOverlay.style.display = 'none'; });
+    } else if (viewType === 'bridge') {
+        if (bridgeView) bridgeView.style.display = 'block';
+        if (appBody) appBody.style.width = 'calc(100% - 36px)';
+        const bridgeOverlay = document.getElementById('bridge-iframe-loading');
+        if (bridgeOverlay && !document.querySelector('#bridge-view-container bridge-view')) {
+            bridgeOverlay.style.display = 'flex';
+        }
+        // PERF/BUGFIX: the component renders its initial layout while still
         // display:none (measurements are all 0 at that point), so its
         // dependency connector lines never draw until something re-triggers
-        // a render. Tell it it's now actually visible so it can redo that
-        // measurement-dependent work.
-        const bridgeIframe = bridgeView ? bridgeView.querySelector('iframe') : null;
-        if (bridgeIframe && bridgeIframe.contentWindow) {
-            bridgeIframe.contentWindow.postMessage({ type: 'BRIDGE_VIEW_SHOWN' }, '*');
+        // a render. notifyVisible() tells it it's now actually visible so
+        // it can redo that measurement-dependent work — called every time
+        // this tab is opened, not just on first mount.
+        ensureViewMounted('bridge').then(() => {
+            if (bridgeOverlay) bridgeOverlay.style.display = 'none';
+            const bridgeEl = document.querySelector('#bridge-view-container bridge-view');
+            if (bridgeEl) bridgeEl.notifyVisible();
+        });
+    } else if (viewType === 'tamperseals') {
+        if (tamperSealsView) tamperSealsView.style.display = 'block';
+        if (appBody) appBody.style.width = 'calc(100% - 36px)';
+        const tsOverlay = document.getElementById('tamperseal-iframe-loading');
+        if (tsOverlay && !document.querySelector('#tamperseal-view-container tamperseal-view')) {
+            tsOverlay.style.display = 'flex';
         }
-    } else if (viewType === 'tamperseals') { 
-        if (tamperSealsView) tamperSealsView.style.display = 'block'; 
-        if (appBody) appBody.style.width = 'calc(100% - 36px)'; 
+        ensureViewMounted('tamperseals').then(() => { if (tsOverlay) tsOverlay.style.display = 'none'; });
+    } else if (viewType === 'sealform') {
+        if (sealFormView) sealFormView.style.display = 'flex';
+        if (appBody) appBody.style.width = 'calc(100% - 36px)';
+        if (!window.sealFormAssetsLoaded) loadSealFormPreview();
     } else if (viewType === 'attributes') {
         if (attrView) {
             attrView.style.display = 'flex'; // Use flex for the side-by-side layout
@@ -2334,11 +3050,12 @@ function switchMainView(viewType, btn) {
         // IF VIEWING SCHEDULE: Bring back all schedule-specific elements
         if (schedControls) schedControls.style.display = 'flex';
         if (altImage) altImage.style.display = 'none';
-        if (filterSidebar) filterSidebar.style.display = 'flex'; 
-        
+        if (filterSidebar) filterSidebar.style.display = 'flex';
+        if (scheduleHelpWidget) scheduleHelpWidget.style.display = 'flex';
+
         // Squeeze the screen back to make room for the right-hand filter bar
         if (appBody) appBody.style.width = 'calc(100% - 72px)';
-        
+
         if (sched) sched.style.display = 'block';
         if (mainContent) mainContent.style.display = 'block';
         if (subheader) subheader.style.display = 'flex';
@@ -2457,7 +3174,7 @@ function openSearchableSingleSelect(cellElement, colIndex) {
     if (!menu) {
         menu = document.createElement('div');
         menu.id = 'single-select-menu';
-        menu.style.cssText = 'display: none; position: absolute; background: white; border: 1px solid #ccc; box-shadow: 0 4px 12px rgba(0,0,0,0.15); border-radius: 4px; z-index: 10000; max-height: 280px; flex-direction: column; min-width: 220px; font-family: sans-serif;';
+        menu.style.cssText = 'display: none; position: absolute; background: white; border: 1px solid #ccc; box-shadow: 0 4px 12px rgba(0,0,0,0.15); border-radius: 4px; z-index: 10000; max-height: 280px; flex-direction: column; min-width: 220px; font-family: \'Segoe UI\', Tahoma, Geneva, Verdana, sans-serif;';
         document.body.appendChild(menu);
         
         const searchInput = document.createElement('input');
@@ -2736,28 +3453,38 @@ function startQRScanner(assetName, groupName) { // --- NEW: Accepts groupName --
     const viewport = document.getElementById('scanner-viewport');
     viewport.innerHTML = `
         <div id="qr-reader" style="width: 100%; border-radius: 8px; overflow: hidden; background: #000; min-height: 250px;"></div>
-        <p style="text-align: center; font-size: 13px; color: #666; margin-top: 10px;">Align QR code inside the box.</p>
+        <p style="text-align: center; font-size: 13px; color: #666; margin-top: 10px;">Loading scanner…</p>
         <button onclick="stopScanner()" style="width:100%; padding:10px; background:#f5f5f5; border:1px solid #ddd; border-radius:4px; font-weight:bold; cursor:pointer; margin-top:10px;">Cancel</button>
     `;
 
-    window.html5Qrcode = new Html5Qrcode("qr-reader");
+    loadScriptOnce('https://unpkg.com/html5-qrcode').then(() => {
+        // The modal may have been cancelled while the library was loading.
+        if (document.getElementById('scanner-modal').style.display === 'none') return;
+        const hint = viewport.querySelector('p');
+        if (hint) hint.textContent = 'Align QR code inside the box.';
 
-    window.html5Qrcode.start(
-        { facingMode: "environment" },
-        { fps: 10, qrbox: { width: 250, height: 250 } },
-        (decodedText) => {
-            if (window.html5Qrcode) {
-                window.html5Qrcode.stop().then(() => {
-                    window.html5Qrcode.clear();
-                    window.html5Qrcode = null;
-                    showQRMappingUI(decodedText);
-                }).catch(e => console.log(e));
-            }
-        },
-        (err) => { /* ignore frame errors */ }
-    ).catch((err) => {
-        console.error("Camera access error:", err);
-        viewport.innerHTML = `<p style="color: #d32f2f; padding: 20px; text-align: center;">Camera access denied or unavailable.</p>`;
+        window.html5Qrcode = new Html5Qrcode("qr-reader");
+
+        window.html5Qrcode.start(
+            { facingMode: "environment" },
+            { fps: 10, qrbox: { width: 250, height: 250 } },
+            (decodedText) => {
+                if (window.html5Qrcode) {
+                    window.html5Qrcode.stop().then(() => {
+                        window.html5Qrcode.clear();
+                        window.html5Qrcode = null;
+                        showQRMappingUI(decodedText);
+                    }).catch(e => console.log(e));
+                }
+            },
+            (err) => { /* ignore frame errors */ }
+        ).catch((err) => {
+            console.error("Camera access error:", err);
+            viewport.innerHTML = `<p style="color: #d32f2f; padding: 20px; text-align: center;">Camera access denied or unavailable.</p>`;
+        });
+    }).catch((err) => {
+        console.error("Scanner library failed to load:", err);
+        viewport.innerHTML = `<p style="color: #d32f2f; padding: 20px; text-align: center;">Could not load scanner — check your connection.</p>`;
     });
 }
 
@@ -3792,6 +4519,7 @@ function revealElement(el) {
         const weekContent = weekContainer.querySelector('.week-content');
         if (weekContent) weekContent.classList.remove('hidden');
     }
+    updateExpandCollapseButtons();
 }
 
 function updateSearchUI() {
@@ -3885,6 +4613,12 @@ async function triggerFullStatusRefresh() {
         // 1. Initialize Supabase
         const { createClient } = supabase;
         const _supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+        // Exposed so the custom elements mounted below (seal-form-view,
+        // equipment-tracker-view, etc.) can reuse this already-authenticated
+        // client instead of each creating and authenticating their own —
+        // they fall back to creating their own only when loaded standalone
+        // (no shell around them at all).
+        window.launchpadSupabaseClient = _supabase;
 
         // A top-level `const` in a classic <script> is script-scoped, not a
         // property of window, so ES modules on this page (dashboard.js is
@@ -3919,6 +4653,40 @@ async function triggerFullStatusRefresh() {
             return `${window.LP_CONFIG.tablePrefix}${tableName}`;
         }
 
+        // Fast-reload cache: remembers the last successful copy of a few
+        // expensive things (schedule rows, dropdown options, column/app
+        // config) per project, in localStorage, so the next visit can paint
+        // the app instantly from that instead of waiting on the network —
+        // see continueStartAppAfterProject() for how it's used. Never a
+        // source of truth: every cached value gets silently refreshed and
+        // re-saved in the background right after it's shown.
+        const LP_CACHE_VERSION = 'v1';
+        const LP_CACHE = {
+            _key(name) {
+                const prefix = window.LP_CONFIG.tablePrefix || 'unknown';
+                return `lp_cache_${LP_CACHE_VERSION}_${prefix}_${name}`;
+            },
+            get(name) {
+                try {
+                    const raw = localStorage.getItem(this._key(name));
+                    if (!raw) return null;
+                    const parsed = JSON.parse(raw);
+                    return (parsed && parsed.value !== undefined) ? parsed.value : null;
+                } catch (e) {
+                    return null;
+                }
+            },
+            set(name, value) {
+                try {
+                    localStorage.setItem(this._key(name), JSON.stringify({ value, savedAt: Date.now() }));
+                } catch (e) {
+                    // Caching is a nice-to-have (quota exceeded / private
+                    // browsing can throw here) — never let it break the app.
+                    console.warn('LP_CACHE: could not save', name, e);
+                }
+            }
+        };
+
         // --- THE FIX: Let Supabase officially flag when a password reset happens ---
         _supabase.auth.onAuthStateChange((event, session) => {
             if (event === 'PASSWORD_RECOVERY') {
@@ -3942,6 +4710,338 @@ async function triggerFullStatusRefresh() {
 // deployment. Code elsewhere still reads the name "ADMIN_EMAIL" via this
 // getter so nothing else needs to change.
 Object.defineProperty(window, 'ADMIN_EMAIL', { get: () => window.LP_CONFIG.adminEmail, configurable: true });
+
+// ===== HELP (SIGN-IN SCREEN) =====
+// Paste your Scribe guide's EMBED URL here — from the guide in Scribe,
+// use Share > Embed and copy the URL out of the iframe's src="..."
+// (this is a different link than the normal "share" URL). Loaded lazily,
+// only the first time someone actually opens the help modal.
+const SCRIBE_SIGNUP_GUIDE_URL = 'https://scribehow.com/embed/Requesting_Access_To_A_New_LaunchPad_Project__mjQesHSsSQOJ1v8gtuFdlA';
+
+function openHelpModal() {
+    const iframe = document.getElementById('help-modal-iframe');
+    if (iframe.src === 'about:blank' || !iframe.src) {
+        if (SCRIBE_SIGNUP_GUIDE_URL.indexOf('PASTE_YOUR') === 0) {
+            iframe.outerHTML = '<div id="help-modal-iframe" style="flex:1; display:flex; align-items:center; justify-content:center; color:#888; font-size:14px; padding:20px; text-align:center;">The sign-up guide hasn\'t been added yet — set SCRIBE_SIGNUP_GUIDE_URL near the top of the script.</div>';
+        } else {
+            iframe.src = SCRIBE_SIGNUP_GUIDE_URL;
+        }
+    }
+    document.getElementById('help-modal').style.display = 'flex';
+}
+
+function closeHelpModal() {
+    document.getElementById('help-modal').style.display = 'none';
+    resetHelpDock('help-modal', 'launchpad-help-dock-btn');
+}
+
+// Shared by every help modal's close function — always reopen full-screen
+// and with the app back to full width, not wherever a previous session
+// left the dock state.
+function resetHelpDock(modalId, btnId) {
+    const modal = document.getElementById(modalId);
+    if (modal) {
+        modal.classList.remove('help-modal-docked');
+        clearHelpDockSizing(modal);
+    }
+    const dockBtn = document.getElementById(btnId);
+    if (dockBtn) dockBtn.innerHTML = '⇥ Dock';
+    document.body.classList.remove('help-docked');
+}
+
+// ===== HELP MODAL "DOCK TO SIDE" (+ resizing) =====
+// Shared by all four help modals (sign-in/Schedule/Equipment/Dashboard).
+// Docking shrinks the modal into a panel anchored to the right edge and
+// lets clicks pass through everywhere else (see the .help-modal-docked /
+// .help-modal-panel CSS), so a user can keep the guide open on-screen
+// while actually working the steps in LaunchPad underneath it instead of
+// having to close the guide to try each step. The panel's left edge is
+// also drag-resizable (startHelpDockResize() below), with the guide's
+// iframe rescaled to match on every move — the size is remembered
+// per-browser (localStorage) so it's not reset every time someone opens a
+// guide.
+const HELP_DOCK_WIDTH_KEY = 'launchpad_help_dock_width';
+const HELP_DOCK_DEFAULT_WIDTH = 460;
+const HELP_DOCK_MIN_WIDTH = 320;
+const HELP_DOCK_MAX_WIDTH = 1100;
+const HELP_DOCK_IFRAME_NATIVE_WIDTH = 900; // matches the expanded modal's own width — known to fit every guide with no scrollbar
+
+function toggleHelpDock(modalId, btnId) {
+    const modal = document.getElementById(modalId);
+    if (!modal) return;
+    const isDocked = modal.classList.toggle('help-modal-docked');
+    const btn = document.getElementById(btnId);
+    if (btn) {
+        btn.innerHTML = isDocked ? '⛶ Expand' : '⇥ Dock';
+        btn.title = isDocked
+            ? 'Expand back to full view'
+            : 'Dock to the side so you can use LaunchPad while following along';
+    }
+    // Squeezes the real app (or the sign-in card) over so none of it ends
+    // up hidden behind the panel — see the body.help-docked rules in the
+    // <style> block. Only one help modal is ever open at a time, so a
+    // single shared body class is safe here.
+    document.body.classList.toggle('help-docked', isDocked);
+
+    if (isDocked) {
+        let width = HELP_DOCK_DEFAULT_WIDTH;
+        try {
+            const saved = parseInt(localStorage.getItem(HELP_DOCK_WIDTH_KEY), 10);
+            if (saved) width = saved;
+        } catch (e) { /* localStorage unavailable — fall back to the default width */ }
+        applyHelpDockWidth(modal, width);
+    } else {
+        clearHelpDockSizing(modal);
+    }
+}
+
+function applyHelpDockWidth(modal, widthPx) {
+    widthPx = Math.min(HELP_DOCK_MAX_WIDTH, Math.max(HELP_DOCK_MIN_WIDTH, widthPx));
+    const panel = modal.querySelector('.help-modal-panel');
+    if (panel) panel.style.setProperty('width', widthPx + 'px', 'important');
+    document.documentElement.style.setProperty('--help-dock-inset', (widthPx + 20) + 'px');
+
+    // Rescales the guide iframe to match, so its content grows/shrinks
+    // with the panel instead of staying whatever fixed size it started at.
+    const iframe = modal.querySelector('.help-guide-frame-wrap iframe');
+    if (iframe) {
+        const scale = widthPx / HELP_DOCK_IFRAME_NATIVE_WIDTH;
+        iframe.style.width = HELP_DOCK_IFRAME_NATIVE_WIDTH + 'px';
+        iframe.style.transform = `scale(${scale})`;
+        iframe.style.height = (100 / scale) + '%';
+    }
+    return widthPx;
+}
+
+function clearHelpDockSizing(modal) {
+    // NOTE: every panel's expanded width (900px) is itself an inline style
+    // in the HTML, the exact same style attribute applyHelpDockWidth()
+    // overwrites with !important — so removeProperty('width') here would
+    // delete that 900px value outright instead of restoring it (with no
+    // width left at all, the panel collapses to its content's minimum
+    // width, which is the "very thin popup" bug). Setting it back
+    // explicitly is what actually restores the expanded view.
+    const panel = modal.querySelector('.help-modal-panel');
+    if (panel) panel.style.width = '900px';
+    const iframe = modal.querySelector('.help-guide-frame-wrap iframe');
+    if (iframe) {
+        iframe.style.removeProperty('width');
+        iframe.style.removeProperty('height');
+        iframe.style.removeProperty('transform');
+    }
+}
+
+let _helpDockResizeState = null;
+
+function startHelpDockResize(e, modalId) {
+    e.preventDefault();
+    const modal = document.getElementById(modalId);
+    const panel = modal && modal.querySelector('.help-modal-panel');
+    if (!panel) return;
+    _helpDockResizeState = {
+        modal,
+        startX: e.clientX,
+        startWidth: panel.getBoundingClientRect().width
+    };
+    e.currentTarget.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onHelpDockResizeMove);
+    document.addEventListener('mouseup', stopHelpDockResize);
+}
+
+function onHelpDockResizeMove(e) {
+    if (!_helpDockResizeState) return;
+    const { modal, startX, startWidth } = _helpDockResizeState;
+    // Panel is anchored to the right edge, so dragging the handle LEFT
+    // (negative clientX delta) should grow it, and right should shrink it.
+    const delta = startX - e.clientX;
+    const maxAvailable = window.innerWidth - 60;
+    applyHelpDockWidth(modal, Math.min(HELP_DOCK_MAX_WIDTH, maxAvailable, startWidth + delta));
+}
+
+function stopHelpDockResize() {
+    if (_helpDockResizeState) {
+        const panel = _helpDockResizeState.modal.querySelector('.help-modal-panel');
+        if (panel) {
+            try {
+                localStorage.setItem(HELP_DOCK_WIDTH_KEY, String(Math.round(panel.getBoundingClientRect().width)));
+            } catch (e) { /* localStorage unavailable — size just won't persist across sessions */ }
+        }
+    }
+    document.querySelectorAll('.help-dock-resize-handle.dragging').forEach(el => el.classList.remove('dragging'));
+    _helpDockResizeState = null;
+    document.body.style.userSelect = '';
+    document.removeEventListener('mousemove', onHelpDockResizeMove);
+    document.removeEventListener('mouseup', stopHelpDockResize);
+}
+
+// ===== HELP (SCHEDULE SCREEN) =====
+// Same widget/modal pattern as the sign-in help above, but this one opens
+// on an overview + a menu of Scribe guides instead of jumping straight
+// into one — see the guide buttons' onclick in the markup for each URL.
+// Visibility is toggled directly in switchMainView() (only shown while
+// viewing the Schedule tab), not a MutationObserver like the sign-in
+// button, since we already have an explicit view-switch call site here.
+function openScheduleHelpModal() {
+    backToScheduleHelpMenu(); // always open on the overview, not wherever a previous session left off
+    document.getElementById('schedule-help-modal').style.display = 'flex';
+}
+
+function closeScheduleHelpModal() {
+    document.getElementById('schedule-help-modal').style.display = 'none';
+    resetHelpDock('schedule-help-modal', 'schedule-help-dock-btn');
+}
+
+function openScheduleHelpGuide(url, title) {
+    document.getElementById('schedule-help-guide-iframe').src = url;
+    document.getElementById('schedule-help-title').innerText = title;
+    document.getElementById('schedule-help-menu').style.display = 'none';
+    document.getElementById('schedule-help-guide-view').style.display = 'flex';
+}
+
+function backToScheduleHelpMenu() {
+    document.getElementById('schedule-help-guide-view').style.display = 'none';
+    document.getElementById('schedule-help-menu').style.display = 'block';
+    document.getElementById('schedule-help-title').innerText = 'Schedule Help & Training';
+}
+
+// ===== HELP (EQUIPMENT STATUS TRACKER SCREEN) =====
+// Same widget/modal/menu-then-guide pattern as the Schedule help above.
+// Visibility is toggled directly in switchMainView() (only shown while
+// viewing the Equipment tab).
+function openEquipmentHelpModal() {
+    backToEquipmentHelpMenu(); // always open on the overview, not wherever a previous session left off
+    document.getElementById('equipment-help-modal').style.display = 'flex';
+}
+
+function closeEquipmentHelpModal() {
+    document.getElementById('equipment-help-modal').style.display = 'none';
+    resetHelpDock('equipment-help-modal', 'equipment-help-dock-btn');
+}
+
+function openEquipmentHelpGuide(url, title) {
+    document.getElementById('equipment-help-guide-iframe').src = url;
+    document.getElementById('equipment-help-title').innerText = title;
+    document.getElementById('equipment-help-menu').style.display = 'none';
+    document.getElementById('equipment-help-guide-view').style.display = 'flex';
+}
+
+function backToEquipmentHelpMenu() {
+    document.getElementById('equipment-help-guide-view').style.display = 'none';
+    document.getElementById('equipment-help-menu').style.display = 'block';
+    document.getElementById('equipment-help-title').innerText = 'Equipment Status Tracker Help & Training';
+}
+
+// ===== HELP (DASHBOARD SCREEN) =====
+// Same widget/modal/menu-then-guide pattern as the other help buttons.
+// Visibility is toggled directly in switchMainView() (only shown while
+// viewing the Dashboard tab).
+function openDashboardHelpModal() {
+    backToDashboardHelpMenu(); // always open on the overview, not wherever a previous session left off
+    document.getElementById('dashboard-help-modal').style.display = 'flex';
+}
+
+function closeDashboardHelpModal() {
+    document.getElementById('dashboard-help-modal').style.display = 'none';
+    resetHelpDock('dashboard-help-modal', 'dashboard-help-dock-btn');
+}
+
+function openDashboardHelpGuide(url, title) {
+    document.getElementById('dashboard-help-guide-iframe').src = url;
+    document.getElementById('dashboard-help-title').innerText = title;
+    document.getElementById('dashboard-help-menu').style.display = 'none';
+    document.getElementById('dashboard-help-guide-view').style.display = 'flex';
+}
+
+function backToDashboardHelpMenu() {
+    document.getElementById('dashboard-help-guide-view').style.display = 'none';
+    document.getElementById('dashboard-help-menu').style.display = 'block';
+    document.getElementById('dashboard-help-title').innerText = 'Dashboard Help & Training';
+}
+
+// ===== DASHBOARD SETTINGS (title override) =====
+// The dashboard's title otherwise always comes from project_name in the
+// synced Apps Script/Sheets data (dashboard.js renderAll()) — this lets an
+// admin override it with a cleaner display name, saved to
+// launchpad_projects.dashboard_display_name so it persists across
+// sessions/devices the same way every other project setting does.
+function openDashboardSettingsModal() {
+    const input = document.getElementById('dashboard-title-input');
+    const hint = document.getElementById('dashboard-title-hint');
+    input.value = (window.LP_CONFIG && window.LP_CONFIG.dashboardDisplayName) || '';
+    const autoName = (window.caDashboardInstance && window.caDashboardInstance.STATE && window.caDashboardInstance.STATE.data)
+        ? window.caDashboardInstance.STATE.data.project_name
+        : null;
+    hint.textContent = autoName
+        ? `Leave blank to use the synced name: "${autoName}".`
+        : 'Leave blank to use the name synced from the commissioning data.';
+    document.getElementById('dashboard-settings-modal').style.display = 'flex';
+}
+
+function closeDashboardSettingsModal() {
+    document.getElementById('dashboard-settings-modal').style.display = 'none';
+}
+
+async function saveDashboardSettings() {
+    if (!window.LP_CONFIG || !window.LP_CONFIG.projectKey) return;
+    const newTitle = document.getElementById('dashboard-title-input').value.trim();
+
+    const { error } = await _supabase
+        .from('launchpad_projects')
+        .update({ dashboard_display_name: newTitle || null })
+        .eq('project_key', window.LP_CONFIG.projectKey);
+
+    if (error) {
+        alert('Could not save dashboard title: ' + error.message);
+        return;
+    }
+
+    window.LP_CONFIG.dashboardDisplayName = newTitle || null;
+    closeDashboardSettingsModal();
+
+    // Reflect immediately if the dashboard is already mounted, instead of
+    // requiring a tab switch/reload to see the new title.
+    if (window.caDashboardInstance && typeof window.caDashboardInstance.renderAll === 'function') {
+        window.caDashboardInstance.renderAll();
+    }
+}
+
+// The sign-in form (#auth-prompt) and the project picker (#project-picker)
+// are each set to display:block/flex from several different places in this
+// file (initial load, sign-out, session expiry, switching projects, etc.)
+// — rather than editing every one of those to also show/hide the help
+// button, just watch both elements and mirror them: the sign-in help
+// button (with its "Requesting Access" guide) should stay up across both
+// screens, since a brand-new user can hit either one before ever reaching
+// the app. Runs once; the elements it references already exist by the
+// time this script tag is reached, since they're defined earlier in the
+// body.
+//
+// Also owns turning the Schedule help button back on once sign-in
+// finishes: switchMainView() handles showing/hiding it for every
+// subsequent tab switch, but nothing calls switchMainView('schedule', ...)
+// for the plain "already on the default Schedule tab, no redirect
+// configured" case, so without this it'd stay hidden (its static default)
+// until the user manually switched tabs away and back.
+(function initHelpButtonVisibility() {
+    const authPrompt = document.getElementById('auth-prompt');
+    const projectPicker = document.getElementById('project-picker');
+    const helpWidget = document.getElementById('launchpad-help-widget');
+    const scheduleHelpWidget = document.getElementById('schedule-help-widget');
+    if (!authPrompt || !helpWidget) return;
+    const sync = () => {
+        const authShowing = authPrompt.style.display === 'block';
+        const pickerShowing = !!projectPicker && projectPicker.style.display === 'flex';
+        const preLoginShowing = authShowing || pickerShowing;
+        helpWidget.style.display = preLoginShowing ? 'flex' : 'none';
+        if (scheduleHelpWidget) {
+            scheduleHelpWidget.style.display = (!preLoginShowing && (!window.__currentView || window.__currentView === 'schedule')) ? 'flex' : 'none';
+        }
+    };
+    sync();
+    new MutationObserver(sync).observe(authPrompt, { attributes: true, attributeFilter: ['style'] });
+    if (projectPicker) new MutationObserver(sync).observe(projectPicker, { attributes: true, attributeFilter: ['style'] });
+})();
 
 function toggleAdminPanel() {
     // 1. HARD SECURITY BLOCK: If they are not an admin in the database, stop immediately.
@@ -4308,6 +5408,27 @@ function stringToColor(str) {
     return "#" + "00000".substring(0, 6 - c.length) + c;
 }
 
+// Shared by the realtime DELETE handler and applyScheduleDataToDom()'s
+// reconciliation pass below — both need to reset a row back to its
+// empty/unoccupied look when the item it held is gone server-side.
+function clearRowElement(rowEl) {
+    rowEl.removeAttribute('data-occupied');
+    rowEl.querySelectorAll('input, select, textarea, .status-cell').forEach(el => {
+        if (el.classList.contains('status-cell')) {
+            el.innerText = "...";
+        } else {
+            el.value = "";
+            if (el.hasAttribute('data-selected')) {
+                el.setAttribute('data-selected', '');
+                if (el.options && el.options[0]) {
+                    el.options[0].text = "+ Add Multi";
+                }
+            }
+        }
+        applyCellColor(el, "");
+    });
+}
+
 function initRealtimeSync() {
     // 1. MASTER SCHEDULE SYNC
     _supabase
@@ -4324,24 +5445,7 @@ function initRealtimeSync() {
                 // Handle real-time deletion
                 const rowId = payload.old.id;
                 const rowEl = document.getElementById(`row-wrapper-${rowId}`);
-                if (rowEl) {
-                    rowEl.removeAttribute('data-occupied');
-                    rowEl.querySelectorAll('input, select, textarea, .status-cell').forEach(el => {
-                        if (el.classList.contains('status-cell')) {
-                            el.innerText = "...";
-                        } else {
-                            el.value = "";
-                            // NEW: Clear the multi-select attributes here too
-                            if (el.hasAttribute('data-selected')) {
-                                el.setAttribute('data-selected', '');
-                                if (el.options && el.options[0]) {
-                                    el.options[0].text = "+ Add Multi";
-                                }
-                            }
-                        }
-                        applyCellColor(el, "");
-                    });
-                }
+                if (rowEl) clearRowElement(rowEl);
             }
         })
         .subscribe();
@@ -4396,8 +5500,21 @@ function initRealtimeSync() {
 
 function updateRowInUI(row) {
     // FIX: Match the ID format used in addRowsToContainer (row-wrapper-ID)
-    const rowEl = document.getElementById(`row-wrapper-${row.id}`);
-    if (!rowEl) return;
+    let rowEl = document.getElementById(`row-wrapper-${row.id}`);
+    if (!rowEl) {
+        // The row's day hasn't been batch-rendered yet (see WEEKS_PER_BATCH
+        // below) — extend rendering just far enough to cover it, then retry
+        // once, instead of silently dropping a real-time update on the floor.
+        if (!ensureWeekRenderedForDayLabel(row.day_label)) return;
+        // The day's container might already exist but only have its
+        // default first 20 slots built — Bridge can assign a row to any
+        // slot up to index 98 (see findFreeLaunchPadIndex() in
+        // bridge-view.js), so a busy day can easily need slots Scheduler
+        // never auto-built. Extends just far enough to cover this one row.
+        ensureRowSlotExists(document.getElementById(`rows-${row.day_label}`), row.day_label, row.id);
+        rowEl = document.getElementById(`row-wrapper-${row.id}`);
+        if (!rowEl) return;
+    }
 
     rowEl.setAttribute('data-occupied', 'true');
     // Column Name Mapping
@@ -4483,15 +5600,19 @@ async function verifyPermission(email) {
 
 async function loadAppConfig() {
     try {
-        const response = await fetch(`${GOOGLE_SCRIPT_URL}?action=getAppConfig&t=${new Date().getTime()}`);
-        const data = await response.json();
-        if (data.status === 'success' && data.data) {
-            let parsedData = typeof data.data === 'string' ? JSON.parse(data.data) : data.data;
+        const { data: row, error } = await _supabase
+            .from('launchpad_nav_config')
+            .select('sidebar_config')
+            .eq('project_key', window.LP_CONFIG.projectKey)
+            .maybeSingle();
+        if (error) throw error;
+        if (row && row.sidebar_config) {
             // Safely merge the downloaded data with the defaults so nothing breaks
-            appConfig = { ...appConfig, ...parsedData };
+            appConfig = { ...appConfig, ...row.sidebar_config };
+            LP_CACHE.set('appConfig', appConfig);
         }
     } catch (e) {
-        console.error("Failed to load App Config from cloud.", e);
+        console.error("Failed to load App Config from Supabase.", e);
     }
     applySidebarConfig();
 }
@@ -4502,20 +5623,25 @@ async function loadEquivalentActivities() {
     // Show a temporary loading state
     phases.forEach(phase => {
         const container = document.getElementById(`eq-act-${phase}-list`);
-        if (container) container.innerHTML = '<div style="color: #999; font-size: 12px; padding: 5px; text-align: center;">Loading from Google Sheets...</div>';
+        if (container) container.innerHTML = '<div style="color: #999; font-size: 12px; padding: 5px; text-align: center;">Loading...</div>';
     });
     
     try {
-        const response = await fetch(`${GOOGLE_SCRIPT_URL}?action=getEqActivities&t=${new Date().getTime()}`);
-        const data = await response.json();
-        if (data.status === 'success') {
-            equivalentActivitiesConfig = data.data;
+        const { data: row, error } = await _supabase
+            .from('launchpad_equivalent_activities')
+            .select('activities_config')
+            .eq('project_key', window.LP_CONFIG.projectKey)
+            .maybeSingle();
+        if (error) throw error;
+        if (row && row.activities_config) {
+            equivalentActivitiesConfig = row.activities_config;
+            LP_CACHE.set('equivalentActivitiesConfig', equivalentActivitiesConfig);
         }
     } catch (e) {
-        console.error("Failed to load Eq Activities:", e);
+        console.error("Failed to load Eq Activities from Supabase:", e);
     }
     
-    // Render the checklists now that we have the data from the sheet
+    // Render the checklists now that we have the data
     renderEquivalentActivitiesUI();
 }
 
@@ -4630,7 +5756,8 @@ async function applyProjectConfig(projectKey) {
         logoUrl: project.logo_url,
         themeColor: project.theme_color || '#1b5e20',
         startDate: project.start_date,
-        durationWeeks: project.duration_weeks
+        durationWeeks: project.duration_weeks,
+        dashboardDisplayName: project.dashboard_display_name || null
     };
     localStorage.setItem('launchpad_project', projectKey);
 
@@ -4768,7 +5895,7 @@ function renderProjectPicker(projects, opts) {
         : `<input type="email" id="access-request-email" placeholder="Email address" style="padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:10px; box-sizing:border-box; font-size:15px;">`;
 
     const requestAccessSection = opts.showRequestAccess === false ? '' : `
-        <div style="margin-top: ${projects.length ? '18px' : '0'}; padding-top: ${projects.length ? '16px' : '0'}; border-top: ${projects.length ? '1px solid #eee' : 'none'}; text-align:left;">
+        <div style="text-align:left;">
             <a href="javascript:void(0)" onclick="toggleAccessRequestForm()" id="access-request-toggle" style="color:#2e7d32; font-weight:600; font-size:14px; text-decoration:none;">${projects.length ? '+ Request access to another project' : '+ Enter access code'}</a>
             <div id="access-request-form" style="display:${projects.length ? 'none' : 'block'}; margin-top:14px;">
                 <input type="text" id="access-code-input" placeholder="6-digit access code" maxlength="6" inputmode="numeric" oninput="handleAccessCodeInput()" style="padding:12px; width:100%; border-radius:6px; border:2px solid #eee; margin-bottom:6px; box-sizing:border-box; font-size:15px; text-align:center; letter-spacing:3px;">
@@ -4791,10 +5918,15 @@ function renderProjectPicker(projects, opts) {
     `;
 
     const cancelLink = window.__pickerAllowCancel
-        ? `<div style="margin-top:16px; text-align:center;"><a href="javascript:void(0)" onclick="switchToLoginView()" style="font-size:13px; color:#999; text-decoration:none;">Back to Sign In</a></div>`
+        ? `<div style="margin-top:12px; text-align:center;"><a href="javascript:void(0)" onclick="switchToLoginView()" style="font-size:13px; color:#999; text-decoration:none;">Back to Sign In</a></div>`
         : '';
 
-    list.innerHTML = projectsHtml + requestAccessSection + cancelLink;
+    list.innerHTML = projectsHtml;
+    // Rendered in the sticky footer outside the scrollable list (see the
+    // #project-picker-footer markup) instead of appended after the
+    // projects, so "Request access to another project" is always visible
+    // instead of requiring a scroll past a long project list to find it.
+    document.getElementById('project-picker-footer').innerHTML = requestAccessSection + cancelLink;
     picker.style.display = 'flex';
 }
 
@@ -4980,14 +6112,30 @@ async function toggleSwitchProjectPopover(event) {
 
     const popover = document.createElement('div');
     popover.id = 'switch-project-popover';
-    popover.style.cssText = 'position:fixed; background:white; border:1px solid #ddd; border-radius:10px; box-shadow:0 8px 24px rgba(0,0,0,0.18); z-index:3000; min-width:220px; max-height:280px; overflow-y:auto; padding:6px;';
+    // Header (with the return button) and the scrollable project list are
+    // two separate flex children now, so a long list of other projects
+    // scrolls on its own without ever carrying the return button out of
+    // view with it.
+    popover.style.cssText = 'position:fixed; background:white; border:1px solid #ddd; border-radius:10px; box-shadow:0 8px 24px rgba(0,0,0,0.18); z-index:3000; min-width:220px; max-height:340px; display:flex; flex-direction:column; overflow:hidden; padding:0;';
 
     const rect = clickedEl.getBoundingClientRect();
     popover.style.left = (rect.right + 8) + 'px';
     popover.style.bottom = (window.innerHeight - rect.bottom) + 'px';
 
-    popover.innerHTML = '<div style="padding:10px; font-size:13px; color:#999;">Loading...</div>';
+    popover.innerHTML = `
+        <div style="padding:6px; border-bottom:1px solid #eee; flex-shrink:0;">
+            <button onclick="location.reload();" style="width:100%; display:flex; align-items:center; gap:6px; text-align:left; background:#f5f5f5; border:1px solid #ddd; border-radius:7px; padding:8px 10px; font-size:13px; font-weight:600; color:#333; cursor:pointer;"
+                onmouseover="this.style.background='#e8f5e9'; this.style.borderColor='#2e7d32';"
+                onmouseout="this.style.background='#f5f5f5'; this.style.borderColor='#ddd';">
+                <span>←</span> Return to Site Selector
+            </button>
+        </div>
+        <div id="switch-project-popover-list" style="padding:6px; overflow-y:auto; flex:1; min-height:0;">
+            <div style="padding:10px; font-size:13px; color:#999;">Loading...</div>
+        </div>
+    `;
     document.body.appendChild(popover);
+    const popoverList = document.getElementById('switch-project-popover-list');
 
     const { data: memberships } = await _supabase
         .from('launchpad_memberships')
@@ -4999,7 +6147,7 @@ async function toggleSwitchProjectPopover(event) {
         .filter(k => k !== window.LP_CONFIG.projectKey);
 
     if (otherKeys.length === 0) {
-        popover.innerHTML = '<div style="padding:12px; font-size:13px; color:#999; text-align:center;">No other projects</div>';
+        popoverList.innerHTML = '<div style="padding:12px; font-size:13px; color:#999; text-align:center;">No other projects</div>';
     } else {
         const { data: projects, error: projectsErr } = await _supabase
             .from('launchpad_projects')
@@ -5008,11 +6156,11 @@ async function toggleSwitchProjectPopover(event) {
 
         if (projectsErr) {
             console.error('Switch-project popover: failed to load project details:', projectsErr);
-            popover.innerHTML = '<div style="padding:12px; font-size:13px; color:#d32f2f; text-align:center;">Couldn\'t load projects — check the console.</div>';
+            popoverList.innerHTML = '<div style="padding:12px; font-size:13px; color:#d32f2f; text-align:center;">Couldn\'t load projects — check the console.</div>';
             return;
         }
 
-        popover.innerHTML = (projects || []).map(p => `
+        popoverList.innerHTML = (projects || []).map(p => `
             <div onclick="switchToProjectDirect('${p.project_key}')" style="display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:7px; cursor:pointer; font-size:14px; font-weight:600; color:#1b1b1b;"
                  onmouseover="this.style.background='#e8f5e9'" onmouseout="this.style.background='transparent'">
                 ${p.logo_url ? `<img src="${p.logo_url}" style="height:24px; width:24px; object-fit:cover; border-radius:4px; flex-shrink:0;">` : '<span style="font-size:18px;">📁</span>'}
@@ -5070,17 +6218,30 @@ async function chooseProject(projectKey) {
 // Now that LP_CONFIG is populated, point every iframe-based module at this
 // project. Setting .src here (instead of a static src="..." in the HTML) is
 // what stops them from loading before we know which project's data to show.
-function setIframeProjectSources(userEmail) {
-    ['equipment-tracker-iframe', 'bridge-iframe', 'tamperseal-iframe'].forEach(id => {
-        const iframe = document.getElementById(id);
-        if (!iframe || iframe.src) return;
-        const base = iframe.getAttribute('data-src-base');
-        const params = new URLSearchParams({ project: window.LP_CONFIG.projectKey });
-        if (window.LP_CONFIG.googleScriptUrl) params.set('scriptUrl', window.LP_CONFIG.googleScriptUrl);
-        if (window.userRole) params.set('role', window.userRole);
-        if (userEmail) params.set('email', userEmail);
-        iframe.src = `${base}?${params.toString()}`;
-    });
+// Loads ONE iframe's src on demand, the first time its tab is actually
+// opened — not eagerly for all of them at login. Each of these iframes is
+// a full separate app (its own Supabase client, DOM, JS) — loading all
+// three (or four, with Seal Form) up front regardless of which tab the
+// person actually uses was the single biggest driver of this app's memory
+// footprint. window.__currentUserEmail is stashed once at login so this
+// can build the same params later without needing it re-passed in.
+function loadIframeIfNeeded(iframeId) {
+    const iframe = document.getElementById(iframeId);
+    if (!iframe || iframe.src) return;
+    const overlay = document.getElementById(`${iframeId}-loading`);
+    if (overlay) {
+        overlay.style.display = 'flex';
+        // The iframe's own 'load' event fires once its HTML/JS has parsed —
+        // a reasonable proxy for "no longer a blank flash", even though any
+        // async data fetching inside it may still be finishing up.
+        iframe.onload = () => { overlay.style.display = 'none'; };
+    }
+    const base = iframe.getAttribute('data-src-base');
+    const params = new URLSearchParams({ project: window.LP_CONFIG.projectKey });
+    if (window.LP_CONFIG.googleScriptUrl) params.set('scriptUrl', window.LP_CONFIG.googleScriptUrl);
+    if (window.userRole) params.set('role', window.userRole);
+    if (window.__currentUserEmail) params.set('email', window.__currentUserEmail);
+    iframe.src = `${base}?${params.toString()}`;
 }
 
 async function startApp() {
@@ -5162,16 +6323,17 @@ async function continueStartAppAfterProject(user) {
 
         // Only NOW does window.userRole actually hold a real value — this
         // has to happen after verifyPermission() resolves, both for the
-        // gate check below AND for setIframeProjectSources() further down,
-        // which reads window.userRole to build the iframe URLs. Calling it
-        // any earlier meant every iframe (Bridge, Tamper Seals, Equipment
-        // Tracker) always got role=undefined and silently fell back to
-        // 'editor' regardless of the real role.
+        // gate check below AND for loadIframeIfNeeded() (called lazily per
+        // tab, further down / in switchMainView), which reads window.userRole
+        // to build each iframe's URL. Calling it any earlier meant every
+        // iframe (Bridge, Tamper Seals, Equipment Tracker) always got
+        // role=undefined and silently fell back to 'editor' regardless of
+        // the real role.
         if (window.userRole === 'viewer') {
             document.body.classList.add('viewer-mode');
             enableViewerGate();
         }
-        setIframeProjectSources(user.email);
+        window.__currentUserEmail = user.email;
         
         if (window.isAdmin) {
             console.log("🧹 Admin detected: Cleaning up old history records...");
@@ -5187,6 +6349,66 @@ async function continueStartAppAfterProject(user) {
         
         const scheduleDataPromise = _supabase.from(T('BackEndData')).select('*');
 
+        // --- Fast-reload cache ---
+        // If a previous visit left us a last-known-good snapshot of this
+        // project, paint it immediately and drop the loading overlay right
+        // away instead of making everyone wait on the network on every
+        // single load. The real, current data is still fetched right behind
+        // it and silently replaces the cached copy the moment it's in —
+        // this only changes WHEN things first appear, never what ends up on
+        // screen once the page settles.
+        const cachedSchedule = LP_CACHE.get('scheduleData');
+
+        if (cachedSchedule) {
+            const cachedColConfig = LP_CACHE.get('scheduleColConfig');
+            const cachedAppConfig = LP_CACHE.get('appConfig');
+            const cachedEqActivities = LP_CACHE.get('equivalentActivitiesConfig');
+            const cachedDropdowns = LP_CACHE.get('dropdownData');
+
+            if (cachedColConfig) { scheduleColConfig = cachedColConfig; renderDynamicHeaders(); }
+            if (cachedAppConfig) { appConfig = { ...appConfig, ...cachedAppConfig }; applySidebarConfig(); }
+            if (cachedEqActivities) { equivalentActivitiesConfig = cachedEqActivities; renderEquivalentActivitiesUI(); }
+            if (cachedDropdowns) {
+                window.dropdownData = cachedDropdowns.dropdownData;
+                window.assetToPlaceMap = cachedDropdowns.assetToPlaceMap;
+                renderSidebarFilters();
+            }
+
+            // Rebuild the day/week shell now that LP_CONFIG's real start
+            // date/duration are known (the very first createSections() call,
+            // back in startApp(), ran before project selection and used
+            // fallback defaults), then paint the cached rows onto it.
+            createSections();
+            __lastScheduleData = cachedSchedule;
+            applyScheduleDataToDom(cachedSchedule);
+            rebuildFilterOptionsFromBackendData(cachedSchedule);
+            autoCleanUI();
+
+            initPresence(user.email);
+            refreshDropdowns();
+            initRealtimeSync();
+            applyViewFilter('view2');
+            collapseEverything();
+            loader.classList.add('hidden');
+            setTimeout(() => { loader.style.display = 'none'; autoCleanUI(); compactAllRenderedDays(); }, 800);
+
+            // Quietly refresh everything in the background. These are the
+            // exact same calls as the no-cache path below — each one already
+            // re-renders and re-caches its own result when it resolves —
+            // just no longer something the person has to sit and wait for.
+            Promise.all([
+                fetchDropdownOptions(),
+                loadEquivalentActivities(),
+                loadScheduleConfig(),
+                loadAppConfig()
+            ]).catch(e => console.error('Background config refresh failed:', e));
+            loadData(false, scheduleDataPromise).catch(e => console.error('Background schedule refresh failed:', e));
+
+            return;
+        }
+
+        // No cached snapshot yet for this project on this device (first
+        // visit) — original fully-blocking behavior, unchanged.
         await Promise.all([
             fetchDropdownOptions(),
             loadEquivalentActivities(),
@@ -5201,7 +6423,7 @@ async function continueStartAppAfterProject(user) {
         applyViewFilter('view2');
         collapseEverything();
         loader.classList.add('hidden');
-        setTimeout(() => { loader.style.display = 'none'; autoCleanUI(); }, 800);
+        setTimeout(() => { loader.style.display = 'none'; autoCleanUI(); compactAllRenderedDays(); }, 800);
         return;
     }
 
@@ -5327,10 +6549,24 @@ function openSettingsForCurrentView() {
     }
 
     if (view === 'equipment') {
-        const iframe = document.getElementById('equipment-tracker-iframe');
-        if (iframe && iframe.contentWindow) {
-            iframe.contentWindow.postMessage({ type: 'OPEN_SETTINGS' }, '*');
-        }
+        // equipment-tracker-view is a custom element now, not an iframe —
+        // call its openSettings() method directly instead of posting a
+        // message.
+        const el = document.querySelector('equipment-tracker-view');
+        if (el) el.openSettings();
+        return;
+    }
+
+    if (view === 'tamperseals') {
+        // tamperseal-view is a custom element now, not an iframe — call its
+        // openSettings() method directly instead of posting a message.
+        const el = document.querySelector('tamperseal-view');
+        if (el) el.openSettings();
+        return;
+    }
+
+    if (view === 'dashboard') {
+        openDashboardSettingsModal();
         return;
     }
 
@@ -5416,6 +6652,7 @@ function openScheduleConfigModal() {
     document.getElementById('cfg-nav-dashboard').checked = appConfig.sidebar.dashboard;
     document.getElementById('cfg-nav-bridge').checked = appConfig.sidebar.bridge;
     document.getElementById('cfg-nav-tamperseals').checked = appConfig.sidebar.tamperSeals;
+    document.getElementById('cfg-nav-sealform').checked = appConfig.sidebar.sealForm;
 }
 
 // Helper to swap array items
@@ -5442,6 +6679,7 @@ async function saveAllSettings(btn) {
     appConfig.sidebar.dashboard = document.getElementById('cfg-nav-dashboard').checked;
     appConfig.sidebar.bridge = document.getElementById('cfg-nav-bridge').checked;
     appConfig.sidebar.tamperSeals = document.getElementById('cfg-nav-tamperseals').checked;
+    appConfig.sidebar.sealForm = document.getElementById('cfg-nav-sealform').checked;
 
     // 2. Gather Schedule Config
     scheduleColConfig.forEach(col => {
@@ -5460,37 +6698,55 @@ async function saveAllSettings(btn) {
         }
     });
 
-// 4. FIRE ALL CLOUD SAVES AND WAIT FOR THEM TO FINISH
+// 4. SAVE THE THREE SUPABASE-BACKED SETTINGS, PLUS PHASE RULES (still sheet-backed)
     try {
+        const savedBy = window.__currentUserEmail || null;
         await Promise.all([
-            fetch(GOOGLE_SCRIPT_URL, {
-                method: 'POST',
-                body: JSON.stringify({ action: 'setEqActivities', data: equivalentActivitiesConfig }),
-                mode: 'no-cors'
-            }),
+            _supabase.from('launchpad_equivalent_activities').upsert({
+                project_key: window.LP_CONFIG.projectKey,
+                activities_config: equivalentActivitiesConfig,
+                updated_by: savedBy
+            }, { onConflict: 'project_key' }),
             savePhaseRules(),
-            fetch(GOOGLE_SCRIPT_URL, {
-                method: 'POST',
-                body: JSON.stringify({ action: 'setScheduleConfig', data: scheduleColConfig }),
-                mode: 'no-cors'
-            }),
-            fetch(GOOGLE_SCRIPT_URL, {
-                method: 'POST',
-                body: JSON.stringify({ action: 'setAppConfig', data: appConfig }),
-                mode: 'no-cors'
-            })
-        ]);
-        console.log("All settings successfully dispatched to cloud.");
+            _supabase.from('launchpad_schedule_config').upsert({
+                project_key: window.LP_CONFIG.projectKey,
+                column_config: scheduleColConfig,
+                updated_by: savedBy
+            }, { onConflict: 'project_key' }),
+            _supabase.from('launchpad_nav_config').upsert({
+                project_key: window.LP_CONFIG.projectKey,
+                sidebar_config: appConfig,
+                updated_by: savedBy
+            }, { onConflict: 'project_key' })
+        ]).then(results => {
+            const failed = results.find(r => r && r.error);
+            if (failed) throw failed.error;
+        });
+        console.log("All settings successfully saved.");
+
+        // The fast-reload cache from continueStartAppAfterProject() would
+        // otherwise still be holding the OLD column/nav/eq-activities config
+        // at this point — reloading without updating it first meant the
+        // next load's fast path rebuilt every row using the stale config
+        // (a newly-hidden column's cells still got built into the DOM; the
+        // background refresh that followed only updates the header row, not
+        // cells already built), so a hidden column would visibly stay put
+        // until a second manual reload. Updating the cache here, before
+        // reloading, means the very next load already has the config that
+        // was just saved.
+        LP_CACHE.set('scheduleColConfig', scheduleColConfig);
+        LP_CACHE.set('appConfig', appConfig);
+        LP_CACHE.set('equivalentActivitiesConfig', equivalentActivitiesConfig);
         
-        // --- THE FIX: WAIT FOR GOOGLE SHEETS TO FINISH WRITING ---
-        // Because these run in the background, we MUST pause to give Google Sheets 
-        // time to write the data to the cells before we reload the app!
+        // Phase Rules still writes to Google Sheets in the background, so we
+        // still give that a moment to finish before reloading — the three
+        // Supabase saves above are already confirmed by the time we get here.
         btn.innerText = "Finalizing... ⏳";
-        await new Promise(resolve => setTimeout(resolve, 2500));
+        await new Promise(resolve => setTimeout(resolve, 1000));
         
     } catch (e) {
-        console.error("Cloud save error:", e);
-        alert("There was an issue saving to Google Sheets, but local changes were applied.");
+        console.error("Settings save error:", e);
+        alert("There was an issue saving settings, but local changes were applied.");
     }
 
     // 5. Finally, reload the page cleanly to fetch the newly written data
@@ -5681,6 +6937,7 @@ async function fetchDropdownOptions() {
     // SWAP the data globally
     window.dropdownData = newData;
     window.assetToPlaceMap = assetToPlaceMap;
+    LP_CACHE.set('dropdownData', { dropdownData: newData, assetToPlaceMap });
 
     console.log(`✅ Dropdown data synced (${newData.col4.length} assets loaded).`);
 
@@ -5717,6 +6974,34 @@ function createAddRowsButton(rowsDiv, dayLabel) {
         }
     };
     return addBtn;
+}
+
+// A day's rows-container only ever auto-builds its first 20 slots
+// (addRowsToContainer's default count below) — the rest exist only once
+// someone clicks "+ Add 5 Rows" on that specific day. Bridge, though,
+// allocates slots up to index 98 per day (see findFreeLaunchPadIndex() in
+// bridge-view.js), so any day that already has 20+ activities on it can
+// easily get a new/moved item assigned a slot past what Scheduler has
+// ever built — silently invisible here, in BOTH the realtime path
+// (updateRowInUI) and the full-reload path (applyScheduleDataToDom),
+// since both just do `document.getElementById('row-wrapper-'+row.id)` and
+// give up if it's not there yet. This is what "accepted in Bridge, but
+// the move doesn't show in Scheduler, even after a reload" turned out to
+// be for a busy day. Extends the container just far enough to cover the
+// slot a specific row id needs, mirroring exactly what the "+ Add 5 Rows"
+// button already does by hand.
+function ensureRowSlotExists(rowsDiv, dayLabel, rowId) {
+    if (!rowsDiv || document.getElementById(`row-wrapper-${rowId}`)) return;
+    const dayNum = parseInt(String(dayLabel).replace(/-/g, ''), 10) * 100;
+    const neededIdx = rowId - dayNum;
+    if (!Number.isFinite(neededIdx) || neededIdx < 0 || neededIdx > 98) return; // not a real day-slot id — nothing sane to build
+    const currentCount = rowsDiv.querySelectorAll('.cell-row').length;
+    if (neededIdx < currentCount) return; // slot should already exist; nothing to do
+    addRowsToContainer(rowsDiv, dayLabel, null, currentCount, neededIdx - currentCount + 1);
+    // Keep "+ Add 5 Rows" at the bottom, below the slots just added —
+    // same fix-up createAddRowsButton()'s own click handler already does.
+    const addBtn = rowsDiv.querySelector('.add-rows-btn');
+    if (addBtn) rowsDiv.appendChild(addBtn);
 }
 
 function addRowsToContainer(container, dayLabel, anchorBtn = null, startIdx = 0, count = 20) {
@@ -5917,15 +7202,16 @@ function addRowsToContainer(container, dayLabel, anchorBtn = null, startIdx = 0,
                 };
             }
 
-            // --- HISTORY LISTENERS ---
-            element.addEventListener('focus', function() {
-                this.dataset.previousValue = this.value || '';
-            });
-            element.addEventListener('blur', function() {
-                const prev = this.dataset.previousValue || '';
-                const curr = this.value || '';
-                if (prev !== curr) logEditHistory(rowNumericId, dayLabel, col, prev, curr);
-            });
+            // --- HISTORY: right-click a cell to see its edit history ---
+            // (Actual history logging happens in saveCell() on every real
+            // change, keyed by the same row_id/col_index this reads with —
+            // this just opens that view. There used to be a second,
+            // separate history-logging attempt here on focus/blur calling
+            // a logEditHistory() function that was never actually defined
+            // anywhere in this file, silently throwing a ReferenceError in
+            // the console on every cell blur without ever recording
+            // anything — removed as dead/broken code.)
+            element.addEventListener('contextmenu', (e) => showCellHistory(e, rowNumericId, col));
 
             // FINALLY: Add the element to the row in the configured order!
             rowDiv.appendChild(element);
@@ -6099,15 +7385,17 @@ async function saveLayoutEdits() {
     btn.disabled = true;
     
     try {
-        await fetch(GOOGLE_SCRIPT_URL, {
-            method: 'POST',
-            body: JSON.stringify({ action: 'setScheduleConfig', data: scheduleColConfig }),
-            mode: 'no-cors'
-        });
+        const { error } = await _supabase.from('launchpad_schedule_config').upsert({
+            project_key: window.LP_CONFIG.projectKey,
+            column_config: scheduleColConfig,
+            updated_by: window.__currentUserEmail || null
+        }, { onConflict: 'project_key' });
+        if (error) throw error;
+        LP_CACHE.set('scheduleColConfig', scheduleColConfig);
         alert("Column layout saved successfully!");
     } catch (e) {
         console.error("Failed to save layout.", e);
-        alert("There was an issue saving to Google Sheets.");
+        alert("There was an issue saving the layout.");
     }
     
     btn.innerText = "Save Layout";
@@ -6266,6 +7554,12 @@ function saveCell(cell, value, colIndex, isImmediate = false) {
         if (!error && data && data[0]) {
             row.setAttribute('data-occupied', 'true');
             document.getElementById('saveIndicator').innerText = `Saved at: ${new Date().toLocaleTimeString()}`;
+            // This save may have just blanked the row (cleared its last
+            // field) or filled in a previously-blank one — either way this
+            // day's occupied/blank split may now have a gap in it. Debounced
+            // so a user actively filling out several cells in a row doesn't
+            // get its slot yanked out from under them mid-edit.
+            scheduleRowCompaction(dateId);
             
             // --- LOG TO EDIT HISTORY ---
             // Only log if this wasn't a redundant failsafe save
@@ -6301,97 +7595,356 @@ function saveCell(cell, value, colIndex, isImmediate = false) {
     else window[timeoutKey] = setTimeout(performSave, 400);
 }
 
+// data-occupied can go stale — saveCell() sets it to "true" on every
+// successful save regardless of what was saved, so a row that's had every
+// field cleared one at a time still carries data-occupied="true" from
+// whenever it was last touched. Matches autoCleanUI()'s own definition of
+// "actually empty" (no Activity and no Asset) so both agree on what counts
+// as blank.
+function isRowReallyBlank(row) {
+    const col3 = row.querySelector('[data-col-index="3"]');
+    const col4 = row.querySelector('[data-col-index="4"]');
+    const val3 = (col3?.value || "").toLowerCase().trim();
+    const val4 = (col4?.value || "").toLowerCase().trim();
+    return (val3 === "" || val3.includes("select")) && (val4 === "" || val4.includes("select"));
+}
+
+const __rowCompactionTimers = {};
+// Debounced per day — saveCell() calls this after every successful save, so
+// a user filling out several cells in one row would otherwise trigger a
+// compaction pass between almost every keystroke. Waiting 1.5s after the
+// last save in a given day collapses that into one pass, and re-checking
+// for focus inside the container means it never yanks a row out from under
+// someone who's still actively working in that day.
+function scheduleRowCompaction(dayLabel) {
+    clearTimeout(__rowCompactionTimers[dayLabel]);
+    __rowCompactionTimers[dayLabel] = setTimeout(() => compactDayRows(dayLabel), 1500);
+}
+
+// Keeps every occupied row bubbled up to the top of its day with no gaps,
+// and every blank row pushed to the bottom — same "scrape content, rewrite
+// into slots, clear the rest" technique orderChronologically() already uses
+// for its own reordering (see below), just without re-sorting by time:
+// occupied rows keep their existing relative order, they just stop leaving
+// a gap behind whichever row got cleared.
+//
+// Row-wrapper DOM nodes are never moved — their id/data-row-index encodes a
+// fixed slot tied to that row's day-encoded database id (see
+// generateNumericId()) — so "moving" a row here always means copying its
+// CONTENT into an earlier slot and blanking the slot it came from, exactly
+// like every other reordering path in this file already does.
+function compactDayRows(dayLabel) {
+    const container = document.getElementById(`rows-${dayLabel}`);
+    if (!container) return;
+    // Don't compact out from under someone actively editing in this day —
+    // the next save in this container will just re-schedule this anyway.
+    if (container.contains(document.activeElement)) { scheduleRowCompaction(dayLabel); return; }
+
+    const allRows = Array.from(container.querySelectorAll('.cell-row'));
+    if (allRows.length < 2) return;
+
+    const occupiedRows = allRows.filter(r => !isRowReallyBlank(r));
+    const alreadyCompact = occupiedRows.every((r, i) => allRows[i] === r);
+    if (alreadyCompact) return;
+
+    const scraped = occupiedRows.map(row => {
+        const cols = {};
+        for (let col = 1; col <= 10; col++) {
+            const el = row.querySelector(`[data-col-index="${col}"]`);
+            if (!el) { cols[col] = { val: "", html: "" }; continue; }
+            if (col === 5) {
+                const txt = el.innerText || "";
+                cols[col] = { val: txt === "..." ? "" : txt, html: el.innerHTML || "" };
+            } else if (col === 6) {
+                cols[col] = { val: el.getAttribute('data-selected') || el.value || "", html: "" };
+            } else {
+                cols[col] = { val: el.value || "", html: "" };
+            }
+        }
+        return cols;
+    });
+
+    for (let i = 0; i < allRows.length; i++) {
+        const targetRow = allRows[i];
+        const sourceCols = i < scraped.length ? scraped[i] : null;
+
+        for (let col = 1; col <= 10; col++) {
+            const targetEl = targetRow.querySelector(`[data-col-index="${col}"]`);
+            if (!targetEl) continue;
+            const content = sourceCols ? sourceCols[col].val : "";
+
+            if (col === 5) {
+                if (sourceCols && sourceCols[col].html && sourceCols[col].html.includes('<a')) {
+                    targetEl.innerHTML = sourceCols[col].html;
+                } else {
+                    targetEl.innerText = content || "...";
+                }
+            } else if (col === 6) {
+                targetEl.setAttribute('data-selected', content);
+                if (targetEl.options && targetEl.options[0]) {
+                    targetEl.options[0].text = content ? `Selected: ${content}` : "+ Add Multi";
+                }
+            } else {
+                if (targetEl.tagName === 'SELECT' && content !== "") {
+                    const exists = Array.from(targetEl.options).some(opt => opt.value === content);
+                    if (!exists) targetEl.add(new Option(content, content));
+                }
+                targetEl.value = content;
+            }
+            applyCellColor(targetEl, content);
+            saveCell(targetEl, content, col, true);
+        }
+
+        if (sourceCols) targetRow.setAttribute('data-occupied', 'true');
+        else targetRow.removeAttribute('data-occupied');
+    }
+}
+
+// One-time pass over every currently-rendered day, run right after initial
+// load (see the loader.style.display = 'none' points below) to fix up any
+// gaps that already existed before this feature shipped. Ongoing gaps from
+// then on are handled incrementally by scheduleRowCompaction() above.
+function compactAllRenderedDays() {
+    document.querySelectorAll('.rows-container').forEach(container => {
+        const dayLabel = container.id.replace('rows-', '');
+        compactDayRows(dayLabel);
+    });
+}
+
 const contentArea = document.getElementById('main-content-area');
+
+// Renders in batches instead of all WEEKS_TO_SHOW at once — a project
+// configured for a year-plus duration was building hundreds of week/day
+// shells (each with its own click handlers) before anyone had scrolled
+// anywhere near them. Only the first batch is built on load; the rest
+// build on demand via the button at the bottom.
+const WEEKS_PER_BATCH = 26;
+let __scheduleWeeksRendered = 0;
+
+function createWeekElement(baseDate, w) {
+    const weekDiv = document.createElement('div');
+    weekDiv.className = 'week-container';
+
+    const weekStart = new Date(baseDate);
+    weekStart.setDate(baseDate.getDate() + (w * 7));
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekStart.getDate() + 6);
+
+    const weekHeader = document.createElement('div');
+    weekHeader.className = 'week-header';
+    weekHeader.innerHTML = `
+        <span>Week of ${weekStart.toLocaleDateString([], {month:'short', day:'numeric'})} - ${weekEnd.toLocaleDateString([], {month:'short', day:'numeric'})}</span>
+        <span class="week-arrow">▶</span>
+    `;
+
+    const weekContent = document.createElement('div');
+    weekContent.className = 'week-content hidden';
+
+    weekHeader.onclick = () => {
+        const isHidden = weekContent.classList.toggle('hidden');
+        weekHeader.querySelector('.week-arrow').innerText = isHidden ? '▶' : '▼';
+        updateExpandCollapseButtons();
+    };
+
+    for (let d = 0; d < 7; d++) {
+        const sectionDate = new Date(weekStart);
+        sectionDate.setDate(weekStart.getDate() + d);
+        const dateId = sectionDate.toISOString().split('T')[0];
+        const dateString = sectionDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+
+        const section = document.createElement('div');
+        section.className = 'section-container';
+
+        const header = document.createElement('div');
+        header.className = 'date-header';
+        header.innerHTML = `<span>${dateString}</span> <span class="arrow">▶</span>`;
+        
+        const rowsDiv = document.createElement('div');
+        rowsDiv.className = 'rows-container hidden';
+        rowsDiv.id = `rows-${dateId}`;
+
+        header.onclick = (e) => {
+            e.stopPropagation();
+            
+            // NEW: If rows don't exist yet, build them now
+            if (rowsDiv.innerHTML === '') {
+                const addBtn = createAddRowsButton(rowsDiv, dateId);
+                addRowsToContainer(rowsDiv, dateId, addBtn);
+            }
+
+            const isHidden = rowsDiv.classList.toggle('hidden');
+            header.querySelector('.arrow').innerText = isHidden ? '▶' : '▼';
+            updateExpandCollapseButtons();
+        };
+
+        const addBtn = document.createElement('button');
+        addBtn.className = 'add-rows-btn';
+        addBtn.innerText = "+ Add 5 Rows";
+
+        addBtn.onclick = (e) => {
+            e.stopPropagation();
+            // Reveal rows in numerical order (0-19)
+            const hiddenRows = Array.from(rowsDiv.querySelectorAll('.cell-row'))
+                                    .filter(r => r.style.display === 'none');
+            
+            for (let i = 0; i < 5 && i < hiddenRows.length; i++) {
+                hiddenRows[i].style.display = 'flex';
+            }
+
+            if (hiddenRows.length <= 5) addBtn.style.display = 'none';
+        };
+
+        section.appendChild(header);
+        section.appendChild(rowsDiv);
+        weekContent.appendChild(section);
+    }
+
+    weekDiv.appendChild(weekHeader);
+    weekDiv.appendChild(weekContent);
+    return weekDiv;
+}
 
 function createSections() {
     const contentArea = document.getElementById('main-content-area');
     if (!contentArea) return;
-    
-    contentArea.innerHTML = ''; 
+
+    contentArea.innerHTML = '';
+    __scheduleWeeksRendered = 0;
+
+    if (currentView === 'view2' || currentView === 'view3') {
+        renderLookAheadWeeks(currentView);
+    } else {
+        renderNextWeekBatch();
+    }
+
+    // Safety net for the Expand/Collapse toolbar state: the explicit calls
+    // to updateExpandCollapseButtons() scattered through the toggle
+    // handlers above cover every place THIS file currently changes
+    // .week-content/.rows-container, but this catches anything else too —
+    // most notably renderNextWeekBatch() appending a fresh, collapsed-by-
+    // default week onto an otherwise-fully-expanded schedule while
+    // scrolling. Attribute-filtered to class changes only, so routine cell
+    // edits elsewhere in the grid don't trigger it. Set up once; createSections()
+    // itself can run many times (view switches, project switches) but the
+    // observer just keeps watching whatever's currently inside #main-content-area.
+    if (!window.__expandCollapseObserverStarted) {
+        window.__expandCollapseObserverStarted = true;
+        let debounceTimer = null;
+        const observer = new MutationObserver(() => {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(updateExpandCollapseButtons, 50);
+        });
+        observer.observe(contentArea, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+    }
+    updateExpandCollapseButtons();
+}
+
+// Look Ahead views only ever need a small window of weeks around today —
+// rendering the full batch sequence from START_DATE (which could be
+// months away from today in either direction) and hoping scroll-based
+// batching eventually reaches the right week was fragile and, worse,
+// meant any week created after the one-time startup collapse never got
+// collapsed at all. This computes the exact weeks needed and renders only
+// those, directly.
+function renderLookAheadWeeks(viewId) {
+    const contentArea = document.getElementById('main-content-area');
+    if (!contentArea) return;
     const baseDate = new Date(START_DATE + "T00:00:00");
 
-    for (let w = 0; w < WEEKS_TO_SHOW; w++) {
-        const weekDiv = document.createElement('div');
-        weekDiv.className = 'week-container';
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
 
-        const weekStart = new Date(baseDate);
-        weekStart.setDate(baseDate.getDate() + (w * 7));
-        const weekEnd = new Date(weekStart);
-        weekEnd.setDate(weekStart.getDate() + 6);
+    // Matches applyViewFilter()'s own offsets: view2 = 1 Week Look Ahead
+    // (today+6), view3 = 3 Week Look Ahead (today+20).
+    const lookAheadDays = viewId === 'view2' ? 6 : 20;
+    const endDate = new Date(today);
+    endDate.setDate(today.getDate() + lookAheadDays);
 
-        const weekHeader = document.createElement('div');
-        weekHeader.className = 'week-header';
-        weekHeader.innerHTML = `
-            <span>Week of ${weekStart.toLocaleDateString([], {month:'short', day:'numeric'})} - ${weekEnd.toLocaleDateString([], {month:'short', day:'numeric'})}</span>
-            <span class="week-arrow">▼</span>
-        `;
+    const msPerDay = 24 * 60 * 60 * 1000;
+    const startWeekOffset = Math.max(0, Math.floor((today - baseDate) / msPerDay / 7));
+    const endWeekOffset = Math.min(WEEKS_TO_SHOW - 1, Math.ceil((endDate - baseDate) / msPerDay / 7));
 
-        const weekContent = document.createElement('div');
-        weekContent.className = 'week-content';
-
-        weekHeader.onclick = () => {
-            const isHidden = weekContent.classList.toggle('hidden');
-            weekHeader.querySelector('.week-arrow').innerText = isHidden ? '▶' : '▼';
-        };
-
-        for (let d = 0; d < 7; d++) {
-            const sectionDate = new Date(weekStart);
-            sectionDate.setDate(weekStart.getDate() + d);
-            const dateId = sectionDate.toISOString().split('T')[0];
-            const dateString = sectionDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
-
-            const section = document.createElement('div');
-            section.className = 'section-container';
-
-            const header = document.createElement('div');
-            header.className = 'date-header';
-            header.innerHTML = `<span>${dateString}</span> <span class="arrow">▼</span>`;
-            
-            const rowsDiv = document.createElement('div');
-            rowsDiv.className = 'rows-container';
-            rowsDiv.id = `rows-${dateId}`;
-
-            header.onclick = (e) => {
-                e.stopPropagation();
-                
-                // NEW: If rows don't exist yet, build them now
-                if (rowsDiv.innerHTML === '') {
-                    const addBtn = createAddRowsButton(rowsDiv, dateId);
-                    addRowsToContainer(rowsDiv, dateId, addBtn);
-                }
-
-                const isHidden = rowsDiv.classList.toggle('hidden');
-                header.querySelector('.arrow').innerText = isHidden ? '▶' : '▼';
-            };
-
-// ... inside createSections() loop ...
-const addBtn = document.createElement('button');
-addBtn.className = 'add-rows-btn';
-addBtn.innerText = "+ Add 5 Rows";
-
-addBtn.onclick = (e) => {
-    e.stopPropagation();
-    // Reveal rows in numerical order (0-19)
-    const hiddenRows = Array.from(rowsDiv.querySelectorAll('.cell-row'))
-                            .filter(r => r.style.display === 'none');
-    
-    for (let i = 0; i < 5 && i < hiddenRows.length; i++) {
-        hiddenRows[i].style.display = 'flex';
+    for (let w = startWeekOffset; w <= endWeekOffset; w++) {
+        contentArea.appendChild(createWeekElement(baseDate, w));
     }
 
-    if (hiddenRows.length <= 5) addBtn.style.display = 'none';
-};
+    if (__lastScheduleData) applyScheduleDataToDom(__lastScheduleData);
+    compactAllRenderedDays();
+    applyViewFilter(viewId);
+}
 
-            section.appendChild(header);
-            section.appendChild(rowsDiv);
-            weekContent.appendChild(section);
-        }
+function renderNextWeekBatch() {
+    const contentArea = document.getElementById('main-content-area');
+    if (!contentArea) return;
+    const baseDate = new Date(START_DATE + "T00:00:00");
 
-        weekDiv.appendChild(weekHeader);
-        weekDiv.appendChild(weekContent);
-        contentArea.appendChild(weekDiv);
+    const existingSentinel = document.getElementById('week-load-sentinel');
+    if (existingSentinel) existingSentinel.remove();
+
+    const end = Math.min(__scheduleWeeksRendered + WEEKS_PER_BATCH, WEEKS_TO_SHOW);
+    for (let w = __scheduleWeeksRendered; w < end; w++) {
+        contentArea.appendChild(createWeekElement(baseDate, w));
+    }
+    __scheduleWeeksRendered = end;
+
+    // The newly-created day containers above are empty shells — apply
+    // whatever schedule data is already cached from the last load so they
+    // populate immediately instead of staying blank until some other
+    // refresh happens to run again.
+    if (__lastScheduleData) applyScheduleDataToDom(__lastScheduleData);
+    compactAllRenderedDays();
+
+    if (__scheduleWeeksRendered < WEEKS_TO_SHOW) {
+        // Invisible marker at the bottom of what's rendered so far — an
+        // IntersectionObserver loads the next batch automatically once the
+        // user scrolls near it, so nothing ever shows on screen asking
+        // them to click anything.
+        const sentinel = document.createElement('div');
+        sentinel.id = 'week-load-sentinel';
+        sentinel.style.cssText = 'height: 1px;';
+        contentArea.appendChild(sentinel);
+        __weekLoadObserver.observe(sentinel);
     }
 }
+
+// Real-time updates and applyScheduleDataToDom() both target DOM containers
+// (`rows-${day_label}` / `row-wrapper-${id}`) that only exist for weeks
+// already batch-rendered above. A Bridge dependency cascade can easily push
+// a downstream activity's day far past whatever the user has scrolled to so
+// far — without this, that write would land in Supabase fine but never show
+// up here until the user happened to scroll that far down. This reuses the
+// exact same batching renderNextWeekBatch() already does for the scroll
+// sentinel, just triggered on demand instead of on scroll.
+function ensureWeekRenderedForDayLabel(dayLabel) {
+    if (document.getElementById(`rows-${dayLabel}`)) return true;
+
+    // Look Ahead views deliberately only render a narrow window around
+    // today (see renderLookAheadWeeks) — a day outside that window is
+    // meant to stay hidden, not force-rendered.
+    if (currentView === 'view2' || currentView === 'view3') return false;
+
+    const baseDate = new Date(START_DATE + "T00:00:00");
+    const target = new Date(dayLabel + "T00:00:00");
+    const msPerDay = 24 * 60 * 60 * 1000;
+    const weekOffset = Math.floor((target - baseDate) / msPerDay / 7);
+    if (isNaN(weekOffset) || weekOffset < 0 || weekOffset >= WEEKS_TO_SHOW) return false;
+
+    let guard = 0;
+    while (__scheduleWeeksRendered <= weekOffset && __scheduleWeeksRendered < WEEKS_TO_SHOW && guard < 1000) {
+        renderNextWeekBatch();
+        guard++;
+    }
+    return !!document.getElementById(`rows-${dayLabel}`);
+}
+
+const __weekLoadObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+        if (entry.isIntersecting) {
+            __weekLoadObserver.unobserve(entry.target);
+            renderNextWeekBatch();
+        }
+    });
+}, { rootMargin: '150px' }); // collapsed weeks are only ~40-50px each, so this stays a modest few-week lookahead instead of preemptively loading everything
 
 let isSignUpMode = false;
 
@@ -6596,7 +8149,7 @@ function openMultiSelectMenu(cellElement, rowNum, dayLabel) {
         menu = document.createElement('div');
         menu.id = 'multi-select-menu';
         // Updated styling to use display: flex and support the new search bar
-        menu.style.cssText = 'display: none; position: absolute; background: white; border: 1px solid #ccc; box-shadow: 0 4px 12px rgba(0,0,0,0.15); border-radius: 4px; z-index: 10000; max-height: 280px; flex-direction: column; min-width: 220px; font-family: sans-serif;';
+        menu.style.cssText = 'display: none; position: absolute; background: white; border: 1px solid #ccc; box-shadow: 0 4px 12px rgba(0,0,0,0.15); border-radius: 4px; z-index: 10000; max-height: 280px; flex-direction: column; min-width: 220px; font-family: \'Segoe UI\', Tahoma, Geneva, Verdana, sans-serif;';
         
         const header = document.createElement('div');
         header.innerText = 'Select Options';
@@ -7031,11 +8584,11 @@ function applyViewFilter(viewId) {
     let targetDate = null;
 
     if (viewId === 'view2') {
-        // 3 Day Look Ahead (Today + 2)
+        // 1 Week Look Ahead (today + 6 days)
         targetDate = new Date(today);
         targetDate.setDate(today.getDate() + 6);
     } else if (viewId === 'view3') {
-        // 1 Week Look Ahead (Today + 6)
+        // 3 Week Look Ahead (today + 20 days)
         targetDate = new Date(today);
         targetDate.setDate(today.getDate() + 20);
     }
@@ -7058,19 +8611,17 @@ function applyViewFilter(viewId) {
             }
         });
 
-        // 4. Clean up the Week Accordions
+        // 4. Clean up the Week Accordions — hide weeks with nothing visible
+        // in range, but leave everything collapsed either way. Auto-
+        // expanding here used to fight with collapseEverything() in a way
+        // that depended on exactly when each was called, sometimes leaving
+        // weeks expanded when they shouldn't be.
         weekContainers.forEach(week => {
             const visibleDays = Array.from(week.querySelectorAll('.section-container'))
                                      .filter(s => s.style.display !== 'none');
             
             if (visibleDays.length === 0) {
                 week.style.display = 'none';
-            } else {
-                // Auto-expand the week so the user sees the filtered days immediately
-                const content = week.querySelector('.week-content');
-                const arrow = week.querySelector('.week-arrow');
-                if (content) content.classList.remove('hidden');
-                if (arrow) arrow.innerText = '▼';
             }
         });
     } else {
@@ -7088,8 +8639,11 @@ async function switchView(viewId, buttonElement) {
     document.querySelectorAll('.view-btn').forEach(btn => btn.classList.remove('active'));
     buttonElement.classList.add('active');
 
-    // 2. Apply Visibility Filter
-    applyViewFilter(viewId);
+    // 2. Rebuild the schedule for this view — Look Ahead views need a
+    // narrow, specific window of weeks that Overall Schedule's full
+    // batch-from-START_DATE rendering doesn't produce (and vice versa),
+    // so this can't just show/hide whatever's already in the DOM.
+    createSections();
 
     // 3. Optional: Sync data to ensure current view is fresh
     await loadData();
@@ -7102,6 +8656,7 @@ function expandAllWeeks() {
         const arrow = document.querySelectorAll('.week-arrow')[i];
         if (arrow) arrow.innerText = '▼';
     });
+    updateExpandCollapseButtons();
 }
 
 // 2. Only targets the grey Day bars
@@ -7111,6 +8666,7 @@ function expandAllDays() {
         const arrow = document.querySelectorAll('.arrow')[i];
         if (arrow) arrow.innerText = '▼';
     });
+    updateExpandCollapseButtons();
 }
 
 // 3. The "Reset" - hides everything
@@ -7133,6 +8689,37 @@ function collapseEverything() {
         searchInput.value = "";
         performSearch(""); // Clears all yellow/orange highlights
     }
+    updateExpandCollapseButtons();
+}
+
+// Three states for the toolbar, based on what's actually expanded right now
+// (not just whether one of the bulk buttons above was the last thing
+// clicked — a person can also expand/collapse a single week or day by
+// clicking its own header, so this always re-checks the real DOM state):
+//   - Nothing expanded: only "Expand Weeks" makes sense to offer.
+//   - At least one week open, but not everything: offer "Expand Days" to
+//     finish the job, and "Collapse All" to back out.
+//   - Everything expanded: only "Collapse All" is meaningful.
+// Called after every bulk action above, after toggling a single week/day
+// header, and after revealSearchResult() force-expands something — plus a
+// MutationObserver (set up once in createSections()) as a safety net for
+// any other place new (collapsed-by-default) weeks/days get added later.
+function updateExpandCollapseButtons() {
+    const weekEls = document.querySelectorAll('.week-content');
+    const dayEls = document.querySelectorAll('.rows-container');
+
+    const anyWeekExpanded = Array.from(weekEls).some(el => !el.classList.contains('hidden'));
+    const allWeeksExpanded = weekEls.length > 0 && Array.from(weekEls).every(el => !el.classList.contains('hidden'));
+    const allDaysExpanded = dayEls.length > 0 && Array.from(dayEls).every(el => !el.classList.contains('hidden'));
+    const fullyExpanded = allWeeksExpanded && allDaysExpanded;
+
+    const btnExpandWeeks = document.getElementById('btn-expand-weeks');
+    const btnExpandDays = document.getElementById('btn-expand-days');
+    const btnCollapseAll = document.getElementById('btn-reset');
+
+    if (btnExpandWeeks) btnExpandWeeks.style.display = anyWeekExpanded ? 'none' : '';
+    if (btnExpandDays) btnExpandDays.style.display = (anyWeekExpanded && !fullyExpanded) ? '' : 'none';
+    if (btnCollapseAll) btnCollapseAll.style.display = anyWeekExpanded ? '' : 'none';
 }
 
 function autoCleanUI() {
@@ -7487,6 +9074,80 @@ function getTimestamp() {
     return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+// Cached from the last successful loadData() call, so renderNextWeekBatch()
+// can retroactively populate newly-created (still-empty) day containers
+// without triggering another Supabase fetch of the whole dataset.
+let __lastScheduleData = null;
+
+function applyScheduleDataToDom(data) {
+    if (!data) return;
+    const liveIds = new Set(data.map(row => String(row.id)));
+    data.forEach(row => {
+        if (deletingRows.has(row.id)) return;
+
+        let rowsDiv = document.getElementById(`rows-${row.day_label}`);
+        if (!rowsDiv && ensureWeekRenderedForDayLabel(row.day_label)) {
+            rowsDiv = document.getElementById(`rows-${row.day_label}`);
+        }
+        if (rowsDiv && rowsDiv.innerHTML === '') {
+            const addBtn = createAddRowsButton(rowsDiv, row.day_label);
+            addRowsToContainer(rowsDiv, row.day_label, addBtn);
+        }
+        ensureRowSlotExists(rowsDiv, row.day_label, row.id);
+
+        const wrapper = document.getElementById(`row-wrapper-${row.id}`);
+        if (wrapper) {
+            wrapper.setAttribute('data-occupied', 'true');
+        }
+
+        // THE FIX: Activity is now 2, Place is now 3
+        const dbCols = { 1: 'time', 2: 'place', 3: 'activity', 4: 'asset', 5: 'status', 6: 'trade_partners', 7: 'result', 8: 'notes', 9: 'duration', 10: 'loto' };
+
+        for (let col = 1; col <= 10; col++) {
+            const cellId = `${row.day_label}-r${row.id}-c${col}`;
+            const el = document.getElementById(cellId);
+            if (el && el !== document.activeElement) {
+                const content = row[dbCols[col]] || ""; 
+
+                if (col === 6) {
+                    el.setAttribute('data-selected', content);
+                    if (el.options && el.options[0]) {
+                        el.options[0].text = content ? `Selected: ${content}` : "+ Add Multi";
+                    }
+                } else if (col === 5) {
+                    if (el.innerHTML.trim() !== content.trim()) {
+                        el.innerHTML = content;
+                    }
+                } else {
+                    if (el.tagName === 'SELECT' && content !== "") {
+                        const exists = Array.from(el.options).some(opt => opt.value === content);
+                        if (!exists) {
+                            const newOpt = new Option(content, content);
+                            el.add(newOpt);
+                        }
+                    }
+                    el.value = content; 
+                }
+                applyCellColor(el, content);
+            }
+        }
+    });
+
+    // Reconcile: data is always a full-table fetch (or a cached copy of
+    // one), so any row still marked occupied in the DOM that ISN'T in it
+    // anymore was moved/deleted server-side. The loop above only ever
+    // adds/updates rows present in `data` — nothing else in the app ever
+    // clears a row that fell out of it, so a missed/late realtime DELETE
+    // (backgrounded tab, brief reconnect, event ordering) used to require
+    // a full hard page reload to notice. This makes every call here
+    // self-healing instead.
+    document.querySelectorAll('.cell-row[data-occupied="true"]').forEach(rowEl => {
+        const idStr = rowEl.id.replace('row-wrapper-', '');
+        if (deletingRows.has(parseInt(idStr, 10))) return;
+        if (!liveIds.has(idStr)) clearRowElement(rowEl);
+    });
+}
+
 async function loadData(isSilent = false, preFetchedPromise = null) {
     try {
         let data, error;
@@ -7505,52 +9166,9 @@ async function loadData(isSilent = false, preFetchedPromise = null) {
         if (error) throw error;
 
         if (data) {
-            data.forEach(row => {
-                if (deletingRows.has(row.id)) return;
-
-                const rowsDiv = document.getElementById(`rows-${row.day_label}`);
-                if (rowsDiv && rowsDiv.innerHTML === '') {
-                    const addBtn = createAddRowsButton(rowsDiv, row.day_label);
-                    addRowsToContainer(rowsDiv, row.day_label, addBtn); 
-                }
-
-                const wrapper = document.getElementById(`row-wrapper-${row.id}`);
-                if (wrapper) {
-                    wrapper.setAttribute('data-occupied', 'true');
-                }
-
-                // THE FIX: Activity is now 2, Place is now 3
-                const dbCols = { 1: 'time', 2: 'place', 3: 'activity', 4: 'asset', 5: 'status', 6: 'trade_partners', 7: 'result', 8: 'notes', 9: 'duration', 10: 'loto' };
-
-                for (let col = 1; col <= 10; col++) {
-                    const cellId = `${row.day_label}-r${row.id}-c${col}`;
-                    const el = document.getElementById(cellId);
-                    if (el && el !== document.activeElement) {
-                        const content = row[dbCols[col]] || ""; 
-
-                        if (col === 6) {
-                            el.setAttribute('data-selected', content);
-                            if (el.options && el.options[0]) {
-                                el.options[0].text = content ? `Selected: ${content}` : "+ Add Multi";
-                            }
-                        } else if (col === 5) {
-                            if (el.innerHTML.trim() !== content.trim()) {
-                                el.innerHTML = content;
-                            }
-                        } else {
-                            if (el.tagName === 'SELECT' && content !== "") {
-                                const exists = Array.from(el.options).some(opt => opt.value === content);
-                                if (!exists) {
-                                    const newOpt = new Option(content, content);
-                                    el.add(newOpt);
-                                }
-                            }
-                            el.value = content; 
-                        }
-                        applyCellColor(el, content);
-                    }
-                }
-            });
+            __lastScheduleData = data;
+            LP_CACHE.set('scheduleData', data);
+            applyScheduleDataToDom(data);
             // 🟢 FILTER FIX: rebuild the sidebar filter option lists from the
             // exact same rows we just rendered, so filters always match live data.
             rebuildFilterOptionsFromBackendData(data);
@@ -7604,13 +9222,22 @@ async function runFailsafeSync() {
  * ONLY includes rows from days that are currently expanded/opened.
  */
 function exportToPDF() {
+    // Respect Settings' column visibility AND order — scheduleColConfig is
+    // already an array in display order, so filtering to .visible keeps
+    // that order intact without needing to sort anything ourselves.
+    const visibleCols = scheduleColConfig.filter(c => c.visible);
+    if (visibleCols.length === 0) {
+        alert("No columns are set to visible in Settings — nothing to export.");
+        return;
+    }
+
     const rows = document.querySelectorAll('.cell-row');
     const shownRowsData = [];
-    
+
     rows.forEach(row => {
         // 1. Ensure the row is visible (not filtered out by a specific search)
         const isRowVisible = row.style.display !== 'none' && window.getComputedStyle(row).display !== 'none';
-        
+
         // 2. Ensure the row actually has user data saved in it
         const isOccupied = row.getAttribute('data-occupied') === 'true';
 
@@ -7624,38 +9251,39 @@ function exportToPDF() {
 
         if (isRowVisible && isOccupied && isDayExpanded && isWeekExpanded) {
             const rowDate = row.getAttribute('data-date') || "";
-            const cols = [];
-            
-            for (let col = 1; col <= 9; col++) {
-                const el = row.querySelector(`[data-col-index="${col}"]`) || row.querySelector(`[id$="-c${col}"]`);
+            const colsById = {};
+
+            visibleCols.forEach(col => {
+                const colId = col.id;
+                const el = row.querySelector(`[data-col-index="${colId}"]`) || row.querySelector(`[id$="-c${colId}"]`);
                 let val = "";
-                
+
                 if (el) {
-                    if (col === 5) {
+                    if (colId === 5) {
                         val = el.innerText || "";
                         if (val === "...") val = ""; // Clean up default unassigned status dots
-                    } else if (col === 6) {
+                    } else if (colId === 6) {
                         val = el.getAttribute('data-selected') || el.value || "";
                     } else {
                         val = el.value || "";
                     }
                 }
-                
+
                 // Safe string conversion and trim
                 val = (val || "").toString().trim();
-                
+
                 // Final text clean-up: Strip out unassigned placeholder text
                 if (val.toLowerCase() === "select..." || val.toLowerCase() === "+ add multi") {
                     val = "";
                 }
-                
-                cols.push(val);
-            }
-            
+
+                colsById[colId] = val;
+            });
+
             // Double check that there is at least some textual data remaining
-            const hasText = cols.some(v => v !== "");
+            const hasText = Object.values(colsById).some(v => v !== "");
             if (hasText) {
-                shownRowsData.push({ date: rowDate, cols: cols });
+                shownRowsData.push({ date: rowDate, colsById: colsById });
             }
         }
     });
@@ -7670,7 +9298,7 @@ function exportToPDF() {
         alert("Pop-up blocked! Please enable pop-ups for this dashboard to run reports.");
         return;
     }
-    
+
     // String sanitation helper
     const escapeHtml = (str) => {
         if (!str) return '';
@@ -7682,15 +9310,49 @@ function exportToPDF() {
             .replace(/'/g, "&#039;");
     };
 
-    let tableBodyHtml = '';
+    // Group consecutive rows sharing the same date into blocks, so each
+    // date can read as one visually distinct section: a single merged
+    // (rowspan) Date cell, and every row under it sharing that block's
+    // background color. Rows already come out of the DOM in the
+    // schedule's own day-by-day order, so same-date rows are already
+    // adjacent — no separate sort needed.
+    const dateGroups = [];
     shownRowsData.forEach(item => {
-        tableBodyHtml += `<tr>`;
-        tableBodyHtml += `<td style="font-weight: bold; color: #333;">${escapeHtml(item.date)}</td>`;
-        item.cols.forEach(colVal => {
-            tableBodyHtml += `<td>${escapeHtml(colVal)}</td>`;
-        });
-        tableBodyHtml += `</tr>`;
+        const lastGroup = dateGroups[dateGroups.length - 1];
+        if (lastGroup && lastGroup.date === item.date) {
+            lastGroup.items.push(item);
+        } else {
+            dateGroups.push({ date: item.date, items: [item] });
+        }
     });
+
+    // Alternating per-date-block colors so adjacent dates are easy to tell
+    // apart at a glance, even when a date only has one or two rows.
+    const DATE_BLOCK_COLORS = ['#e8f5e9', '#e3f2fd'];
+
+    // Column widths are proportional to each column's configured .width
+    // weight (same numbers Settings uses for the live grid), scaled to
+    // fill the space left after a fixed-width Date column.
+    const DATE_COL_PERCENT = 8;
+    const totalWeight = visibleCols.reduce((sum, c) => sum + (Number(c.width) || 10), 0) || 1;
+    const widthFor = (col) => (((Number(col.width) || 10) / totalWeight) * (100 - DATE_COL_PERCENT)).toFixed(2);
+
+    let tableBodyHtml = '';
+    dateGroups.forEach((group, groupIndex) => {
+        const color = DATE_BLOCK_COLORS[groupIndex % DATE_BLOCK_COLORS.length];
+        group.items.forEach((item, rowIndexInGroup) => {
+            tableBodyHtml += `<tr style="background-color:${color};">`;
+            if (rowIndexInGroup === 0) {
+                tableBodyHtml += `<td rowspan="${group.items.length}" style="font-weight: bold; color: #1b5e20; background-color:${color}; vertical-align: middle;">${escapeHtml(item.date)}</td>`;
+            }
+            visibleCols.forEach(col => {
+                tableBodyHtml += `<td>${escapeHtml(item.colsById[col.id])}</td>`;
+            });
+            tableBodyHtml += `</tr>`;
+        });
+    });
+
+    const headerCellsHtml = visibleCols.map(col => `<th style="width: ${widthFor(col)}%;">${escapeHtml(col.name)}</th>`).join('');
 
     const htmlContent = `
     <!DOCTYPE html>
@@ -7698,17 +9360,17 @@ function exportToPDF() {
     <head>
         <title>Schedule Report Export</title>
         <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; padding: 25px; color: #222; line-height: 1.4; }
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 25px; color: #222; line-height: 1.4; }
             .report-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #1b5e20; padding-bottom: 10px; margin-bottom: 20px; }
             h1 { font-size: 22px; margin: 0; color: #1b5e20; font-weight: bold; }
             .meta-stamp { font-size: 13px; color: #666; font-weight: 500; }
             table { width: 100%; border-collapse: collapse; font-size: 11px; table-layout: fixed; }
             th { background-color: #00d134; color: white; padding: 10px 5px; border: 1px solid #1b5e20; text-transform: uppercase; font-weight: bold; font-size: 10px; text-align: center; letter-spacing: 0.5px; }
             td { padding: 8px 5px; border: 1px solid #e0e0e0; text-align: center; word-wrap: break-word; font-size: 11px; }
-            tr:nth-child(even) { background-color: #fcfcfc; }
             @media print {
                 body { padding: 0; margin: 0; }
                 @page { margin: 1.2cm; }
+                * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
             }
         </style>
     </head>
@@ -7720,15 +9382,8 @@ function exportToPDF() {
         <table>
             <thead>
                 <tr>
-                    <th style="width: 85px;">Date</th>
-                    <th style="width: 70px;">Time</th>
-                    <th style="width: 85px;">Place</th>
-                    <th>Activity</th>
-                    <th style="width: 90px;">Asset</th>
-                    <th style="width: 85px;">Status</th>
-                    <th>Trade Partners</th>
-                    <th style="width: 85px;">Result</th>
-                    <th style="width: 140px;">Notes</th>
+                    <th style="width: ${DATE_COL_PERCENT}%;">Date</th>
+                    ${headerCellsHtml}
                 </tr>
             </thead>
             <tbody>
@@ -7844,11 +9499,18 @@ async function orderChronologically() {
 // --- BATCH ADD LOGIC ---
 function openBatchAddModal() {
     document.getElementById('batch-add-modal').style.display = 'flex';
-    
+
+    // Always open fresh on the selection step, not wherever a previous
+    // session left off.
+    document.getElementById('batchStep1').style.display = 'flex';
+    document.getElementById('batchStep2').style.display = 'none';
+    document.getElementById('batchPreviewBody').innerHTML = '';
+
     // Populate standard dropdowns
     const timeSelect = document.getElementById('batch-time');
     timeSelect.innerHTML = '<option value="">Select...</option>';
     (window.dropdownData?.col1 || []).forEach(t => timeSelect.add(new Option(t, t)));
+    document.getElementById('batch-loto').value = '';
 
     // Populate Checkbox Lists
     const tradeList = document.getElementById('batch-trade-list');
@@ -7886,10 +9548,11 @@ function closeBatchAddModal() {
     document.getElementById('batch-add-modal').style.display = 'none';
 }
 
-async function processBatchAdd() {
+function generateBatchPreview() {
     const targetDate = document.getElementById('batch-date').value;
     const timeVal = document.getElementById('batch-time').value;
     const notesVal = document.getElementById('batch-notes').value;
+    const lotoVal = document.getElementById('batch-loto').value;
 
     if (!targetDate) return alert("Please select a target date.");
 
@@ -7902,14 +9565,76 @@ async function processBatchAdd() {
         return alert("You must select at least one Activity and one Asset.");
     }
 
-    const totalRowsNeeded = selectedActs.length * selectedAssets.length;
-    if (!confirm(`This will generate ${totalRowsNeeded} line items on ${targetDate}. Continue?`)) return;
+    // Build the Matrix (every Activity applied to every Asset) as an
+    // in-memory preview instead of writing straight to the schedule — the
+    // review table below replaces the old "This will generate N line
+    // items... Continue?" confirm() prompt, since the user can now see
+    // and edit exactly what's about to be added instead of just a count.
+    const rows = [];
+    selectedActs.forEach(act => {
+        selectedAssets.forEach(asset => {
+            const placeVal = (window.assetToPlaceMap && window.assetToPlaceMap[asset]) ? window.assetToPlaceMap[asset] : "";
+            rows.push({ time: timeVal, place: placeVal, activity: act, asset: asset, trade: selectedTrades, notes: notesVal, loto: lotoVal });
+        });
+    });
+
+    const esc = (v) => String(v || '').replace(/"/g, '&quot;');
+    document.getElementById('batchPreviewCount').innerText = `${rows.length} line item(s) for ${targetDate}`;
+    document.getElementById('batchPreviewBody').innerHTML = rows.map(r => `
+        <tr>
+            <td style="padding:6px 8px; border-bottom:1px solid #eee;"><input type="text" class="bp-time" value="${esc(r.time)}" style="width:100%; padding:5px; border:1px solid #ddd; border-radius:3px; font-size:12px; box-sizing:border-box;"></td>
+            <td style="padding:6px 8px; border-bottom:1px solid #eee;"><input type="text" class="bp-place" value="${esc(r.place)}" style="width:100%; padding:5px; border:1px solid #ddd; border-radius:3px; font-size:12px; box-sizing:border-box;"></td>
+            <td style="padding:6px 8px; border-bottom:1px solid #eee;"><input type="text" class="bp-activity" value="${esc(r.activity)}" style="width:100%; padding:5px; border:1px solid #ddd; border-radius:3px; font-size:12px; box-sizing:border-box;"></td>
+            <td style="padding:6px 8px; border-bottom:1px solid #eee;"><input type="text" class="bp-asset" value="${esc(r.asset)}" style="width:100%; padding:5px; border:1px solid #ddd; border-radius:3px; font-size:12px; box-sizing:border-box;"></td>
+            <td style="padding:6px 8px; border-bottom:1px solid #eee;"><input type="text" class="bp-trade" value="${esc(r.trade)}" style="width:100%; padding:5px; border:1px solid #ddd; border-radius:3px; font-size:12px; box-sizing:border-box;"></td>
+            <td style="padding:6px 8px; border-bottom:1px solid #eee;"><input type="text" class="bp-notes" value="${esc(r.notes)}" style="width:100%; padding:5px; border:1px solid #ddd; border-radius:3px; font-size:12px; box-sizing:border-box;"></td>
+            <td style="padding:6px 8px; border-bottom:1px solid #eee;">
+                <select class="bp-loto" style="width:100%; padding:5px; border:1px solid #ddd; border-radius:3px; font-size:12px;">
+                    <option value=""${r.loto === '' ? ' selected' : ''}>Select...</option>
+                    <option value="Yes"${r.loto === 'Yes' ? ' selected' : ''}>Yes</option>
+                    <option value="No"${r.loto === 'No' ? ' selected' : ''}>No</option>
+                </select>
+            </td>
+            <td style="padding:6px 8px; border-bottom:1px solid #eee; text-align:center;"><button type="button" onclick="this.closest('tr').remove()" style="background:none; border:none; color:#d32f2f; cursor:pointer; font-size:14px;" title="Remove this row">✕</button></td>
+        </tr>
+    `).join('');
+
+    // The commit step needs the target date but the per-row inputs don't
+    // carry it, so stash it on the step-2 container itself.
+    document.getElementById('batchStep2').dataset.targetDate = targetDate;
+
+    document.getElementById('batchStep1').style.display = 'none';
+    document.getElementById('batchStep2').style.display = 'flex';
+}
+
+function backToBatchStep1() {
+    document.getElementById('batchStep2').style.display = 'none';
+    document.getElementById('batchStep1').style.display = 'flex';
+}
+
+async function commitBatchAdd() {
+    const targetDate = document.getElementById('batchStep2').dataset.targetDate;
+
+    // Read the (possibly hand-edited, possibly row-removed) preview table
+    // rather than recomputing from the checkboxes, so edits/removals made
+    // in the review step are exactly what gets added.
+    const previewRows = Array.from(document.querySelectorAll('#batchPreviewBody tr')).map(tr => ({
+        time: tr.querySelector('.bp-time').value,
+        place: tr.querySelector('.bp-place').value,
+        activity: tr.querySelector('.bp-activity').value,
+        asset: tr.querySelector('.bp-asset').value,
+        trade: tr.querySelector('.bp-trade').value,
+        notes: tr.querySelector('.bp-notes').value,
+        loto: tr.querySelector('.bp-loto').value,
+    }));
+
+    if (previewRows.length === 0) return alert("No line items left to add — every row was removed.");
 
     let targetRowsDiv = document.getElementById(`rows-${targetDate}`);
     if (!targetRowsDiv) {
         return alert("The selected date is outside of the active schedule window.");
     }
-    
+
     // Initialize day if completely empty
     if (targetRowsDiv.innerHTML === '') {
         const addBtn = createAddRowsButton(targetRowsDiv, targetDate);
@@ -7918,15 +9643,15 @@ async function processBatchAdd() {
 
     // Ensure we have enough blank rows, auto-generate more if we don't
     let emptyRows = Array.from(targetRowsDiv.querySelectorAll('.cell-row:not([data-occupied="true"])'));
-    while (emptyRows.length < totalRowsNeeded) {
+    while (emptyRows.length < previewRows.length) {
         const currentCount = targetRowsDiv.querySelectorAll('.cell-row').length;
         // Generate up to exactly what we need
-        addRowsToContainer(targetRowsDiv, targetDate, null, currentCount, Math.max(20, totalRowsNeeded - emptyRows.length));
-        
+        addRowsToContainer(targetRowsDiv, targetDate, null, currentCount, Math.max(20, previewRows.length - emptyRows.length));
+
         // Push Add Button back to the bottom
         const addBtn = targetRowsDiv.querySelector('.add-rows-btn');
         if (addBtn) targetRowsDiv.appendChild(addBtn);
-        
+
         // Re-scrape empty rows
         emptyRows = Array.from(targetRowsDiv.querySelectorAll('.cell-row:not([data-occupied="true"])'));
     }
@@ -7936,58 +9661,49 @@ async function processBatchAdd() {
 
     closeBatchAddModal();
 
-    let rowIndex = 0;
-    
-    // Create the Matrix: Every Activity gets applied to Every Asset
-    for (const act of selectedActs) {
-        for (const asset of selectedAssets) {
-            const emptyRow = emptyRows[rowIndex];
-            emptyRow.setAttribute('data-occupied', 'true');
-            emptyRow.style.display = 'flex'; 
+    previewRows.forEach((r, rowIndex) => {
+        const emptyRow = emptyRows[rowIndex];
+        emptyRow.setAttribute('data-occupied', 'true');
+        emptyRow.style.display = 'flex';
 
-            const rowNum = parseInt(emptyRow.id.replace('row-wrapper-', ''));
-            
-            // --- NEW: Automatically look up the corresponding place for this asset ---
-            const placeVal = (window.assetToPlaceMap && window.assetToPlaceMap[asset]) ? window.assetToPlaceMap[asset] : "";
+        const rowNum = parseInt(emptyRow.id.replace('row-wrapper-', ''));
 
-            const setAndSave = (colIndex, val) => {
-                const el = emptyRow.querySelector(`[data-col-index="${colIndex}"]`);
-                if (el) {
-                    if (el.tagName === 'SELECT' && val !== "") {
-                        const exists = Array.from(el.options).some(opt => opt.value === val);
-                        if (!exists) el.add(new Option(val, val));
-                    }
-                    if (colIndex === 6) {
-                        el.setAttribute('data-selected', val);
-                        if (el.options && el.options[0]) el.options[0].text = val ? `Selected: ${val}` : "+ Add Multi";
-                    } else {
-                        el.value = val;
-                    }
-                    applyCellColor(el, val);
-                    saveCell(el, val, colIndex, true);
+        const setAndSave = (colIndex, val) => {
+            const el = emptyRow.querySelector(`[data-col-index="${colIndex}"]`);
+            if (el) {
+                if (el.tagName === 'SELECT' && val !== "") {
+                    const exists = Array.from(el.options).some(opt => opt.value === val);
+                    if (!exists) el.add(new Option(val, val));
                 }
-            };
+                if (colIndex === 6) {
+                    el.setAttribute('data-selected', val);
+                    if (el.options && el.options[0]) el.options[0].text = val ? `Selected: ${val}` : "+ Add Multi";
+                } else {
+                    el.value = val;
+                }
+                applyCellColor(el, val);
+                saveCell(el, val, colIndex, true);
+            }
+        };
 
-            // Inject the data: Place is 2, Activity is 3
-            setAndSave(1, timeVal);
-            setAndSave(2, placeVal); // Automatically assigned!
-            setAndSave(3, act);
-            setAndSave(4, asset);
-            setAndSave(6, selectedTrades);
-            setAndSave(8, notesVal);
+        // Inject the data: Place is 2, Activity is 3, LOTO is 10
+        setAndSave(1, r.time);
+        setAndSave(2, r.place);
+        setAndSave(3, r.activity);
+        setAndSave(4, r.asset);
+        setAndSave(6, r.trade);
+        setAndSave(8, r.notes);
+        setAndSave(10, r.loto);
 
-            // Trigger the Google Sheets Status Lookup
-            lookupColumn5Value(rowNum, targetDate, false);
-            rowIndex++;
-
-            // Trigger the Google Sheets Status Lookup
-            lookupColumn5Value(rowNum, targetDate, false);
-            rowIndex++;
-        }
-    }
+        // Trigger the Google Sheets Status Lookup — this was previously
+        // called (and rowIndex incremented) TWICE per row by mistake,
+        // which meant every other empty row got skipped and left blank
+        // instead of used, leaving visible gaps in the grid.
+        lookupColumn5Value(rowNum, targetDate, false);
+    });
 
     document.getElementById('saveIndicator').innerText = "Saved";
-    alert(`Successfully generated and added ${totalRowsNeeded} line item(s) to ${targetDate}.`);
+    alert(`Successfully added ${previewRows.length} line item(s) to ${targetDate}.`);
 }
 /**
  * Helper function to convert 12hr/24hr time strings into numerical minutes for accurate sorting.
@@ -8071,12 +9787,13 @@ function filterBatchList(listId, query) {
 </div>
 
 <div class="modal-overlay" id="batch-add-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:10000; justify-content:center; align-items:center;">
-    <div style="background:white; padding:30px; border-radius:8px; width:700px; max-width:95%; max-height:90vh; display:flex; flex-direction:column; box-shadow: 0 10px 30px rgba(0,0,0,0.2);">
+    <div style="background:white; padding:30px; border-radius:8px; width:950px; max-width:95%; max-height:90vh; display:flex; flex-direction:column; box-shadow: 0 10px 30px rgba(0,0,0,0.2);">
         <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #eee; padding-bottom:15px; margin-bottom:15px;">
             <h2 style="margin:0; color:#2e7d32;">Batch Add Line Items</h2>
             <button onclick="closeBatchAddModal()" style="background:none; border:none; font-size:24px; cursor:pointer; color:#999;">×</button>
         </div>
-        
+
+        <div id="batchStep1" style="display:flex; flex-direction:column; flex:1; overflow:hidden; gap:15px;">
         <div style="overflow-y:auto; flex:1; padding-right:10px; display:flex; flex-direction:column; gap:15px;">
             <div style="display:flex; gap:15px;">
                 <div style="flex:1;">
@@ -8087,6 +9804,14 @@ function filterBatchList(listId, query) {
                     <label style="font-weight:bold; font-size:13px; color:#555;">Time</label>
                     <select id="batch-time" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;"></select>
                 </div>
+                <div style="flex:1;">
+                    <label style="font-weight:bold; font-size:13px; color:#555;">LOTO</label>
+                    <select id="batch-loto" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;">
+                        <option value="">Select...</option>
+                        <option value="Yes">Yes</option>
+                        <option value="No">No</option>
+                    </select>
+                </div>
             </div>
 
             <div style="display:flex; flex-direction:column; max-height: 140px;">
@@ -8096,7 +9821,7 @@ function filterBatchList(listId, query) {
                 </div>
                 <div id="batch-trade-list" style="flex:1; border:1px solid #ccc; border-radius:4px; overflow-y:auto; padding:5px; background:#f9f9f9;"></div>
             </div>
-            
+
             <div style="display:flex; gap:15px; height: 240px;">
                 <div style="flex:1; display:flex; flex-direction:column;">
                     <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:5px;">
@@ -8120,9 +9845,35 @@ function filterBatchList(listId, query) {
             </div>
         </div>
 
-        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:20px; border-top:1px solid #eee; padding-top:15px;">
+        <div style="display:flex; justify-content:flex-end; gap:10px; border-top:1px solid #eee; padding-top:15px;">
             <button onclick="closeBatchAddModal()" style="padding:10px 15px; background:#f5f5f5; border:1px solid #ddd; border-radius:4px; cursor:pointer; font-weight:bold;">Cancel</button>
-            <button onclick="processBatchAdd()" style="padding:10px 15px; background:#2e7d32; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:bold;">Generate & Add Rows</button>
+            <button onclick="generateBatchPreview()" style="padding:10px 15px; background:#2e7d32; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:bold;">Generate Preview →</button>
+        </div>
+        </div>
+
+        <div id="batchStep2" style="display:none; flex-direction:column; flex:1; overflow:hidden; gap:10px;">
+            <p style="margin:0; font-size:13px; color:#666;"><strong id="batchPreviewCount"></strong> — review and edit before adding to the schedule. Remove any rows you don't want.</p>
+            <div style="flex:1; overflow:auto; border:1px solid #eee; border-radius:6px;">
+                <table style="width:100%; border-collapse:collapse; font-size:12.5px;">
+                    <thead>
+                        <tr style="background:#f1f3f4; position:sticky; top:0;">
+                            <th style="padding:7px 8px; text-align:left;">Time</th>
+                            <th style="padding:7px 8px; text-align:left;">Place</th>
+                            <th style="padding:7px 8px; text-align:left;">Activity</th>
+                            <th style="padding:7px 8px; text-align:left;">Asset</th>
+                            <th style="padding:7px 8px; text-align:left;">Trade</th>
+                            <th style="padding:7px 8px; text-align:left;">Notes</th>
+                            <th style="padding:7px 8px; text-align:left;">LOTO</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="batchPreviewBody"></tbody>
+                </table>
+            </div>
+            <div style="display:flex; justify-content:flex-end; gap:10px; border-top:1px solid #eee; padding-top:15px;">
+                <button onclick="backToBatchStep1()" style="padding:10px 15px; background:#f5f5f5; border:1px solid #ddd; border-radius:4px; cursor:pointer; font-weight:bold;">← Back</button>
+                <button onclick="commitBatchAdd()" style="padding:10px 15px; background:#2e7d32; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:bold;">Add to Schedule</button>
+            </div>
         </div>
     </div>
 </div>
