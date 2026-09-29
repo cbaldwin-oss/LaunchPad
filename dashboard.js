@@ -26,6 +26,12 @@ export class CriticalArcDashboard {
                               'Verified - Not Included in Sampling'];
     this.isComplete = (c) => c.is_verified === true ||
                              this.COMPLETE_STATUSES.includes(c.status);
+    // Verified = the Cx agent has approved it, i.e. fully done. The rest of
+    // COMPLETE_STATUSES ('Checklist Complete') means the contractor finished
+    // but Cx has not verified yet; charts that split the two use these.
+    this.VERIFIED_STATUSES = ['Finished', 'Verified', 'Verified - Not Included in Sampling'];
+    this.isVerified = (c) => c.is_verified === true ||
+                             this.VERIFIED_STATUSES.includes(c.status);
 
     // Tests are the ONE vocabulary still unresolved (GOLD-DESIGN Q5): whether
     // 'Partially Passed (Test to be Repeated)' counts as a pass, and whether
@@ -796,19 +802,36 @@ export class CriticalArcDashboard {
     const dc = discs.map(d => {
       const rows = cl.filter(c => c.discipline === d);
       const done = rows.filter(c => this.isComplete(c)).length;
-      return { discipline: d, total: rows.length, done, remaining: rows.length - done, pct: rows.length ? +(done / rows.length * 100).toFixed(1) : 0 };
+      const verified = rows.filter(c => this.isVerified(c)).length;
+      const pctOf = (n) => rows.length ? +(n / rows.length * 100).toFixed(1) : 0;
+      return { discipline: d, total: rows.length, done, verified, contractorDone: done - verified,
+               remaining: rows.length - done, pct: pctOf(done), verifiedPct: pctOf(verified), contractorPct: pctOf(done - verified) };
     }).sort((a, b) => a.total - b.total);
-    
+
+    // Verified (Cx approved) and contractor-complete are stacked separately,
+    // matching the donut's greens. Counts live in the hover: the green
+    // segments are usually too thin to hold a label.
+    const discHover = (label) => `%{y}<br>${label}: %{x} (%{customdata}%)<extra></extra>`;
     this.plot('ca-cl-disc', [
-      { type: 'bar', orientation: 'h', y: dc.map(d => d.discipline), x: dc.map(d => d.done), name: 'Completed', marker: { color: this.C.green }, text: dc.map(d => d.done > 0 ? `${d.done} (${d.pct}%)` : ''), textposition: 'inside', textfont: { color: this.C.text, family: this.FONT } },
-      { type: 'bar', orientation: 'h', y: dc.map(d => d.discipline), x: dc.map(d => d.remaining), name: 'Remaining', marker: { color: this.C.border }, text: dc.map(d => String(d.total)), textposition: 'outside', textfont: { color: this.C.muted, family: this.FONT } },
+      { type: 'bar', orientation: 'h', y: dc.map(d => d.discipline), x: dc.map(d => d.verified), name: 'Verified (Cx)', marker: { color: '#39B54A' }, customdata: dc.map(d => d.verifiedPct), hovertemplate: discHover('Verified (Cx)') },
+      { type: 'bar', orientation: 'h', y: dc.map(d => d.discipline), x: dc.map(d => d.contractorDone), name: 'Checklist Complete (contractor)', marker: { color: '#8BD17C' }, customdata: dc.map(d => d.contractorPct), hovertemplate: discHover('Checklist Complete') },
+      { type: 'bar', orientation: 'h', y: dc.map(d => d.discipline), x: dc.map(d => d.remaining), name: 'Remaining', marker: { color: this.C.border }, text: dc.map(d => String(d.total)), textposition: 'outside', textfont: { color: this.C.muted, family: this.FONT }, hovertemplate: '%{y}<br>Remaining: %{x}<extra></extra>' },
     ], { barmode: 'stack', legend: { orientation: 'v', y: -0.2, yanchor: 'top', x: 0, xanchor: 'left' }, yaxis: { tickfont: { color: this.C.muted, size: 10 }, automargin: true }, margin: { t: 10, b: 100, l: 10, r: 40 } });
 
     const discColors = { Mechanical:'#E74C3C', Electrical:'#F5A623', 'Electrical Power Monitoring System':'#4A90D9', 'Fire Protection':'#39B54A' };
     const discAbbr = { 'Electrical Power Monitoring System':'EPMS' };
+    // discColors only knows the old bare names; SAN's read 'Div. 23 -
+    // HVAC/Mechanical' etc., so every bar fell back to grey. Unknown
+    // disciplines get a palette colour by alphabetical position, so a
+    // discipline keeps its colour between loads.
+    const discOrder = [...discs].sort();
+    const discColor = (d) => discColors[d] || this.autoColor(d, discOrder.indexOf(d));
+    const levelTotals = active.map(lv => cl.filter(c => c.level === lv).length);
     const ldTraces = discs.map(d => {
       const perLevel = active.map(lv => cl.filter(c => c.level === lv && c.discipline === d).length);
-      return { type: 'bar', orientation: 'h', name: discAbbr[d] || d, y: active, x: perLevel, marker: { color: discColors[d] || this.C.muted }, text: perLevel.map(v => v || ''), textposition: 'inside', textfont: { color: '#23262B', family: this.FONT }, hovertemplate: `${d}: %{x}<extra></extra>` };
+      // Segments under 3% of their bar are too thin to hold a label; the
+      // count is still in the hover.
+      return { type: 'bar', orientation: 'h', name: discAbbr[d] || d, y: active, x: perLevel, marker: { color: discColor(d) }, text: perLevel.map((v, i) => v && v / levelTotals[i] >= 0.03 ? v : ''), textposition: 'inside', textfont: { color: '#23262B', family: this.FONT }, hovertemplate: `${d}: %{x}<extra></extra>` };
     });
     this.plot('ca-cl-leveldisc', ldTraces, { barmode: 'stack', yaxis: { categoryorder: 'array', categoryarray: [...active].reverse(), tickfont: { color: this.C.text, size: 13 }, automargin: true }, legend: { orientation: 'v', y: -0.2, yanchor: 'top', x: 0, xanchor: 'left' }, margin: { t: 40, b: 120, l: 10, r: 20 } });
 
