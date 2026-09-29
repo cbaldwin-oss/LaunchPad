@@ -17,10 +17,15 @@ export class CriticalArcDashboard {
     // NEITHER SAN project -- their verified statuses are 'Verified',
     // 'Checklist Complete' and 'Verified - Not Included in Sampling', so the
     // comparison returned false for every row and the tab read 0%.
-    // `is_verified` is resolved per project in dbt against a seeded
-    // vocabulary, so it is correct for every client without a list here.
-    // Do not reintroduce a hardcoded status list.
-    this.isComplete = (c) => c.is_verified === true;
+    // `is_verified` came from the cx_* tables, which the dashboard no longer
+    // reads -- the Apps Script payload in launchpad_dashboard_data does not
+    // carry it (SAN's donut showed no verified slices). It is still honoured
+    // if a payload ever includes it; otherwise completion falls back to the
+    // status names below.
+    this.COMPLETE_STATUSES = ['Finished', 'Checklist Complete', 'Verified',
+                              'Verified - Not Included in Sampling'];
+    this.isComplete = (c) => c.is_verified === true ||
+                             this.COMPLETE_STATUSES.includes(c.status);
 
     // Tests are the ONE vocabulary still unresolved (GOLD-DESIGN Q5): whether
     // 'Partially Passed (Test to be Repeated)' counts as a pass, and whether
@@ -764,7 +769,10 @@ export class CriticalArcDashboard {
     // whatever it is called, a stable colour otherwise -- which is the only
     // version that works for a client whose statuses nobody has seen yet.
     const verifiedStatuses = new Set(cl.filter(c => this.isComplete(c)).map(c => c.status));
-    const dcStatusColors = { 'Not Started':'#8A8F98','In Progress':'#F5A623','GC to Verify':'#4A90D9','Finished':'#39B54A' };
+    // Completed statuses get distinct shades of green so contractor-complete
+    // and Cx-verified stay distinguishable in the same donut.
+    const dcStatusColors = { 'Not Started':'#8A8F98','In Progress':'#F5A623','GC to Verify':'#4A90D9','Finished':'#39B54A',
+                             'Checklist Complete':'#8BD17C','Verified':'#39B54A','Verified - Not Included in Sampling':'#1E7A34' };
     const statusColor = (s) => dcStatusColors[s] || (verifiedStatuses.has(s) ? this.C.green : this.autoColor(s));
 
     const levelColors = { L2:'#7F77DD', L3:'#1D9E75', L4:'#5DCAA5', FAT:'#85B7EB' };
