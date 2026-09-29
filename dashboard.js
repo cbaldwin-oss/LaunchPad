@@ -143,6 +143,8 @@ export class CriticalArcDashboard {
       .ca-wrapper select, .ca-wrapper input[type="text"] { width: 100%; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; }
       .ca-connected-project { width: 100%; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; font-weight: 600; }
       .ca-wrapper select:focus, .ca-wrapper input[type="text"]:focus { outline: none; border-color: var(--muted); }
+      .ca-pace-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 14px; color: var(--muted); font-size: 13px; }
+      .ca-pace-controls input[type="date"] { background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; font-family: inherit; font-size: 13px; color-scheme: light dark; }
 
       .ca-checkgroup { display: flex; flex-direction: column; gap: 5px; max-height: 190px; overflow-y: auto; background: var(--input-bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
       .ca-checkgroup label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); cursor: pointer; }
@@ -769,7 +771,15 @@ export class CriticalArcDashboard {
     const active = this.orderVals(cl.map(c => c.level),
       ['L2','L3','L4','FAT','Pre-Functional','Functional','Documentation Review','Closeout']);
 
-    let html = this.section('Checklist Status by Level') +
+    // Path to Completion tracks Pre-Functional only (the old PHXA7 chart's
+    // scope); a project without that type falls back to every checklist.
+    const preFunc = cl.filter(c => c.type_name === 'Pre-Functional');
+    const paceRows = preFunc.length ? preFunc : cl;
+    let html = this.section(`${preFunc.length ? 'Pre-Functional Checklists' : 'Checklists'} &mdash; Path to Completion`) +
+      `<div class="ca-pace-controls"><label for="ca-pace-date">Est. completion date</label><input type="date" id="ca-pace-date" /></div>` +
+      '<div class="ca-kpi-row" id="ca-pace-kpis"></div>' + this.chartBox('ca-pace-chart', 380) +
+      '<div class="ca-caption" id="ca-pace-caption"></div>';
+    html += this.section('Checklist Status by Level') +
       `<div class="ca-kpi-row" style="grid-template-columns:repeat(${active.length},minmax(0,1fr))">` +
       active.map((lv, i) => this.chartBox(`ca-cl-donut-${i}`, 420)).join('') + '</div>';
     html += this.section('Completion by Discipline') + this.chartBox('ca-cl-disc', 400);
@@ -778,6 +788,17 @@ export class CriticalArcDashboard {
     html += this.section('Completion by Contractor') + '<div id="ca-cl-contractor-table"></div>';
     html += '<div id="ca-cl-pending"></div>';
     root.innerHTML = html;
+
+    // The date is remembered per project in this browser only. There is no
+    // project-level column for it yet; moving it to launchpad_projects would
+    // share it between viewers.
+    const dateInput = this.q('ca-pace-date');
+    try { dateInput.value = localStorage.getItem(this.paceKey()) || ''; } catch (e) {}
+    dateInput.addEventListener('change', () => {
+      try { localStorage.setItem(this.paceKey(), dateInput.value); } catch (e) {}
+      this.renderPace(paceRows);
+    });
+    this.renderPace(paceRows);
 
     // Both maps were keyed on vocabularies that do not occur in SAN, so every
     // slice fell through to the border grey. The donut now colours by whether
@@ -873,6 +894,104 @@ export class CriticalArcDashboard {
       const ps = this.groupSize(pending, 'assigned_company').map(d => ({ 'Role / Status': unassigned.includes(String(d.key).trim().toLowerCase()) ? '⚠️ No Contractor Assigned' : d.key, Count: d.count })).sort((a, b) => b.Count - a.Count);
       this.q('ca-cl-pending').innerHTML = this.section('Pending Assignment') + this.table(['Role / Status','Count'].map(k => ({ k, label: k })), ps);
     }
+  }
+
+  paceKey() { return 'ca_pace_target_' + ((window.LP_CONFIG && window.LP_CONFIG.projectKey) || ''); }
+
+  // Green: running total of Verified checklists, by week. That history needs
+  // a per-checklist `verified_date`, which the Apps Script does not send yet;
+  // until it does, the green series is just today's count.
+  // Red: the pace required from today's count to reach 100% on the
+  // estimated completion date, i.e. remaining / weeks left. It treats every
+  // checklist as interchangeable -- sequencing is not modelled.
+  renderPace(rows) {
+    const DAY = 86400000, WEEK = 7 * DAY;
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const input = this.q('ca-pace-date');
+    const target = input.value ? new Date(input.value + 'T00:00:00') : null;
+
+    const total = rows.length;
+    const verified = rows.filter(c => this.isVerified(c));
+    const done = verified.length, remaining = total - done;
+    const pct = total ? (done / total * 100).toFixed(1) : '0.0';
+
+    // Weekly cumulative from whatever verified_date values exist.
+    // Dates are bucketed in local time: a bare 'YYYY-MM-DD' would otherwise
+    // parse as UTC midnight and land on the previous day in US time zones.
+    const parseDay = (v) => {
+      if (!v) return null;
+      const d = /^\d{4}-\d{2}-\d{2}$/.test(v) ? new Date(v + 'T00:00:00') : new Date(v);
+      return isNaN(d) || d > today.getTime() + DAY ? null : d;
+    };
+    const monday = (d) => { const m = new Date(d); m.setHours(0, 0, 0, 0); m.setDate(m.getDate() - ((m.getDay() + 6) % 7)); return m; };
+    const dated = verified.map(c => parseDay(c.verified_date)).filter(Boolean);
+    const greenX = [], greenY = [];
+    let pace = null;
+    if (dated.length) {
+      const perWeek = new Map();
+      dated.forEach(d => { const k = monday(d).getTime(); perWeek.set(k, (perWeek.get(k) || 0) + 1); });
+      let run = 0;
+      for (let w = new Date(Math.min(...perWeek.keys())); w <= today; w.setDate(w.getDate() + 7)) {
+        run += perWeek.get(w.getTime()) || 0;
+        greenX.push(new Date(w)); greenY.push(run);
+      }
+      pace = dated.filter(d => today - d <= 28 * DAY).length / 4;
+    }
+    greenX.push(today); greenY.push(done);
+
+    const weeksLeft = target ? (target - today) / WEEK : null;
+    const redX = [], redY = [];
+    let required = null;
+    if (target && weeksLeft > 0 && remaining > 0) {
+      required = remaining / weeksLeft;
+      for (let i = 0; today.getTime() + i * WEEK < target; i++) {
+        redX.push(new Date(today.getTime() + i * WEEK));
+        redY.push(Math.min(total, Math.round(done + required * i)));
+      }
+      redX.push(target); redY.push(total);
+    }
+
+    const fmt = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    let requiredVal = '—', requiredSub = 'Set a completion date', requiredCls = 'kpi-white';
+    if (remaining === 0) { requiredVal = '0'; requiredSub = 'All verified'; requiredCls = 'kpi-green'; }
+    else if (target && weeksLeft <= 0) { requiredVal = '—'; requiredSub = 'Completion date has passed'; requiredCls = 'kpi-red'; }
+    else if (required !== null) {
+      requiredVal = required.toFixed(1);
+      requiredSub = 'checklists / week';
+      requiredCls = pace === null ? 'kpi-yellow' : (pace >= required ? 'kpi-green' : 'kpi-red');
+    }
+    const paceVal = pace === null ? '—' : pace.toFixed(1);
+    const paceSub = pace === null ? 'Needs verified dates' :
+      (pace > 0 && remaining ? `Projected finish ${fmt(new Date(today.getTime() + remaining / pace * WEEK))}` : 'last 4 weeks');
+
+    this.q('ca-pace-kpis').innerHTML =
+      this.kpi('Verified', done.toLocaleString(), 'kpi-green', `of ${total.toLocaleString()} (${pct}%)`) +
+      this.kpi('Remaining', remaining.toLocaleString(), 'kpi-white') +
+      this.kpi('Weeks Left', weeksLeft === null ? '—' : Math.max(0, weeksLeft).toFixed(1), 'kpi-white', target ? `to ${fmt(target)}` : 'Set a completion date') +
+      this.kpi('Required Pace', requiredVal, requiredCls, requiredSub) +
+      this.kpi('Current Pace', paceVal, 'kpi-white', paceSub);
+
+    const hover = (label) => `${label}<br>%{x|%b %d, %Y}: %{y:,}<extra></extra>`;
+    const traces = [{
+      type: 'scatter', mode: greenX.length > 1 ? 'lines' : 'markers', name: 'Verified to date',
+      x: greenX, y: greenY, line: { color: this.C.green, shape: 'hv', width: 2 }, marker: { color: this.C.green, size: 10 },
+      fill: greenX.length > 1 ? 'tozeroy' : 'none', fillcolor: 'rgba(57,181,74,0.25)', hovertemplate: hover('Verified'),
+    }];
+    if (redX.length) traces.push({
+      type: 'scatter', mode: 'lines', name: 'Required to meet completion date',
+      x: redX, y: redY, line: { color: this.C.red, shape: 'hv', width: 2 }, hovertemplate: hover('Required'),
+    });
+    this.plot('ca-pace-chart', traces, {
+      xaxis: { type: 'date', tickformat: '%m/%d/%y', gridcolor: this.C.border, tickfont: { color: this.C.muted }, automargin: true },
+      yaxis: { range: [0, total * 1.05], gridcolor: this.C.border, tickfont: { color: this.C.muted }, automargin: true },
+      shapes: [{ type: 'line', xref: 'paper', x0: 0, x1: 1, y0: total, y1: total, line: { color: this.C.muted, dash: 'dot', width: 1 } }],
+      legend: { orientation: 'h', y: 1.08, x: 0 }, margin: { t: 40, b: 40, l: 10, r: 10 },
+    });
+
+    const undated = done - dated.length;
+    this.q('ca-pace-caption').textContent = dated.length
+      ? (undated ? `${undated.toLocaleString()} verified checklist(s) have no verified date and appear only in today's total.` : '')
+      : 'History appears once the data includes the date each checklist was verified. Until then the green point shows today\'s total.';
   }
 
   // ─── TAB 3: TESTS ───────────────────────────────────────────────────────────
