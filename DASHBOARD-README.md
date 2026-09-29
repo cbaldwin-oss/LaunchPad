@@ -47,14 +47,9 @@ Google Sheet (per project)                                  ← maintained in Go
 | [sync/sync-equipment-data.mjs](sync/sync-equipment-data.mjs) | ✅ **Used** | Calls each project's Apps Script and upserts the result into Supabase |
 | [sync/schema.sql](sync/schema.sql) | ✅ Used (run once) | Creates `launchpad_dashboard_data` and `launchpad_equipment_tracker_data`, their RLS, and `launchpad_projects.dashboard_display_name` |
 | `sync/add_draft_columns.sql`, `sync/move_schedule_row.sql`, `sync/unify_backend_schedule.sql` | — Not dashboard-related | Schedule tables |
-| [dashboard.html](dashboard.html) | ❌ **Not used** | Older standalone copy of the dashboard. Nothing links to it. |
-| [shared-dashboard/](shared-dashboard/) (whole folder) | ❌ **Not used** | The old CxAlloy → SQLite → JSON pipeline. Nothing in the app reads it, and its nested `.github/` workflow never runs. |
-| ↳ `html-dashboard/data/project_50506.json`, `projects.json` | ❌ Not used | Frozen PHXA7 snapshot. It is **real client data committed to the repo**, so consider removing it. |
-| ↳ `config.py`, `utils/cxalloy.py`, `utils/filters.py` | ❌ Not used anywhere | Nothing imports them. They're Streamlit-era leftovers. |
-| ↳ `sync_logic.py`, `export_json.py`, `utils/cleaning.py`, `README.md`, `HANDOFF-embed-dashboard.md`, `requirements.txt` | ❌ Not used by the app | `tools/cxalloy_vocab.py` (local, untracked) imports `sync_logic.py` |
-| [HOSTING.md](HOSTING.md) | ❌ Out of date | Describes the old static-JSON hosting |
-| [.gitmodules](.gitmodules) | ❌ Stale | Declares `shared-dashboard` as a submodule, but the folder is plain tracked files. It also contains the `url = url =` typo. Flag it to the coworker. |
-| `tools/cxalloy_vocab.py` | 🛠 Local only (untracked) | Read-only check of CxAlloy vocabularies. Useful for comparing status names, but it reads CxAlloy directly, not the Sheets. |
+| `tools/cxalloy_vocab.py`, `tools/sync_logic.py` | 🛠 Local only (untracked) | Read-only check of CxAlloy vocabularies. Useful for comparing status names, but it reads CxAlloy directly, not the Sheets. `sync_logic.py` is the signed-API helper copied out of the old `shared-dashboard/`. |
+
+**Removed in the 2026-09-29 cleanup:** `dashboard.html` (old standalone copy), `HOSTING.md` (old static-JSON hosting), `.gitmodules` (stale `shared-dashboard` submodule entry), and all of `shared-dashboard/` (old CxAlloy → SQLite → JSON pipeline, including the committed PHXA7 client JSON). They are still in git history before that commit.
 
 Not dashboard-related: `bridge*`, `equipment-tracker*`, `tamperseal*`, `seal-form*`, `settings.js`, `wrangler.jsonc`.
 
@@ -81,7 +76,6 @@ Priorities: 🔴 likely bug · 🟡 hardcoded vocabulary or inconsistent logic �
 | 🟡 | `renderEquipment()` | [1110](dashboard.js#L1110) | KPI statuses are hardcoded: `Delivered`, `Installation in Progress`, `Released` ([1128-1130](dashboard.js#L1128-L1130)). |
 | 🟡 | `loadProject()` | [502](dashboard.js#L502) | `synced_at` is selected but never used. "Data as of" reads `data.data_synced_at`, and if Apps Script doesn't set that field, the header falls back to the browser's clock ([608-611](dashboard.js#L608-L611)). |
 | 🟡 | `weekKey()` / `renderBurndown()` | [342](dashboard.js#L342), [713](dashboard.js#L713) | Monday is computed in local time, then keyed in UTC (`toISOString`). In US time zones some weeks can drop out of the burndown. |
-| ⚪ | `index.html` `window._supabase` | [index.html:4628](index.html#L4628) | Added by the old WIP commit. `dashboard.js` uses `window.launchpadSupabaseClient`, so this line is now unused and can go. |
 | ⚪ | refresh handler in `bindEvents()` | [380](dashboard.js#L380) | `REFRESH_ENDPOINT` is `null`, so "Refresh Data" only re-reads Supabase. New data only arrives with the next 15-minute sync. |
 
 ### 3.2 Nomenclature
@@ -149,7 +143,6 @@ If any array is missing, the dashboard fills it with `[]` and logs a console war
 | `ensureDashboardMounted()` | Lazy-loads Plotly `2.35.2`, then `import('./dashboard.js')`, then `new CriticalArcDashboard(...)` and `.mount()`. It retries on the next tab switch if loading fails. |
 | `toggleDarkMode()` | Calls `caDashboardInstance.setDarkMode(isDark)` |
 | [4621](index.html#L4621) | `window.launchpadSupabaseClient = _supabase` is the client `dashboard.js` uses |
-| [4628](index.html#L4628) | `window._supabase = _supabase` is unused (see §3.1) |
 | `openDashboardSettingsModal()` / `saveDashboardSettings()` | Admin title override, saved to `launchpad_projects.dashboard_display_name` |
 | `applyProjectConfig()` | Fills `LP_CONFIG` from `launchpad_projects` |
 
@@ -189,4 +182,4 @@ The workflow runs on cron `*/15 * * * *` and on manual dispatch, using the secre
 4. **Possibly duplicated data.** As of the 2026-09-25 sync, MNO1A, RSE1A and SLC1 all have `tests: []` and start with the same issue `CHK-45375-1`. Do their `google_script_url` values point to the same Apps Script or Sheet? CASB's JSON is formatted differently, so its row may come from a different script version.
 5. **RLS.** Is anon read of all projects intended for the three tables above?
 6. **Pace target date.** Should it move from localStorage to a column on `launchpad_projects`, so every viewer sees the same target?
-7. **Cleanup.** Remove `shared-dashboard/` (including the committed PHXA7 client JSON), `dashboard.html`, `HOSTING.md`, the `.gitmodules` entry, and the unused `window._supabase` line?
+7. **Client data in git history.** The PHXA7 JSON is gone from the tree but still in past commits. Purging it would need a history rewrite, which is the repo owner's call.

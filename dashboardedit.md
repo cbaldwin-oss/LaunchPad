@@ -9,7 +9,6 @@ Context for Claude sessions working on the LaunchPad dashboard in this repo. For
   - `bridge*`, `equipment-tracker*`, `tamperseal*`, `seal-form*`
   - `settings.js`, `wrangler.jsonc`
   - `sync/`, `.github/workflows/`
-  - `shared-dashboard/`, `.gitmodules`
 
 ## Start from the current code
 The local `main` can fall far behind GitHub; it was once 119 commits behind. Always work from `origin/main`, never from the local `main`:
@@ -37,7 +36,6 @@ Google Sheet (per project) → Apps Script (launchpad_projects.google_script_url
 - **`launchpad_checklist_snapshots`** holds weekly checklist counts for the Path to Completion history line. It is written only by the pg_cron job `weekly-checklist-snapshot` (Fridays 11 PM Central), which is defined in `dashboard-snapshots.sql`.
 - The Path to Completion target date is stored per browser in `localStorage['ca_pace_target_<projectKey>']`.
 - The dashboard's title can be overridden by an admin through Dashboard Settings. The override is stored in `launchpad_projects.dashboard_display_name` and read as `LP_CONFIG.dashboardDisplayName`.
-- Not used by production: `shared-dashboard/` (old CxAlloy → JSON pipeline), `dashboard.html`, `HOSTING.md`.
 
 ## Hard rules: do not break the live site
 1. **Never commit to, push to, merge into, or rebase `main`.** All work happens on the `dashboard-edits` branch (or another feature branch).
@@ -52,8 +50,7 @@ Google Sheet (per project) → Apps Script (launchpad_projects.google_script_url
    - `window.launchpadSupabaseClient`, the Supabase client. Don't create a second one.
    - `window.LP_CONFIG`, the selected project (`projectKey`, `clientName`, `dashboardDisplayName`, ...).
 7. Keep the data shape in step with the Apps Script output. `dashboard.js` expects the five arrays above and replaces any missing one with `[]`. If a new field is needed, it has to be added to `buildDashboardJson_` first.
-8. Don't "fix" the `.gitmodules` typo (`url = url = ...`) on this branch. Flag it to the coworker instead.
-9. Never put secrets in browser code. That covers `SUPABASE_SERVICE_KEY` (a GitHub Actions secret used only by the sync job) and any CxAlloy or Apps Script credentials. The browser only uses the public anon key.
+8. Never put secrets in browser code. That covers `SUPABASE_SERVICE_KEY` (a GitHub Actions secret used only by the sync job) and any CxAlloy or Apps Script credentials. The browser only uses the public anon key.
 
 ## Database: read-only testing only
 - `index.html` connects to the **live production Supabase** project. Local runs and Vercel preview deployments hit the **same real data**.
