@@ -751,6 +751,16 @@ export class CriticalArcDashboard {
     const root = this.q('ca-tab-checklists');
     if (!cl.length) { root.innerHTML = `<div class="ca-empty">No checklist data available.</div>`; return; }
 
+    // SAN's Apps Script stamps every checklist level 'L1' and carries the
+    // real CxAlloy checklist type in type_name. When level has only one value
+    // across the whole project it says nothing, so group by type_name instead
+    // (null -> 'Untyped'). Decided on the unfiltered data so a filter can't
+    // flip the grouping; projects with real levels (STY4's L2-FAT) keep them.
+    const all = this.STATE.data.checklists;
+    const levelIsFlat = this.uniq(all.map(c => c.level)).length <= 1 &&
+                        all.some(c => c.type_name);
+    if (levelIsFlat) cl = cl.map(c => ({ ...c, level: c.type_name || 'Untyped' }));
+
     // Levels come from the data. The old hardcoded ['L2','L3','L4','FAT']
     // matches NOTHING in either SAN project -- theirs read Pre-Functional,
     // Closeout, Documentation Review and Other -- so `active` came back empty
