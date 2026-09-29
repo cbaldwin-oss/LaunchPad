@@ -550,6 +550,7 @@ export class CriticalArcDashboard {
       }
 
       this.STATE.data = data;
+      this.STATE.snapshots = await this.loadSnapshots(supa, projectKey);
       this.STATE.eqPhase = new Map(this.STATE.data.equipment.map(e => [String(e.equipment_id), e.building_phase]));
       this.STATE.filters = { discipline: [], contractor: [], status: [], phase: [] };
       this.EQ_FILTER = { bldg: 'All', floor: 'All' };
@@ -564,6 +565,27 @@ export class CriticalArcDashboard {
       this.status('Error loading data: ' + e.message);
       console.error(e);
     }
+  }
+
+  // Friday snapshots of checklist counts (see dashboard-snapshots.sql). Paged
+  // because Supabase caps a request at 1,000 rows. A missing table or a
+  // failed read only costs the chart its history, so it never throws.
+  async loadSnapshots(supa, projectKey) {
+    const out = [], PAGE = 1000;
+    try {
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supa.from('launchpad_checklist_snapshots')
+          .select('snapshot_date, type_name, discipline, assigned_company, status, checklist_count')
+          .eq('project_key', projectKey).order('snapshot_date')
+          .range(from, from + PAGE - 1);
+        if (error) throw error;
+        out.push(...data);
+        if (data.length < PAGE) break;
+      }
+    } catch (e) {
+      console.warn('Checklist snapshots unavailable; Path to Completion will show no history.', e);
+    }
+    return out;
   }
 
   renderAll() {
@@ -775,6 +797,7 @@ export class CriticalArcDashboard {
     // scope); a project without that type falls back to every checklist.
     const preFunc = cl.filter(c => c.type_name === 'Pre-Functional');
     const paceRows = preFunc.length ? preFunc : cl;
+    const paceScope = preFunc.length ? 'Pre-Functional' : null;
     let html = this.section(`${preFunc.length ? 'Pre-Functional Checklists' : 'Checklists'} &mdash; Path to Completion`) +
       `<div class="ca-pace-controls"><label for="ca-pace-date">Est. completion date</label><input type="date" id="ca-pace-date" /></div>` +
       '<div class="ca-kpi-row" id="ca-pace-kpis"></div>' + this.chartBox('ca-pace-chart', 380) +
@@ -796,9 +819,9 @@ export class CriticalArcDashboard {
     try { dateInput.value = localStorage.getItem(this.paceKey()) || ''; } catch (e) {}
     dateInput.addEventListener('change', () => {
       try { localStorage.setItem(this.paceKey(), dateInput.value); } catch (e) {}
-      this.renderPace(paceRows);
+      this.renderPace(paceRows, paceScope);
     });
-    this.renderPace(paceRows);
+    this.renderPace(paceRows, paceScope);
 
     // Both maps were keyed on vocabularies that do not occur in SAN, so every
     // slice fell through to the border grey. The donut now colours by whether
@@ -898,46 +921,45 @@ export class CriticalArcDashboard {
 
   paceKey() { return 'ca_pace_target_' + ((window.LP_CONFIG && window.LP_CONFIG.projectKey) || ''); }
 
-  // Green: running total of Verified checklists, by week. That history needs
-  // a per-checklist `verified_date`, which the Apps Script does not send yet;
-  // until it does, the green series is just today's count.
+  // Green: the Friday snapshots (dashboard-snapshots.sql), each the verified
+  // total on that date -- the old PHXA7 chart's method. The step between two
+  // Fridays is what got verified that week. A hollow marker shows today's
+  // live count, so the current week is visible before its Friday.
   // Red: the pace required from today's count to reach 100% on the
   // estimated completion date, i.e. remaining / weeks left. It treats every
   // checklist as interchangeable -- sequencing is not modelled.
-  renderPace(rows) {
+  renderPace(rows, scopeType) {
     const DAY = 86400000, WEEK = 7 * DAY;
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const input = this.q('ca-pace-date');
     const target = input.value ? new Date(input.value + 'T00:00:00') : null;
 
     const total = rows.length;
-    const verified = rows.filter(c => this.isVerified(c));
-    const done = verified.length, remaining = total - done;
+    const done = rows.filter(c => this.isVerified(c)).length, remaining = total - done;
     const pct = total ? (done / total * 100).toFixed(1) : '0.0';
 
-    // Weekly cumulative from whatever verified_date values exist.
-    // Dates are bucketed in local time: a bare 'YYYY-MM-DD' would otherwise
-    // parse as UTC midnight and land on the previous day in US time zones.
-    const parseDay = (v) => {
-      if (!v) return null;
-      const d = /^\d{4}-\d{2}-\d{2}$/.test(v) ? new Date(v + 'T00:00:00') : new Date(v);
-      return isNaN(d) || d > today.getTime() + DAY ? null : d;
-    };
-    const monday = (d) => { const m = new Date(d); m.setHours(0, 0, 0, 0); m.setDate(m.getDate() - ((m.getDay() + 6) % 7)); return m; };
-    const dated = verified.map(c => parseDay(c.verified_date)).filter(Boolean);
-    const greenX = [], greenY = [];
+    // Snapshots are filtered like the live rows so the line agrees with the
+    // cards. The phase filter cannot apply: snapshots carry no asset.
+    const f = this.STATE.filters;
+    const perDate = new Map();
+    (this.STATE.snapshots || []).forEach(s => {
+      if (scopeType && s.type_name !== scopeType) return;
+      if (f.discipline.length && !f.discipline.includes(s.discipline)) return;
+      if (f.contractor.length && !f.contractor.includes(s.assigned_company)) return;
+      if (f.status.length && !f.status.includes(s.status)) return;
+      perDate.set(s.snapshot_date, (perDate.get(s.snapshot_date) || 0) +
+        (this.isVerified({ status: s.status }) ? s.checklist_count : 0));
+    });
+    const dates = [...perDate.keys()].sort();
+    const greenX = dates.map(d => new Date(d + 'T00:00:00')), greenY = dates.map(d => perDate.get(d));
+
+    // Current pace: average weekly gain across the last four snapshots.
     let pace = null;
-    if (dated.length) {
-      const perWeek = new Map();
-      dated.forEach(d => { const k = monday(d).getTime(); perWeek.set(k, (perWeek.get(k) || 0) + 1); });
-      let run = 0;
-      for (let w = new Date(Math.min(...perWeek.keys())); w <= today; w.setDate(w.getDate() + 7)) {
-        run += perWeek.get(w.getTime()) || 0;
-        greenX.push(new Date(w)); greenY.push(run);
-      }
-      pace = dated.filter(d => today - d <= 28 * DAY).length / 4;
+    if (dates.length >= 2) {
+      const back = Math.min(4, dates.length - 1);
+      const weeks = (greenX.at(-1) - greenX.at(-1 - back)) / WEEK;
+      if (weeks > 0) pace = (greenY.at(-1) - greenY.at(-1 - back)) / weeks;
     }
-    greenX.push(today); greenY.push(done);
 
     const weeksLeft = target ? (target - today) / WEEK : null;
     const redX = [], redY = [];
@@ -961,8 +983,8 @@ export class CriticalArcDashboard {
       requiredCls = pace === null ? 'kpi-yellow' : (pace >= required ? 'kpi-green' : 'kpi-red');
     }
     const paceVal = pace === null ? '—' : pace.toFixed(1);
-    const paceSub = pace === null ? 'Needs verified dates' :
-      (pace > 0 && remaining ? `Projected finish ${fmt(new Date(today.getTime() + remaining / pace * WEEK))}` : 'last 4 weeks');
+    const paceSub = pace === null ? 'Needs 2 Friday snapshots' :
+      (pace > 0 && remaining ? `Projected finish ${fmt(new Date(today.getTime() + remaining / pace * WEEK))}` : 'per week, last 4 weeks');
 
     this.q('ca-pace-kpis').innerHTML =
       this.kpi('Verified', done.toLocaleString(), 'kpi-green', `of ${total.toLocaleString()} (${pct}%)`) +
@@ -972,11 +994,16 @@ export class CriticalArcDashboard {
       this.kpi('Current Pace', paceVal, 'kpi-white', paceSub);
 
     const hover = (label) => `${label}<br>%{x|%b %d, %Y}: %{y:,}<extra></extra>`;
-    const traces = [{
-      type: 'scatter', mode: greenX.length > 1 ? 'lines' : 'markers', name: 'Verified to date',
-      x: greenX, y: greenY, line: { color: this.C.green, shape: 'hv', width: 2 }, marker: { color: this.C.green, size: 10 },
-      fill: greenX.length > 1 ? 'tozeroy' : 'none', fillcolor: 'rgba(57,181,74,0.25)', hovertemplate: hover('Verified'),
-    }];
+    const traces = [];
+    if (greenX.length) traces.push({
+      type: 'scatter', mode: 'lines+markers', name: 'Verified (Friday snapshot)',
+      x: greenX, y: greenY, line: { color: this.C.green, shape: 'hv', width: 2 }, marker: { color: this.C.green, size: 6 },
+      fill: 'tozeroy', fillcolor: 'rgba(57,181,74,0.25)', hovertemplate: hover('Verified'),
+    });
+    traces.push({
+      type: 'scatter', mode: 'markers', name: 'Verified today (live)', x: [today], y: [done],
+      marker: { color: 'rgba(0,0,0,0)', size: 11, line: { color: this.C.green, width: 2 } }, hovertemplate: hover('Verified today'),
+    });
     if (redX.length) traces.push({
       type: 'scatter', mode: 'lines', name: 'Required to meet completion date',
       x: redX, y: redY, line: { color: this.C.red, shape: 'hv', width: 2 }, hovertemplate: hover('Required'),
@@ -988,10 +1015,10 @@ export class CriticalArcDashboard {
       legend: { orientation: 'h', y: 1.08, x: 0 }, margin: { t: 40, b: 40, l: 10, r: 10 },
     });
 
-    const undated = done - dated.length;
-    this.q('ca-pace-caption').textContent = dated.length
-      ? (undated ? `${undated.toLocaleString()} verified checklist(s) have no verified date and appear only in today's total.` : '')
-      : 'History appears once the data includes the date each checklist was verified. Until then the green point shows today\'s total.';
+    const notes = [];
+    if (!dates.length) notes.push('Verified history is saved every Friday evening; the first point appears after the next snapshot.');
+    if (f.phase.length && dates.length) notes.push('The Building Phase filter applies to today\'s count but not to the Friday history.');
+    this.q('ca-pace-caption').textContent = notes.join(' ');
   }
 
   // ─── TAB 3: TESTS ───────────────────────────────────────────────────────────
